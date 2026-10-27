@@ -12,7 +12,7 @@ It uses D2RLoader's documented plugin services and patches no game code. It also
 
 ## Install
 
-Get Run Counter from the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer). Its zip holds the DLL and the default TOML at its root, ready to load in D2RMM.
+Get Run Counter from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/run-counter). Its zip holds the DLL and the default TOML at its root, ready to load in D2RMM.
 
 To install by hand, copy `d2rl-run-counter.dll` to `<game>/d2rloader/plugins/` for every mod, or to `<game>/mods/<mod>/d2rloader/plugins/` for one mod only. Remove the DLL to uninstall.
 

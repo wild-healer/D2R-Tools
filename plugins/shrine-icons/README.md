@@ -1,6 +1,6 @@
 # Shrine Icons
 
-Tells shrines apart before you walk up to them. Two parts, both needed, both on the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer):
+Tells shrines apart before you walk up to them. Two parts, both needed, both on the [D2RLoader Hub](https://d2rloader.net/hub/plugins/shrine-icons):
 
 - The D2RLoader plugin (DLL + `shrine-icons.toml`).
 - The "Shrine Icons" D2RMM mod with the art.

@@ -1,7 +1,7 @@
 # Quest Rewards
 
 **Two parts, both needed:** a D2RLoader plugin and
-a D2RMM mod, both on the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer). The mod adds the flags to the
+a D2RMM mod, both on the [D2RLoader Hub](https://d2rloader.net/hub/plugins/quest-rewards). The mod adds the flags to the
 character select screen; the plugin reads your saves and fills them.
 
 On the character select screen, a blue

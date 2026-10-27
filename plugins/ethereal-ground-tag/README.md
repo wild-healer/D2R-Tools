@@ -4,7 +4,7 @@ D2RLoader plugin that adds a tag such as `[Eth]` to the name of ethereal items l
 
 ## Install
 
-Get Ethereal Ground Tag from the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer). Its zip holds the DLL and the default TOML at its root, ready to load in D2RMM.
+Get Ethereal Ground Tag from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/ethereal-ground-tag). Its zip holds the DLL and the default TOML at its root, ready to load in D2RMM.
 
 By hand: copy `d2rl-ethereal-ground-tag.dll` to `<game>/d2rloader/plugins/` (works for every mod), or to `<game>/mods/<mod>/d2rloader/plugins/` for one mod only. Remove the DLL to uninstall.
 

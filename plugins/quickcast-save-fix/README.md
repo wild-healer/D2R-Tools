@@ -11,7 +11,7 @@ back with it on your mouse button. With this plugin the save gets the skill the
 game was going to put back. A save while you keep playing doesn't disturb the
 cast.
 
-- Install: get Quickcast Save Fix from the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer) and add it through D2RMM like the other
+- Install: get Quickcast Save Fix from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/quickcast-save-fix-1-0-0) and add it through D2RMM like the other
   plugins, or copy `d2rl-quickcast-save-fix.dll` to `<game>/d2rloader/plugins/`.
 - Config (`d2rloader/config/quickcast-save-fix.toml`): `enabled`, `log_fixes`
   (true: a line in the D2RLoader log each time a save gets your skills back).

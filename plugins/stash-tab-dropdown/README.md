@@ -10,7 +10,7 @@ No native hooks, and only D2RLoader services that exist in D2RLoader 1.3.1. Read
 
 ## Install
 
-1. Plugin: get Stash Tab Dropdown from the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer), put its zip in D2RMM's `d2rloader` folder and refresh plugins.
+1. Plugin: get Stash Tab Dropdown from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/stash-tab-dropdown), put its zip in D2RMM's `d2rloader` folder and refresh plugins.
 2. Apply mods and start the game.
 
 ## Use

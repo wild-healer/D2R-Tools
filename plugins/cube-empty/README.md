@@ -4,7 +4,7 @@ D2RLoader plugin: middle-click the Horadric Cube in your inventory and everythin
 inside moves to free spots in your inventory. Items that don't fit stay in the cube,
 and your character says "impossible" so you know something is left.
 
-- Install: get Cube Empty from the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer) and add it through D2RMM like the other plugins.
+- Install: get Cube Empty from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/cube-empty) and add it through D2RMM like the other plugins.
 - Config (`d2rloader/config/cube-empty.toml`): `button` (middle, back, forward),
   `require_hover` (false = any click in game empties the cube).
 - Log: `mods/D2RMM/d2rloader/logs/cube-empty.log` lists each emptying and every

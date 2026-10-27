@@ -6,7 +6,7 @@ It is one D2RLoader plugin (`d2rl-visual-clutter.dll`) with native hooks.
 
 ## Install
 
-1. Plugin: get Visual Clutter from the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer), put its zip in D2RMM's `d2rloader` folder and refresh plugins.
+1. Plugin: get Visual Clutter from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/visual-clutter), put its zip in D2RMM's `d2rloader` folder and refresh plugins.
 2. Apply mods and start the game.
 
 ## Config

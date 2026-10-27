@@ -12,7 +12,7 @@ The patch changes one conditional jump into a plain jump, so that branch is alwa
 
 ## Install
 
-Get Name Lock With Items Shown from the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer) and copy `name-lock-items-shown.json` to `<game>\d2rloader\patches\`. That folder is global, so D2RMM's mod installs don't wipe it. You can also put it in a mod's `mods\<mod>\d2rloader\patches\` folder.
+Get Name Lock With Items Shown from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/name-lock-with-items-shown) and copy `name-lock-items-shown.json` to `<game>\d2rloader\patches\`. That folder is global, so D2RMM's mod installs don't wipe it. You can also put it in a mod's `mods\<mod>\d2rloader\patches\` folder.
 
 On the next launch, `d2rloader\logs\d2rloader.log` lists it as `[PATCH] Name Lock With Items Shown — 1 change`. The `patches` console command shows its status too.
 

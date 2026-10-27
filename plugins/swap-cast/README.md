@@ -20,7 +20,7 @@ them back where the game thinks they are (that is the swap you see when it
 differs from what you hold). Leaving the game puts them back too, so the
 character is saved normally.
 
-- Install: get Swap Cast from the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer) and add it through D2RMM like the other plugins.
+- Install: get Swap Cast from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/swap-cast) and add it through D2RMM like the other plugins.
 - Modes are saved per character in `<game>\d2rloader\swap-cast\modes.txt`
   (outside the mod folder, so D2RMM reinstalls keep them).
 - Config (`d2rloader/config/swap-cast.toml`): `enabled`, `show_m_label` (false), `allow_cross_cast` (true: MS and SM modes),

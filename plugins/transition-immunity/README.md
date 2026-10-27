@@ -5,7 +5,7 @@ cave or dungeon entrance, stairs, joining a game), monsters can't hurt or curse
 you until you move, or for 60 seconds at most. The loading screen itself is
 covered too. While it lasts, the armor shrine's shield symbol floats over your head, above any skill effect.
 
-- Install: get Transition Immunity from the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer) and add it through D2RMM like the other plugins.
+- Install: get Transition Immunity from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/transition-immunity) and add it through D2RMM like the other plugins.
 - Config (`d2rloader/config/transition-immunity.toml`): `enabled`,
   `duration_seconds` (60), `indicator`, `indicator_overlay` (an overlay.txt
   Filename, `ShrineArmor` by default).

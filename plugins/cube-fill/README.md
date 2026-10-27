@@ -4,7 +4,7 @@ D2RLoader plugin that shows what is in the Horadric Cube on the cube in your inv
 
 ## Install
 
-Get Cube Fill from the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer) and load it in D2RMM, or copy `d2rl-cube-fill.dll` to `<game>/d2rloader/plugins/`. Settings are written on first launch to `d2rloader/config/cube-fill.toml`:
+Get Cube Fill from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/cube-fill) and load it in D2RMM, or copy `d2rl-cube-fill.dll` to `<game>/d2rloader/plugins/`. Settings are written on first launch to `d2rloader/config/cube-fill.toml`:
 
 | Key | Default | Meaning |
 | --- | --- | --- |

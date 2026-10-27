@@ -4,7 +4,7 @@ D2RLoader plugin: when you pick up, buy, gamble or get a quest reward and your
 inventory has no room for it, it goes into the Horadric Cube instead. The cube must be in your inventory (not the
 stash). If the cube is full too, your character says "no room" as usual.
 
-- Install: get Cube Overflow from the [D2RLoader Hub](https://d2rloader.net/hub/creators/thewildhealer) and add it through D2RMM like the other plugins.
+- Install: get Cube Overflow from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/cube-overflow) and add it through D2RMM like the other plugins.
 - Config (`d2rloader/config/cube-overflow.toml`): `enabled`, `cursor_pickups`
   (also send to the cube a pickup the game would put on the cursor because the
   inventory is full), `purchases_and_rewards` (store purchases, gambling and quest
