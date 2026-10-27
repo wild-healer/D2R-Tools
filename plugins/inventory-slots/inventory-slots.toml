@@ -1,0 +1,35 @@
+# Inventory Slots
+#
+# Adds four slots to the inventory panel, outside the inventory grid: the
+# Horadric Cube, the Tome of Town Portal, the Tome of Identify and keys. Each
+# slot only takes its own item. Items in the slots are still in your
+# inventory for the game: tomes work, keys open chests, the cube opens.
+#
+# D2RLoader copies this file to d2rloader/config/inventory-slots.toml on first
+# launch; edit that copy. Changes apply the next time the game starts.
+#
+# Before removing the plugin, take the items out of the slots: without it the
+# game has no room for them.
+
+[inventory-slots]
+enabled = true
+
+# Slot positions, in inventory panel units: (0, 0) is the panel's top-left
+# corner and one inventory cell is 98 units. Values past the panel's size or
+# below 0 place a slot outside the panel. With Expanded Inventory the panel is
+# 1382 x 1507; the stock one is 1162 x 1507.
+cube_x = 1400
+cube_y = 955
+tp_tome_x = 1400
+tp_tome_y = 1161
+id_tome_x = 1498
+id_tome_y = 1161
+keys_x = 1449
+keys_y = 1367
+
+# The game's own equipment slot background and border behind each slot (the
+# tomes use the weapon slot at half size).
+show_frames = true
+
+# The slot's item in gray while the slot is empty.
+show_art = true
