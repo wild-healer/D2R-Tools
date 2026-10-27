@@ -1,0 +1,15 @@
+# Orb Values
+#
+# The life and mana numbers are always shown, without the "Life:" and "Mana:"
+# prefixes, in the middle of each orb. Clicking an orb no longer hides them.
+#
+# D2RLoader copies this file to d2rloader/config/orb-values.toml on first
+# launch; edit that copy. Changes apply the next time the game starts.
+
+[orb-values]
+enabled = true
+
+# Moves both numbers from the middle of their orb, in HUD units (an orb is
+# about 350 units tall). Positive x goes right, positive y goes down.
+offset_x = 0
+offset_y = 0
