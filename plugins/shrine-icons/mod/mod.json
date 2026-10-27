@@ -1,0 +1,27 @@
+{
+  "$schema": "../config-schema.json",
+  "name": "Shrine Icons",
+  "description": "Art for the Shrine Icons plugin: floating symbols over the shrines that have none in the game (refill, health, mana, portal, gem, fire, monster, exploding, poison) and a minimap icon for each of them. Needs the Shrine Icons D2RLoader plugin. Replaces automap sheets default13 and default07 (cells that no data file uses), with a minimap icon for the booster shrines too.",
+  "author": "wild-healer",
+  "version": "1.0.0",
+  "config": [
+    {
+      "id": "size",
+      "type": "number",
+      "name": "Symbol size",
+      "description": "Size of the new symbols. 1 matches the booster shrine symbols.",
+      "defaultValue": 1,
+      "minValue": 0.25,
+      "maxValue": 4
+    },
+    {
+      "id": "height",
+      "type": "number",
+      "name": "Symbol height",
+      "description": "How high above the shrine the symbol floats. 14 is the height of the booster shrine symbols.",
+      "defaultValue": 14,
+      "minValue": 0,
+      "maxValue": 120
+    }
+  ]
+}

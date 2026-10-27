@@ -1,0 +1,6 @@
+{
+  "name": "Quest Rewards",
+  "description": "Companion of the Quest Rewards plugin: adds a flag to the character buttons on the character select screen. The plugin shows it on characters with Charsi's imbue, Larzuk's socket or Anya's personalization still waiting, with the details in its tooltip.",
+  "author": "wild-healer",
+  "version": "1.0.0"
+}

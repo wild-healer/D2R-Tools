@@ -1,0 +1,13 @@
+# Edge Clicks
+#
+# Clicking on the black void past the edge of the map, or past a wall, normally
+# does nothing. With this plugin your character walks as far toward the click as
+# the ground allows, sliding along the wall or going around it.
+# D2RLoader copies this file to d2rloader/config/edge-clicks.toml on first
+# launch; edit that copy. Changes apply the next time the game starts.
+
+[edge-clicks]
+enabled = true
+
+# Write each corrected click to the plugin log (d2rloader/logs/edge-clicks.log).
+log_moves = true

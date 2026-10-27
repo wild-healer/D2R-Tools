@@ -1,0 +1,36 @@
+# Swap Cast
+#
+# Pick which weapons cast each skill. In the skill picker (or over the left or
+# right skill button), hover a skill and press the "Swap Cast: change skill
+# weapons" key (Options > Controls, Extensions; F10 by default) to cycle its mode:
+#   M  = weapon set I (no label shown by default)
+#   MS = set I weapon + set II shield/off-hand
+#   SM = set II weapon + set I shield/off-hand
+#   S  = weapon set II
+# When you cast the skill, its weapons go in your hands for the cast and set I
+# comes back right after; a skill with no mode casts with set I.
+# Modes are saved per character in <game>\d2rloader\swap-cast\modes.txt.
+# D2RLoader copies this file to d2rloader/config/swap-cast.toml on first
+# launch; edit that copy. Changes apply the next time the game starts.
+
+[swap-cast]
+enabled = true
+
+# Also show "M" on skills that cast with set I.
+show_m_label = false
+
+# Allow the MS and SM modes (one hand from each set). false = the key only
+# switches between M and S, and skills saved as MS or SM cast with M or S, by
+# where their weapon comes from.
+allow_cross_cast = true
+
+# Milliseconds without casting before set I comes back. A short wait keeps the
+# items in place while you hold the cast button.
+restore_delay_ms = 150
+
+# Keep the skills your set II items give (Call to Arms...) in the skill picker
+# and on the skill buttons while you hold set I. They default to S.
+show_swap_skills = true
+
+# Log every swap in mods/D2RMM/d2rloader/logs/swap-cast.log.
+log_swaps = false

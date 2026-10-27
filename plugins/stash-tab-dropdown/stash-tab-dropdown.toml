@@ -1,0 +1,85 @@
+# Stash Tab Dropdown
+#
+# Adds a button by the shared stash page arrows that opens a list of pages and
+# jumps straight to the one you pick. D2RLoader copies this file to d2rloader/config/stash-tab-dropdown.toml
+# on first launch; edit that copy. Layout settings apply after a game restart.
+
+[stash-tab-dropdown]
+enabled = true
+
+# Read the stash's current page from the game (Steam 3.3.93787 and Battle.net
+# 3.3.93847), so pages turned with keybinds are followed. Elsewhere, or when
+# false, the plugin counts the arrow clicks.
+read_game_page = true
+
+# Switch straight to the picked page, the way Stash Search does, instead of
+# clicking the page arrows (needs read_game_page and D2RLoader 1.3.1; otherwise,
+# or when false, the arrows are clicked).
+instant_jump = true
+
+# The list button, shown over the stash's shared tab where the plugin can read
+# the stash from the game (see read_game_page). Position in stash panel units
+# (the right page arrow ends at 1564,110).
+stash_button = true
+stash_button_x = 1568
+stash_button_y = 110
+stash_button_scale = 0.67
+# Show the list button on the personal and materials tabs too. Picking a page
+# there switches to the shared tab first (needs instant_jump to work).
+stash_button_all_tabs = false
+
+# The number of shared stash pages is not set here: it is RotW's 5 plus
+# D2RLoader's add_shared_tabs (the Options slider), read each time the list
+# opens.
+
+# Use the page names from Shared Stash Page Text (shared-stash-page-text.toml,
+# same folder) when that plugin is installed. Names set below win over them.
+use_page_text_names = true
+
+# Keep the page list open after picking a page, to hop between a few pages
+# (Escape, switching tabs or the list button still close it).
+keep_open = false
+# Escape closes the page list. When false, Escape closes the stash instead (the
+# list closes with it, and remember_open still opens it again next time).
+escape_closes_list = true
+# With keep_open: if the list was left open, open it again whenever the shared
+# tab shows, also after restarting the game.
+remember_open = false
+
+# ---- Page list look ----
+# One button per page showing its number in the page's colour; hover it for
+# the page's name (pages without a name have no tooltip). Positions are in the
+# stash panel's own layout units (the page arrows sit at 1173,97 and are 420
+# wide; the grid starts at 58,177). The page you are on gets a gold highlight.
+layout_version = 9
+columns = 10
+# Rows of pages per screen. With more pages than columns x rows, the list gets
+# < and > buttons on each side of the first row to go to the previous and next
+# screen, and opens on the screen with the page you are on.
+rows = 12
+list_x = 20
+list_y = 196
+# Scales the whole page list (squares, spacing and numbers) from its top-left
+# corner, e.g. 0.75 for a smaller list.
+list_scale = 1.0
+column_width = 132
+row_height = 104
+# A game sprite to use instead of the plugin's own image (e.g.
+# "PANEL\\Loot_Filter\\LootFilter_Large_List_Btn_Checkbox" for squares), and
+# which of its frames are normal, hovered and pressed.
+button_sprite = ""
+normal_frame = 0
+hovered_frame = 1
+pressed_frame = 2
+
+# Page arrows sent per frame while walking to the chosen page. 0 = automatic:
+# one per frame for short jumps, more for long ones so any jump takes about 40
+# frames. Set 1 if long jumps land on the wrong page. Jumps to the first or
+# last page send a full page count of steps, which also fixes a wrong count.
+steps_per_frame = 0
+
+# ---- Page names ----
+# Same format as Shared Stash Page Text. Colour is optional ("#RRGGBB").
+# [pages.1]
+# text = "Runes"
+# color = "#FFA500"

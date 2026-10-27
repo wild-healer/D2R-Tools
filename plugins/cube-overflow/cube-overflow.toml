@@ -1,0 +1,18 @@
+# Cube Overflow
+#
+# When something you get has no room in your inventory, it goes into the
+# Horadric Cube instead (the cube must be in your inventory). If the cube is
+# full too, the game does what it always does.
+# D2RLoader copies this file to d2rloader/config/cube-overflow.toml on first
+# launch; edit that copy. Changes apply the next time the game starts.
+
+[cube-overflow]
+enabled = true
+
+# Also catch pickups the game would put on the mouse cursor because the
+# inventory is full.
+cursor_pickups = true
+
+# Store purchases, gambling and quest rewards also go to the cube when the
+# inventory is full.
+purchases_and_rewards = true

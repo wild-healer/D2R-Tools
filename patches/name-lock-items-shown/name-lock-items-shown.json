@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "Name Lock With Items Shown",
+  "description": "Keeps the hold-click target lock on monsters while item labels are shown (Show Items toggled on or held). D2R 3.3.93787.",
+  "patches": [
+    {
+      "description": "Skip the 'items shown and target is not an item' branch that clears the locked unit in the client action handler (0xFE3B0).",
+      "op": "bytes",
+      "rva": "0xFE4FB",
+      "expected": "85 C0 74 16 48 8B 54 24 68 48 85 D2 74 0C 83 3A 04 74 07 8B CB E8 AB 30 FF FF",
+      "bytes": "85 C0 EB 16 48 8B 54 24 68 48 85 D2 74 0C 83 3A 04 74 07 8B CB E8 AB 30 FF FF"
+    }
+  ]
+}

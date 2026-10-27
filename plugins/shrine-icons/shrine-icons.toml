@@ -1,0 +1,40 @@
+# Shrine Icons
+#
+# Shows a floating symbol over the shrines the game leaves bare, the way booster
+# shrines (armor, combat, resists, skill, mana regen, stamina, experience)
+# already show one, and gives every shrine type its own minimap icon. The art
+# comes from the "Shrine Icons" D2RMM mod, which must be installed too.
+# D2RLoader copies this file to d2rloader/config/shrine-icons.toml on first
+# launch; edit that copy. Changes apply the next time the game starts.
+
+[shrine-icons]
+enabled = true
+
+# Floating symbol over the shrine.
+symbols = true
+
+# Minimap / automap icon of the shrine's type (an item picture with a gold
+# outline) instead of the shared gold ring.
+# Shrines already on the map keep their old icon until the area is revealed
+# again (next game).
+minimap = true
+
+# Minimap icons for the booster shrines too (armor, combat, the four resists,
+# skill, mana recharge, stamina, experience), which already float a symbol.
+boosters = true
+
+# Also give the shrines with a new symbol the faint shimmer booster shrines
+# have.
+shimmer = true
+
+# Which shrines get a symbol and a minimap icon (minimap picture in brackets;
+# fire, exploding and poison all float a burning skull).
+refill    = true   # Refilling Shrine (rejuvenation potion)
+health    = true   # Health Shrine (healing potion; minimap only, the pool shows it)
+mana      = true   # Mana Shrine (mana potion; minimap only, the pool shows it)
+portal    = true   # Portal Shrine (town portal scroll)
+gem       = true   # Gem Shrine (amethyst)
+fire      = true   # Fire Shrine (torch)
+monster   = true   # Monster Shrine (skull)
+exploding = true   # Exploding Shrine (exploding potion)
+poison    = true   # Poison Shrine (choking gas potion)

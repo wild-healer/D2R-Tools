@@ -1,0 +1,23 @@
+# Quest Rewards
+#
+# On the character select screen, a blue flag on a character's button means a
+# quest reward is still waiting; its tooltip says which, per difficulty:
+#   Charsi  - Tools of the Trade: imbue an item
+#   Larzuk  - Siege on Harrogath: socket an item
+#   Anya    - Betrayal of Harrogath: personalize an item
+# Needs the "Quest Rewards" D2RMM mod (it adds the flags to the screen).
+# Read from your offline save files (.d2s), never written.
+# D2RLoader copies this file to d2rloader/config/quest-rewards.toml on first
+# launch; edit that copy. Changes apply the next time the game starts.
+
+[quest-rewards]
+enabled = true
+
+# Which quests count (true = flagged when its reward is waiting).
+charsi = true   # Tools of the Trade: imbue
+larzuk = true   # Siege on Harrogath: socket
+anya = true     # Betrayal of Harrogath: personalize
+
+# true: writes the game's UI messages on the menus to
+# d2rloader/logs/quest-rewards-ui.log (for troubleshooting).
+log_ui = false

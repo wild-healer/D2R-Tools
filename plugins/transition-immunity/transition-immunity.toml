@@ -1,0 +1,21 @@
+# Transition Immunity
+#
+# After anything with a loading screen (portal, waypoint, entrance, stairs,
+# joining a game), monsters can't hurt or curse you until you move or the time
+# below runs out. A shield symbol floats over your head while it lasts.
+# D2RLoader copies this file to d2rloader/config/transition-immunity.toml on
+# first launch; edit that copy. Changes apply the next time the game starts.
+
+[transition-immunity]
+enabled = true
+
+# Seconds the protection lasts at most if you don't move.
+duration_seconds = 60
+
+# Show the indicator over your character while protected.
+indicator = true
+
+# The overlay.txt Filename drawn as the indicator. ShrineArmor = the armor
+# shrine's shield, floating over your head where no skill effect covers it.
+# Others: ShrineSkill, ShrineCombat, ManaShieldBall (the Energy Shield orb).
+indicator_overlay = "ShrineArmor"

@@ -1,0 +1,61 @@
+# Visual Clutter
+#
+# Hides visual effects without changing what they do. D2RLoader copies this
+# file to d2rloader/config/visual-clutter.toml on first launch; edit that copy.
+# Changes apply the next time the game starts.
+
+[visual-clutter]
+enabled = true
+
+# ---- aura effects ----
+#
+# Only the look of an aura is hidden (the glow, the rings at the feet, the
+# small icons over affected units); the aura still works.
+#
+# Each "on_..." line is one kind of unit the effect is drawn on, and lists who
+# cast the auras to hide there. Both sides use the same five kinds:
+#   "self"      you
+#   "merc"      your mercenary
+#   "minions"   your summons (golems, spirits, Valkyrie, ...)
+#   "allies"    other players, their mercenaries and their summons
+#   "monsters"  monsters (aura-enchanted bosses, monster auras)
+# An empty list [] shows every aura on that kind of unit.
+#
+# Who cast an aura is read from the game you play in, so it needs a single
+# player game or a game you host. Joined to someone else's game, every aura
+# counts as cast by the unit it is on.
+on_self     = ["merc", "allies"]
+on_merc     = ["self", "allies"]
+on_minions  = ["self", "merc", "allies"]
+on_allies   = []
+on_monsters = ["self", "merc", "allies"]
+
+# ---- shout effects ----
+#
+# The same, for the barbarian's Shout, Battle Orders and Battle Command, which
+# the game draws like auras. These lines do not affect the aura lines above.
+# By default every shout is shown.
+shouts_on_self     = []
+shouts_on_merc     = []
+shouts_on_minions  = []
+shouts_on_allies   = []
+shouts_on_monsters = []
+
+# ---- other effects ----
+#
+# Lists of kinds as above. Only the look is removed; the damage still happens.
+#
+# Hellfire Torch's Firestorm (also the druid skill Firestorm), by who cast it.
+hide_firestorm = []
+# Thunder Storm's lightning bolts and their flash, by who cast it.
+hide_thunder_storm = []
+# Martial arts charge orbs (Tiger Strike, Fists of Fire, ... kept up by
+# Mosaic), by who carries them.
+hide_charges = []
+# The red screen tint inside terror zones. The zone itself, its sound and its
+# name on screen are unchanged.
+hide_terror_zone_tint = false
+
+# Game versions (major.minor) the plugin is allowed to hook. Addresses are
+# checked against the game's code at load either way.
+versions = ["3.3"]

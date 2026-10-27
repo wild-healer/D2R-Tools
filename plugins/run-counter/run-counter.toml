@@ -1,0 +1,85 @@
+# Run Counter
+#
+# Counts runs (one game = one run), times them and logs the items found in
+# each. Runs and items are kept in runs.csv and drops.csv, so the stats
+# survive game restarts. D2RLoader copies this file to d2rloader/config/run-counter.toml on
+# first launch; edit that copy.
+
+[run-counter]
+enabled = true
+
+# Record games and items. Turn off to pause recording (also in the stats
+# panel's Settings tab).
+tracking_active = true
+
+# ---- What counts as a drop ----
+# An item counts when it first shows up in your inventory, cursor or belt
+# during a game (not in the Cube or a stash: those were made or already owned).
+
+# What is tracked: true, false, or "no_overlay" to count the items without
+# listing them in the game panel's drops list.
+# Qualities tracked. Crafted items are made in the Cube, never dropped, so
+# they never count.
+uniques = true
+sets = true
+rares = true
+magic = true
+# Normal, superior and low quality items (bases).
+normal = true
+
+# Gems.
+gems = true
+# Essences, uber keys and the Ancients' statues.
+essences = true
+# Worldstone shards.
+shards = true
+
+# Potions, scrolls, tomes, keys and arrows.
+consumables = false
+
+# Lowest rune tracked, by name ("El" ... "Zod"), or "none" for no runes.
+min_rune = "El"
+
+# Lowest rune shown in the game panel's drops list (and announced).
+announce_rune = "Ist"
+
+# Item codes that always count, from weapons/armor/misc.txt.
+# Example: ["pk1", "pk2", "pk3", "tes", "ceh", "bet", "fed"] for keys and essences.
+codes = []
+
+# ---- On-screen panel ----
+# "game" draws the panel with the game's own UI, "overlay" with D2RLoader's
+# overlay (which shows nothing on some setups), "off" hides it.
+panel = "game"
+
+# Translucent background behind the game panel and its drops list.
+panel_background = false
+
+# Color the drop lines by quality (unique gold, set green, runes orange).
+colors = true
+
+# Position of the panel's top-left corner, as a fraction of the screen (0.0 to 1.0).
+overlay_x = 0.01
+overlay_y = 0.30
+
+# Line spacing (game panel) or text size (overlay), relative to the default.
+text_scale = 1.0
+
+# How many of this game's latest drops are listed under the panel (0 to 20).
+last_drops = 3
+
+# How often your items are checked for new drops, in milliseconds.
+scan_interval_ms = 500
+
+# ---- Stats panels ----
+# Length of the bar charts in the stats tabs, in characters (10 to 120).
+bar_length = 40
+
+# Write the game's UI messages to run-counter-ui.log (helps find a way to
+# detect terror zones).
+log_ui_messages = false
+
+# Folder of runs.csv and drops.csv. Empty: <game>\d2rloader\run-counter,
+# outside the mod folder that D2RMM empties when it installs mods.
+# Use forward slashes, e.g. "D:/D2R stats".
+data_folder = ""

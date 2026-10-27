@@ -1,0 +1,15 @@
+# Quickcast Save Fix
+#
+# With Quick Cast on, a skill hotkey puts its skill on your left or right
+# click for the cast, and the game only puts your own skill back on your next
+# click. Saving before that (Save and Exit in the middle of a cast, or right
+# after one) wrote the hotkey skill as your left/right skill. This plugin puts
+# your own skills in the save instead.
+# D2RLoader copies this file to d2rloader/config/quickcast-save-fix.toml on
+# first launch; edit that copy. Changes apply the next time the game starts.
+
+[quickcast-save-fix]
+enabled = true
+
+# Write a line in the D2RLoader log each time a save gets your skills back.
+log_fixes = true

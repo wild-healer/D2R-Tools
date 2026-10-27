@@ -1,0 +1,36 @@
+# Cube Fill
+#
+# Shows what is in the Horadric Cube right on the cube in your inventory: the
+# items' own pictures in their cube spots, a mini map, or a "7/12" badge.
+# D2RLoader copies this file to d2rloader/config/cube-fill.toml on first
+# launch; edit that copy. Changes apply the next time the game starts.
+
+[cube-fill]
+enabled = true
+
+# "badge": the "7/12" text. "grid": a mini 3x4 map of the cube over its icon,
+# taken cells filled and each item's cells joined, so you see the layout.
+# "both": the map with the badge in its corner.
+# "sprites": the real item pictures, drawn small over the cube icon in their
+# cube spots (hooks the game's inventory drawing, Steam 3.3.93787 or 3.3.94995;
+# on another build the badge shows instead).
+# "sprites-badge": the pictures plus the badge.
+display = "sprites"
+
+# Darkness of the box behind the pictures in "sprites": 25, 50 or 75 (percent).
+picture_background = 50
+
+# Badge text. "used": cells used out of 12, like "7/12". "free": free cells left, like "5".
+show = "used"
+
+# Show the badge when the cube is empty ("0/12").
+show_empty = false
+
+# Show the badge when the cube is full (in red).
+show_full = true
+
+# Corner of the cube icon: "bottom-right", "bottom-left", "top-right" or "top-left".
+corner = "bottom-right"
+
+# Text size, 12 to 60.
+font_size = 30

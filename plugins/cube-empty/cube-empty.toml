@@ -1,0 +1,16 @@
+# Cube Empty
+#
+# Middle-click the Horadric Cube in your inventory: everything inside moves to
+# free spots in your inventory. Items that don't fit stay in the cube.
+# D2RLoader copies this file to d2rloader/config/cube-empty.toml on first
+# launch; edit that copy. Changes apply the next time the game starts.
+
+[cube-empty]
+enabled = true
+
+# Mouse button: "middle", "back" (side button 1) or "forward" (side button 2).
+button = "middle"
+
+# true: the click only counts with the mouse over the cube.
+# false: a click anywhere in game empties the cube.
+require_hover = true
