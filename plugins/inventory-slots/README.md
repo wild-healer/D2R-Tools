@@ -16,7 +16,7 @@ that change the inventory size keep working.
   Town Portal / Identify scroll on its tome.
 - Nothing else ever lands in the slots.
 
-- Install: add `inventory-slots-1.0.0.zip` through D2RMM like the other plugins.
+- Install: get Inventory Slots from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/invetory-slots) and add it through D2RMM like the other plugins.
 - Config (`d2rloader/config/inventory-slots.toml`): `enabled`, the position of
   each slot (`cube_x`/`cube_y`, `tp_tome_x`/`tp_tome_y`, `id_tome_x`/`id_tome_y`,
   `keys_x`/`keys_y`, in inventory panel units where one cell is 98), `show_frames`

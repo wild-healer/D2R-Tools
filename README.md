@@ -19,6 +19,7 @@ Every plugin, mod and patch is downloaded from its page on the D2RLoader Hub, li
 | [Cube Overflow](https://d2rloader.net/hub/plugins/cube-overflow) | When your inventory is full, pickups, purchases, gambling and quest rewards go into the cube instead. |
 | [Edge Clicks](https://d2rloader.net/hub/plugins/edge-clicks) | Clicking the void past the map edge or a wall walks you as far toward the click as the ground allows. |
 | [Ethereal Ground Tag](https://d2rloader.net/hub/plugins/ethereal-ground-tag) | Adds a tag such as `[Eth]` to the names of ethereal items on the ground. |
+| [Inventory Slots](https://d2rloader.net/hub/plugins/invetory-slots) | Dedicated slots for the Horadric Cube, the two tomes and keys next to the inventory, outside its grid. |
 | [Quest Rewards](https://d2rloader.net/hub/plugins/quest-rewards) | Flags characters on the character select screen that still have a quest reward waiting (imbue, socket, personalize...). Needs its D2RMM mod too. |
 | [Quickcast Save Fix](https://d2rloader.net/hub/plugins/quickcast-save-fix-1-0-0) | Saving during or right after a quick cast keeps your own left and right skills. |
 | [Run Counter](https://d2rloader.net/hub/plugins/run-counter) | Counts and times your runs, logs what you find in each, with an in-game panel and a stats window. |
