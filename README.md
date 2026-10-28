@@ -28,6 +28,7 @@ Every plugin, mod and patch is downloaded from its page on the D2RLoader Hub, li
 | [Stash Tab Dropdown](https://d2rloader.net/hub/plugins/stash-tab-dropdown) | A button next to the shared stash arrows opens a grid of all pages, to jump straight to one. |
 | [Swap Cast](https://d2rloader.net/hub/plugins/swap-cast) | Choose per skill which weapon set casts it (set I, set II, or one hand from each). |
 | [Transition Immunity](https://d2rloader.net/hub/plugins/transition-immunity) | After a loading screen, monsters can't hurt you until you move, for 60 seconds at most. |
+| [Un-Anya-lyse](https://d2rloader.net/hub/plugins/un-anya-lyse) | Anya gets a "Remove Personalization" line: put a personalized item in her window and it loses its name. Free, and her quest reward stays. |
 | [Visual Clutter](https://d2rloader.net/hub/plugins/visual-clutter) | Hides aura and shout visuals, Firestorm, Thunder Storm, charge orbs and the terror zone tint, without changing what they do. |
 
 ## D2RMM mods
