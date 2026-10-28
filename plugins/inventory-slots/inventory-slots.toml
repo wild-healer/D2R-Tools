@@ -14,10 +14,10 @@
 [inventory-slots]
 enabled = true
 
-# Slot positions, in inventory panel units: (0, 0) is the panel's top-left
-# corner and one inventory cell is 98 units. Values past the panel's size or
-# below 0 place a slot outside the panel. With Expanded Inventory the panel is
-# 1382 x 1507; the stock one is 1162 x 1507.
+# Slot positions on screen, in inventory panel units (one inventory cell is
+# 98 units), measured from the top-left corner of Expanded Inventory's panel
+# (1382 x 1507). They don't depend on the inventory mod you use: whatever size
+# and place a mod gives the inventory panel, the slots stay at the same spot.
 cube_x = 1400
 cube_y = 955
 tp_tome_x = 1400

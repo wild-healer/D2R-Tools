@@ -1,3 +1,35 @@
+# Inventory Slots 1.0.1: release texts
+
+## Patch notes
+
+```
+**Inventory Slots 1.0.1**
+
+**Fixed**
+
+* The slots now show with any inventory mod or with none, not only with Expanded Inventory.
+* Slot positions are now on screen: the slots stay at the same spot whatever size and place a mod gives the inventory panel.
+```
+
+## GitHub release
+
+- Tag: `inventory-slots-v1.0.1`
+- Title: `Inventory Slots 1.0.1`
+- Asset: `inventory-slots-1.0.1.zip`
+
+Body:
+
+```markdown
+**Inventory Slots** 1.0.1: the slots show with any inventory mod.
+
+### Fixed
+- The slots were off screen on inventory panels other than Expanded Inventory's (the stock panel, 10x8 mods). They now show with any inventory mod or with none.
+- Slot positions are on screen: the slots stay at the same spot whatever size and place a mod gives the inventory panel. Existing settings keep their place.
+
+### Install
+Load `inventory-slots-1.0.1.zip` in D2RMM in place of 1.0.0. Settings are kept.
+```
+
 # Inventory Slots 1.0.0: release texts
 
 ## Patch notes

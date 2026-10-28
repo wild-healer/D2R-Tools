@@ -19,8 +19,10 @@ that change the inventory size keep working.
 - Install: get Inventory Slots from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/invetory-slots) and add it through D2RMM like the other plugins.
 - Config (`d2rloader/config/inventory-slots.toml`): `enabled`, the position of
   each slot (`cube_x`/`cube_y`, `tp_tome_x`/`tp_tome_y`, `id_tome_x`/`id_tome_y`,
-  `keys_x`/`keys_y`, in inventory panel units where one cell is 98), `show_frames`
-  (the slot backgrounds), `show_art` (the gray item in empty slots).
+  `keys_x`/`keys_y`), `show_frames` (the slot backgrounds), `show_art` (the gray
+  item in empty slots). Positions are on screen, in inventory panel units (one
+  cell is 98) from the top-left corner of Expanded Inventory's panel: the slots
+  stay at the same spot whatever size and place an inventory mod gives the panel.
 - Take the items out of the slots before removing the plugin: without it, the
   game has no room for them.
 - Works in single player and in games you host, not in games you join.
@@ -46,6 +48,13 @@ How it works (Steam 3.3.93787 / 94995 RVAs):
   the mouse (vt18, vt19) answer the slot cell. The slot widgets copy the stock
   grid's unit and its right-click use flags (+0x5C0, read by the right-click use
   D2R+0x161F20 through vt33).
+- Placement: the slots' layout is a child of the inventory panel, and D2RLoader
+  1.3.1 can't move widgets, so the layout starts at Expanded Inventory's panel
+  rect (-1614, -651) minus the active panel's rect. That rect is read when the
+  data tables load (the archives aren't open at plugin load) from the mod's
+  `playerinventory{expansion,original}layouthd.json` root rect (a `$Name` is
+  looked up in `_profilehd.json`), through D2RCore's archive open (export
+  ordinal 160), and the layout is registered again if it changed.
 - Behind each slot: the paperdoll slot sprite of its size (the tomes use the 2x4
   weapon slot at half size) and the item's art in gray, hidden while the slot is
   filled.

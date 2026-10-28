@@ -56,7 +56,7 @@ namespace {
 namespace Widgets = D2RL::Widgets;
 
 constexpr const char* PluginId      = "inventory-slots";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -335,8 +335,12 @@ void GrowGrids() noexcept {
 	Log(false, "inventory grids: %d class rows grown by %d rows, %d already done, %d skipped", grown, AddedRows, kept, skipped);
 }
 
+bool ReadPanelOffset() noexcept;
+bool RegisterLayout() noexcept;
+
 void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
 	GrowGrids();
+	if (ReadPanelOffset() && !RegisterLayout()) Log(true, "slot placement: the moved slot layout could not be registered; slots are invisible");
 }
 
 // ---- free-spot searches (server and client threads) ----
@@ -512,16 +516,19 @@ Widgets::WidgetHandle                      Root {};
 std::array<Widgets::WidgetHandle, Slots.size()> ArtHandles {};
 bool                                       ArtFailLogged {};
 
-bool FindArt() {
-	if (!Root && WidgetApi->findPanel(Context, RootName, &Root) != Widgets::Result::Success) {
+bool FindRoot() {
+	if (Root) return true;
+	for (const char* name : StockPanels) {
+		Widgets::WidgetHandle stock {};
+		if (WidgetApi->findPanel(Context, name, &stock) == Widgets::Result::Success && WidgetApi->findWidget(Context, stock, RootName, &Root) == Widgets::Result::Success) return true;
 		Root = {};
-		for (const char* panel : StockPanels) {
-			Widgets::WidgetHandle stock {};
-			if (WidgetApi->findPanel(Context, panel, &stock) == Widgets::Result::Success && WidgetApi->findWidget(Context, stock, RootName, &Root) == Widgets::Result::Success) break;
-			Root = {};
-		}
-		if (!Root) return false;
 	}
+	if (WidgetApi->findPanel(Context, RootName, &Root) == Widgets::Result::Success) return true;
+	Root = {};
+	return false;
+}
+
+bool FindArt() {
 	for (std::size_t slot = 0; slot < Slots.size(); ++slot)
 		if (!ArtHandles[slot] && WidgetApi->findWidget(Context, Root, ("Art" + std::to_string(slot)).c_str(), &ArtHandles[slot]) != Widgets::Result::Success) {
 			ArtHandles[slot] = {};
@@ -530,25 +537,28 @@ bool FindArt() {
 	return true;
 }
 
-void __cdecl ApplyArt(const D2RL::PluginContext*, void*) noexcept {
-	bool ok = FindArt();
-	for (std::size_t slot = 0; ok && slot < Slots.size(); ++slot) {
-		const int filled = Filled[slot].load();
-		ok               = WidgetApi->setWidgetVisible(Context, ArtHandles[slot], filled == 0) == Widgets::Result::Success;
-		Applied[slot]    = filled;
+void __cdecl ApplySlots(const D2RL::PluginContext*, void*) noexcept {
+	bool ok = FindRoot();
+	if (Config.showArt) {
+		ok = ok && FindArt();
+		for (std::size_t slot = 0; ok && slot < Slots.size(); ++slot) {
+			const int filled = Filled[slot].load();
+			ok               = WidgetApi->setWidgetVisible(Context, ArtHandles[slot], filled == 0) == Widgets::Result::Success;
+			Applied[slot]    = filled;
+		}
+		if (!ok && !ArtFailLogged) Log(true, "slot art: the widgets were not found, empty slots keep their art when filled");
+		ArtFailLogged = ArtFailLogged || !ok;
 	}
-	if (!ok && !ArtFailLogged) Log(true, "slot art: the widgets were not found, empty slots keep their art when filled");
-	ArtFailLogged = ArtFailLogged || !ok;
 	LastApply.store(ok ? GetTickCount64() : GetTickCount64() + 4500); // a failure retries in 5 s
 	ApplyQueued.store(false);
 }
 
 void NoteFilled(int slot, bool filled) noexcept {
-	if (!Config.showArt || !Threads || !WidgetApi) return;
+	if (!Threads || !WidgetApi) return;
 	Filled[slot].store(filled);
 	const std::uint64_t now = GetTickCount64();
-	if ((Applied[slot] == static_cast<int>(filled) && now < LastApply.load() + 500) || ApplyQueued.exchange(true)) return;
-	if (Threads->runOnUiThread(Context, ApplyArt, nullptr) != D2RL::Threads::Result::Success) ApplyQueued.store(false);
+	if (((!Config.showArt || Applied[slot] == static_cast<int>(filled)) && now < LastApply.load() + 500) || ApplyQueued.exchange(true)) return;
+	if (Threads->runOnUiThread(Context, ApplySlots, nullptr) != D2RL::Threads::Result::Success) ApplyQueued.store(false);
 }
 
 void HookDraw(void* widget, void* a, void* b, void* c) noexcept {
@@ -674,6 +684,186 @@ void RestoreVtable() noexcept {
 	VirtualProtect(Vtable, (VtCellRect + 1) * sizeof(void*), protect, &protect);
 }
 
+// ---- slot placement ----
+//
+// The positions are on screen: inventory panel units from the top-left corner
+// of Expanded Inventory's panel (RefRect, right-panel units from the panel
+// anchor). The slots are a child of the inventory panel, and D2RLoader 1.3.1
+// can't move widgets, so the layout itself starts at RefRect - the panel's
+// rect, read from the active mod's layout files (stock 1162 x 1507 at
+// -1394,-651; a 10x8 mod 1162 x 1737 at -1394,-851). The files are read when
+// the data tables load (not at plugin load: the game's archives aren't open
+// yet, and reading them then crashes the game), through D2RCore's archive open
+// (export ordinal 160), so the mod's copy wins.
+
+constexpr int RefRect[4] { -1614, -651, 1382, 1507 };
+
+namespace FileApi {
+constexpr std::uint16_t OpenOrdinal = 160;
+constexpr std::uint64_t Size = 0xA00050, Read = 0xA00EC0, Close = 0x9FFE50;
+constexpr std::uint8_t  SizeBytes[] { 0x48, 0x8B, 0x01, 0x48, 0xFF, 0x60, 0x30 };                    // mov rax, [rcx]; jmp [rax+0x30]
+constexpr std::uint8_t  ReadBytes[] { 0x4C, 0x89, 0x44, 0x24, 0x18, 0x48, 0x89, 0x54, 0x24, 0x10 }; // mov [rsp+18h], r8; mov [rsp+10h], rdx
+constexpr std::uint8_t  CloseBytes[] { 0xE9 };                                                     // jmp
+} // namespace FileApi
+
+using FileOpenFn  = void* (*)(const char* path) noexcept;
+using FileSizeFn  = std::uint64_t (*)(void* file) noexcept;
+using FileReadFn  = bool (*)(void* file, void* buffer, std::uint64_t size, std::uint64_t* read) noexcept;
+using FileCloseFn = void (*)(void* file) noexcept;
+
+// The whole file, or empty when it is not there or cannot be read.
+std::string GameFile(const char* path) {
+	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
+	static const FileOpenFn open = [base] {
+		const auto same = [&](std::uint64_t rva, const std::uint8_t* bytes, std::size_t count) { return std::memcmp(reinterpret_cast<const void*>(base + rva), bytes, count) == 0; };
+		HMODULE    core = GetModuleHandleW(L"D2RCore.dll");
+		if (!base || !core || !same(FileApi::Size, FileApi::SizeBytes, sizeof(FileApi::SizeBytes)) || !same(FileApi::Read, FileApi::ReadBytes, sizeof(FileApi::ReadBytes)) ||
+		    !same(FileApi::Close, FileApi::CloseBytes, sizeof(FileApi::CloseBytes)))
+			return FileOpenFn {};
+		return reinterpret_cast<FileOpenFn>(reinterpret_cast<void*>(GetProcAddress(core, MAKEINTRESOURCEA(FileApi::OpenOrdinal))));
+	}();
+	void* const file = open ? open(path) : nullptr;
+	if (!file) return {};
+	std::string         text;
+	const std::uint64_t size = reinterpret_cast<FileSizeFn>(base + FileApi::Size)(file);
+	if (size > 0 && size < (16u << 20)) {
+		text.resize(size);
+		std::uint64_t read = 0;
+		if (!reinterpret_cast<FileReadFn>(base + FileApi::Read)(file, text.data(), size, &read) || read != size) text.clear();
+	}
+	reinterpret_cast<FileCloseFn>(base + FileApi::Close)(file);
+	return text;
+}
+
+// Just enough JSON (with the comments D2R's files may have) to find a value
+// by its key path among the root's members.
+struct Json {
+	std::string_view text;
+	std::size_t      at {};
+
+	void Space() {
+		while (at < text.size()) {
+			const char c = text[at];
+			if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ',' || c == ':' || static_cast<unsigned char>(c) >= 0x80) ++at;
+			else if (c == '/' && at + 1 < text.size() && text[at + 1] == '/') at = text.find('\n', at) == std::string_view::npos ? text.size() : text.find('\n', at);
+			else if (c == '/' && at + 1 < text.size() && text[at + 1] == '*') at = text.find("*/", at + 2) == std::string_view::npos ? text.size() : text.find("*/", at + 2) + 2;
+			else break;
+		}
+	}
+	std::string String() {
+		std::string out;
+		for (++at; at < text.size() && text[at] != '"'; ++at) {
+			if (text[at] == '\\' && at + 1 < text.size()) ++at;
+			out += text[at];
+		}
+		++at;
+		return out;
+	}
+	void Skip() {
+		Space();
+		if (at >= text.size()) return;
+		const char c = text[at];
+		if (c == '"') {
+			String();
+		} else if (c == '{' || c == '[') {
+			const char close = c == '{' ? '}' : ']';
+			++at;
+			for (Space(); at < text.size() && text[at] != close; Space()) Skip();
+			++at;
+		} else {
+			while (at < text.size() && std::strchr(" \t\r\n,:}]/", text[at]) == nullptr) ++at;
+		}
+	}
+	// Moves to the value of key inside the object starting here.
+	bool Enter(std::string_view key) {
+		Space();
+		if (at >= text.size() || text[at] != '{') return false;
+		for (++at, Space(); at < text.size() && text[at] != '}'; Space()) {
+			if (text[at] != '"') return false;
+			const std::string name = String();
+			Space();
+			if (name == key) return true;
+			Skip();
+		}
+		return false;
+	}
+	double Number() {
+		Space();
+		std::size_t used = 0;
+		const std::string rest(text.substr(at, 32));
+		double      value = 0;
+		try {
+			value = std::stod(rest, &used);
+		} catch (...) {
+		}
+		at += used;
+		return value;
+	}
+};
+
+// A rect object {x, y, width, height} here; false if it is anything else.
+bool ReadRect(Json json, int (&rect)[4]) {
+	json.Space();
+	if (json.at >= json.text.size() || json.text[json.at] != '{') return false;
+	bool any = false;
+	for (int i = 0; i < 4; ++i) {
+		static constexpr const char* Keys[] { "x", "y", "width", "height" };
+		Json member = json;
+		if (member.Enter(Keys[i])) {
+			rect[i] = static_cast<int>(member.Number());
+			any     = true;
+		}
+	}
+	return any;
+}
+
+// The panel's rect from its layout's root fields; a "$Name" rect is looked up
+// in _profilehd.json. 0 not found, 1 found.
+int PanelRect(const std::string& layout, const std::string& profile, int (&rect)[4], std::string& from) {
+	Json json { layout };
+	if (!json.Enter("fields") || !json.Enter("rect")) return 0;
+	json.Space();
+	if (json.at < json.text.size() && json.text[json.at] == '"') {
+		const std::string name = json.String();
+		from                   = name;
+		if (name.size() < 2 || name[0] != '$') return 0;
+		Json values { profile };
+		return values.Enter(name.substr(1)) && ReadRect(values, rect) ? 1 : 0;
+	}
+	from = "a literal rect";
+	return ReadRect(json, rect) ? 1 : 0;
+}
+
+int  Offset[2] {};      // where the slots' layout starts, in panel units
+bool OffsetKnown {};
+
+// True when the offset changed.
+bool ReadPanelOffset() noexcept {
+	const std::string profile = GameFile("data/global/ui/layouts/_profilehd.json");
+	int               rect[4] { 0, 0, 0, 0 };
+	std::string       from;
+	bool              found = false;
+	// The expansion layout is based on the original one and may override its rect.
+	for (const char* path : { "data/global/ui/layouts/playerinventoryexpansionlayouthd.json", "data/global/ui/layouts/playerinventoryoriginallayouthd.json" }) {
+		const std::string layout = GameFile(path);
+		if (!layout.empty() && PanelRect(layout, profile, rect, from)) {
+			found = true;
+			break;
+		}
+	}
+	if (!found) {
+		if (!OffsetKnown) Log(false, "slot placement: the inventory panel's rect was not found yet%s", profile.empty() ? " (the game files can't be read yet)" : "");
+		return false;
+	}
+	const int dx = RefRect[0] - rect[0], dy = RefRect[1] - rect[1];
+	const bool changed = !OffsetKnown || dx != Offset[0] || dy != Offset[1];
+	if (changed) Log(false, "slot placement: inventory panel %d x %d at %d,%d (%s), slots offset by %d,%d", rect[2], rect[3], rect[0], rect[1], from.c_str(), dx, dy);
+	Offset[0]   = dx;
+	Offset[1]   = dy;
+	OffsetKnown = true;
+	return changed;
+}
+
 // ---- layout ----
 
 std::string BuildLayout() {
@@ -702,7 +892,8 @@ std::string BuildLayout() {
 		              slot, x, y, def.width, def.height, Marker + static_cast<float>(slot), Marker);
 		add(grid);
 	}
-	return std::string(R"({"type": "Widget", "name": ")") + RootName + R"(", "fields": {"rect": {"x": 0, "y": 0}}, "children": [)" + children + "]}";
+	return std::string(R"({"type": "Widget", "name": ")") + RootName + R"(", "fields": {"rect": {"x": )" + std::to_string(Offset[0]) + R"(, "y": )" + std::to_string(Offset[1]) +
+	       R"(}}, "children": [)" + children + "]}";
 }
 
 // ---- config ----
@@ -832,6 +1023,30 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderGetPluginInfo() noexcept -> const D2RL::PluginI
 	return &Info;
 }
 
+// ---- layout registration ----
+
+namespace {
+
+const D2RL::ResourceService*        Resources {};
+D2RL::Resources::RegistrationHandle LayoutHandle {};
+
+// (Re)registers the slots' layout with the current offset.
+bool RegisterLayout() noexcept {
+	const std::string layout = BuildLayout();
+	const std::string path   = "data/global/ui/layouts/inventory-slots/Slotshd.json";
+	if (LayoutHandle) Resources->unregisterResource(Context, LayoutHandle);
+	LayoutHandle = {};
+	const D2RL::Resources::ResourceRegistration resource {
+		.structSize = D2RL::Resources::ResourceRegistrationSize,
+		.path       = path.c_str(),
+		.bytes      = layout.data(),
+		.byteCount  = layout.size(),
+	};
+	return Resources->registerResource(Context, &resource, &LayoutHandle) == D2RL::Resources::Result::Success;
+}
+
+} // namespace
+
 D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) noexcept -> bool {
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
@@ -881,15 +1096,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	// Tables already loaded (plugin loaded late): grow them now.
 	GrowGrids();
 
-	const std::string layout = BuildLayout();
-	const std::string path   = "data/global/ui/layouts/inventory-slots/Slotshd.json";
-	const D2RL::Resources::ResourceRegistration resource {
-		.structSize = D2RL::Resources::ResourceRegistrationSize,
-		.path       = path.c_str(),
-		.bytes      = layout.data(),
-		.byteCount  = layout.size(),
-	};
-	D2RL::Resources::RegistrationHandle resourceHandle {};
+	Resources = resources;
 	const D2RL::Panels::ChildLayoutRegistration child {
 		.structSize = D2RL::Panels::ChildLayoutRegistrationSize,
 		.flags      = D2RL::Panels::ChildLayoutFlags::KeyboardMouseOnly,
@@ -897,7 +1104,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		.localId    = "Slots",
 	};
 	D2RL::Panels::ChildLayoutHandle childHandle {};
-	if (resources->registerResource(context, &resource, &resourceHandle) != D2RL::Resources::Result::Success) {
+	if (!RegisterLayout()) {
 		Log(true, "Inventory Slots %s: the slot layout could not be registered; slots are invisible", PluginVersion);
 	} else if (const auto result = panels->registerChildLayout(context, &child, &childHandle); result != D2RL::Panels::Result::Success) {
 		Log(true, "Inventory Slots %s: the inventory panel refused the slots (result %u); slots are invisible", PluginVersion, static_cast<unsigned>(result));
