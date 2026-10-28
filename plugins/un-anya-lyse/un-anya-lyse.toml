@@ -1,0 +1,11 @@
+# Un-Anya-lyse
+#
+# Anya gets a "Remove Personalization" line in her dialog. Pick it, put a
+# personalized item in the window and confirm: the item loses its name.
+# Free, any number of times, no quest needed. Single player and games you host
+# only (the line doesn't show in games you join).
+# D2RLoader copies this file to d2rloader/config/un-anya-lyse.toml on first
+# launch; edit that copy. Changes apply the next time the game starts.
+
+[un-anya-lyse]
+enabled = true
