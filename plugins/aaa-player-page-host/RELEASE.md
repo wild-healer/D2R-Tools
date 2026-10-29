@@ -45,7 +45,7 @@ Body:
 Load `aaa-player-page-host-1.0.0.zip` in D2RMM, or copy `aaa-player-page-host.dll` to `<game>/d2rloader/plugins/`. Keep the DLL name: it must sort before the plugins that use the page.
 
 ### For plugin developers
-See CLIENT_GUIDE.md and `src/page_host_api.h` in the plugin's folder of the repository.
+To use the page from your own plugin, read the [client guide](https://github.com/wild-healer/D2R-Tools/blob/main/plugins/aaa-player-page-host/CLIENT_GUIDE.md). The API is the single header [`page_host_api.h`](https://github.com/wild-healer/D2R-Tools/blob/main/plugins/aaa-player-page-host/src/page_host_api.h).
 ```
 
 ## D2RLoader Hub
