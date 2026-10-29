@@ -1,0 +1,26 @@
+# Perfect Frame
+#
+# Draws a golden frame around the tooltip of a perfect item: every stat that
+# can roll is at its best, by the game's own tables (modded tables included).
+#
+# D2RLoader copies this file to d2rloader/config/perfect-frame.toml on first
+# launch; edit that copy. Changes apply the next time the game starts.
+
+[perfect-frame]
+enabled = true
+
+# Which items get the frame.
+uniques = true
+sets = true
+runewords = true
+
+# Frame colour, as red, green, blue (0 to 255).
+color = "226,182,76"
+
+# A red frame on items whose every roll is at its worst.
+antiperfect = true
+antiperfect_color = "180,20,20"
+
+# Frame thickness in screen pixels. 0 picks it from the window height
+# (3 pixels at 1080p, 6 at 4K).
+thickness = 0
