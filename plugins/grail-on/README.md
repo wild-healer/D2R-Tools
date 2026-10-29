@@ -2,7 +2,7 @@
 
 D2RLoader plugin that puts your holy grail inside the game: every unique, set item and runeword has its own tile on a grail page you open from the inventory, and the items you find go straight into it.
 
-- **Your grail, in game**: open it with the grail button on the left edge of the inventory. Menus along the top and a category column on the left sort uniques by item type, set items by set (class sets with their class), and runewords by socket count. Uniques that can be ethereal get a second tile for their ethereal copy.
+- **Your grail, in game**: open it with the grail button on the left edge of the inventory. Menus along the top and a category column on the left sort uniques by item type, set items by set (class sets with their class), and runewords by item type (gloves, belts and boots too when a mod gives them runewords), then socket count. Uniques that can be ethereal get a second tile for their ethereal copy.
 - **Drop it in**: drop a grail item on the page, or Ctrl+click it, and it goes straight to its own tile, wherever that tile is. Only one copy of each item may be stored: a twin of a stored copy stays out. Take a copy out by clicking it, or Ctrl+click it to send it to your inventory.
 - **Runeword bases**: a plain or superior base with the right socket count can wait in an empty runeword tile it can be made into.
 - **Stats**: an overview and one page per kind (uniques, ethereal uniques, set items, runewords) show what you have found, stored and have perfect, with ring charts and per category bars.
@@ -44,8 +44,14 @@ All of them are on the grail's settings page (the gear icon) and take effect at 
 | `perfect_frames` | `true` | Perfect copies get a gold frame around their tile. |
 | `frame_animations` | `true` | The perfect frame shimmers. Off: it stays still. |
 | `scroll_animations` | `true` | The mouse wheel scrolls smoothly. Off: a row at a time. |
+| `compact` | `false` | The window sits against the screen's left edge, with its menus on its right. |
+| `swap_columns` | `false` | The category icons go in the left column and the menu icons in the right one. |
 | `loot_uniques`, `loot_ethereal`, `loot_sets` | `all` | `all`, `found` or `perfect`: ground items hidden once the grail has them, or has them perfect. |
 | `loot_ambiguous` | `false` | Unidentified ground items are hidden by what they really are. Off: only when every unique or set item of their base would be hidden. |
+
+## Keybind
+
+"Open/close the grail" in the game's Controls menu, under Grail On!. Unbound by default.
 
 ## Console
 

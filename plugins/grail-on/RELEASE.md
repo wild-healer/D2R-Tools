@@ -1,3 +1,47 @@
+# Grail On! 1.0.3: patch notes
+
+```
+**Grail On! 1.0.3**
+
+**New**
+
+* swap_columns setting: the category icons go in the left column and the menu icons in the right one.
+
+**Fixed**
+
+* With compact on, the menu icons are in the left column and the category icons in the right one, as with compact off.
+```
+
+# Grail On! 1.0.2: patch notes
+
+```
+**Grail On! 1.0.2**
+
+**New**
+
+* Runewords for gloves, belts and boots, from mods that allow them, get their own categories in the Runewords menu. Runewords on any other item type go to an Other category.
+* compact setting: the grail window sits against the screen's left edge, with its menus on its right.
+
+**Fixed**
+
+* Runewords are still found when a mod changes the game's first runewords or their runes.
+* Runewords a mod turns off are no longer listed.
+```
+
+# Grail On! 1.0.1: patch notes
+
+```
+**Grail On! 1.0.1**
+
+**New**
+
+* Open/close the grail keybind in the game's Controls menu, unbound by default.
+
+**Fixed**
+
+* The grail window no longer moves off screen with mods that move the game's left panel anchor.
+```
+
 # Grail On! 1.0.0: release texts
 
 ## Patch notes

@@ -86,6 +86,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -99,7 +100,7 @@
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -136,6 +137,9 @@ constexpr const char* StringsPath   = "data/local/lng/strings/d2rloader/grail-on
 constexpr int PageSize = 16, Cell = 98, PanelWidth = 1687, PanelHeight = 1889, GridLeft = 58, ViewTop = 32, ViewRows = 18;
 constexpr double GlowOpacity = 0.7; // the glow drawn at 70%
 constexpr int GlowFrames = 8, GlowPad = 18; // perfect glow frames; how far it reaches beyond the slot
+// Every panel hangs from the vanilla $LeftPanelAnchor's place (x 0, y 39.7% of
+// the screen) written out, not from $LeftPanelAnchor: mods that move that
+// anchor and redefine their own panel rects would carry the grail off screen.
 constexpr int GridTop = ViewTop + Cell * 3 / 2, PanelY = -856;
 constexpr int ButtonSize = 56; // check boxes
 // The menus: square icons along the band above the grid, the category name at
@@ -268,6 +272,8 @@ struct Settings {
 	bool perfectFrames = true;     // perfect copies' glow around their tile
 	bool trace = false; // grailon trace 1: each view step and the cursor item logged
 	bool hold = false; // the cursor item kept aside while views change (grailon hold 1), the old way
+	bool compact {}; // the window against the screen's left edge, its menus on its right
+	bool swapColumns {}; // the categories in the outer icon column, the menus in the inner one
 	bool frameAnimations = true, scrollAnimations = true; int frameMs = 30; // perfect glows and wheel steps animated (settings page); each scroll frame's time (grailon frame <n>)
 	int  version {}; // changes with every setting, so built views are not reused
 } Config;
@@ -296,7 +302,22 @@ constexpr Toggle Toggles[] {
 	  "Unidentified items are hidden by what they really are, even when other items share their base. Off: an unidentified item is only hidden when every unique or set item of its base would be.",
 	  LootGroup },
 	{ "frame_animations", &Settings::frameAnimations, "Frame animations", "The perfect glow moves. Off: it stays still.", DisplayGroup },
+	{ "compact", &Settings::compact, "Compact", "The window sits against the screen's left edge, with its menus on its right. Off: the menus are on its left, where the game's panels start.", DisplayGroup },
+	{ "swap_columns", &Settings::swapColumns, "Swap columns", "The categories go in the left icon column and the menus in the right one. Off: the menus on the left.", DisplayGroup },
 };
+
+// Where the window (the stash frame) starts from the panels' anchor, and where
+// its two icon columns go: in the MenuRoom left of it, or right of it when
+// compact, the same way round on both sides (menus left, categories right,
+// unless swapped). The panel always starts MenuRoom left of the window
+// (ShiftLayout); compact, it reaches MenuRoom past it on the right as well.
+int WindowX() { return Config.compact ? 0 : 236; }
+int PanelSpan() { return PanelWidth + MenuRoom + (Config.compact ? MenuRoom : 0); }
+int ColumnRoom() { return Config.compact ? PanelWidth : -MenuRoom; } // the columns' room, from the window's corner
+// The left column's slot is MenuSize wide from MenuLeft; the right one ends
+// at CatLeft + CatSize (12 from the window). A narrower button is centred in the left slot.
+int MenuX() { return ColumnRoom() + (Config.swapColumns ? CatLeft + CatSize - MenuSize : MenuLeft) + MenuRoom; }
+int CatX() { return ColumnRoom() + (Config.swapColumns ? MenuLeft + (MenuSize - CatSize) / 2 : CatLeft) + MenuRoom; }
 constexpr const char* CompareNames[] { "None", "Shift", "Always" };
 int OpenDrop = -1; // the settings drop-down whose list is open (goals 0-3, loot 4-6, compare 7)
 constexpr const char* GoalNames[] { "None", "Find", "Perfect" };
@@ -479,13 +500,15 @@ struct RunewordRule {
 	const char* type;
 	const char* icon;
 };
+// Gloves, belts and boots only have runewords in mods that give them sockets
+// and runewords; their categories show only then, like every category.
 constexpr RunewordRule RunewordRules[] {
-	{ "Melee Weapons", "mele", "swor" }, { "Missile Weapons", "miss", "bow" }, { "Body Armor", "tors", "tors" }, { "Helms", "helm", "helm" }, { "Shields", "", "shld" },
-	{ "Weapons", "", "weapons" },
+	{ "Melee Weapons", "mele", "swor" }, { "Missile Weapons", "miss", "bow" }, { "Body Armor", "tors", "tors" }, { "Helms", "helm", "helm" }, { "Shields", "shld", "shld" },
+	{ "Gloves", "glov", "glov" },        { "Belts", "belt", "belt" },          { "Boots", "boot", "boot" },        { "Other", "", "other" },          { "Weapons", "", "weapons" },
 };
-constexpr int OtherRunewordRule = 4; // shields, and any type not above
-constexpr int AnyWeaponRule     = 5; // runewords for melee and missile weapons alike: one tile (same stats on any base)
-constexpr int RunewordRuleOrder[] { AnyWeaponRule, 0, 1, 2, 3, 4 }; // their categories' order
+constexpr int OtherRunewordRule = 8; // any type not above
+constexpr int AnyWeaponRule     = 9; // runewords for melee and missile weapons alike: one tile (same stats on any base)
+constexpr int RunewordRuleOrder[] { AnyWeaponRule, 0, 1, 2, 3, 4, 5, 6, 7, 8 }; // their categories' order
 // Whether a runeword tile of kind `rule` takes a base of kind `which` (RunewordRuleOf).
 bool RuleTakes(int rule, int which) { return rule == which || (rule == AnyWeaponRule && (which == 0 || which == 1)); }
 // A base's runeword kind: the first rule its types (with their parents) have;
@@ -679,6 +702,8 @@ struct SetTables {
 // defense 50%, damage to mana 10; Beast: axe or scepter, Ber Tir Um), not assumed.
 struct RuneLayout {
 	int name = -1, types = -1, runes = -1, props = -1;
+	int complete = -1; // the "complete" byte, when the rows show which one it is
+	bool byShape {}; // found from the rows' shape: the first rows were modded
 	static constexpr int TypeCount = 6, ExcludedCount = 3, RuneCount = 6, PropCount = 7;
 	bool found() const { return name >= 0 && types >= 0 && runes >= 0 && props >= 0; }
 };
@@ -706,6 +731,91 @@ RuneLayout FindRuneLayout(TableRows runes, std::uint32_t size, const std::map<st
 		    && Field<std::int32_t>(first, o + 40) == 50 && Field<std::int32_t>(first, o + 44) == 50 && Field<std::int32_t>(first, o + 56) == 10 && Field<std::int32_t>(first, o + 60) == 10)
 			layout.props = o;
 	return layout;
+}
+
+// The same from the rows' shape alone, for a mod that changed the first rows
+// (another recipe, other runes, other stats): the field that holds runes in
+// most rows, the item types before it, the stats after it, the "Runeword"
+// keys. `rune` tells an Items row that is a rune; `typeCount`, `propCount`
+// the ItemTypes and Properties rows.
+RuneLayout FindRuneLayoutByShape(TableRows runes, std::uint32_t size, const std::function<bool(int)>& rune, std::uint32_t typeCount, std::uint32_t propCount) {
+	RuneLayout layout;
+	if (runes.count < 4 || size < 64) return layout;
+	const auto row  = [&](std::uint32_t k) { return runes.rows + static_cast<std::size_t>(k) * size; };
+	const auto best = [](int& at, int score, int& top, int o) { if (score > top) top = score, at = o; };
+	// The keys: "Runeword..." in most rows.
+	for (int o = 0, top = 0; o + 9 <= static_cast<int>(size); ++o) {
+		int score = 0;
+		for (std::uint32_t k = 0; k < runes.count; ++k) score += !std::memcmp(row(k) + o, "Runeword", 8);
+		if (score * 2 > static_cast<int>(runes.count)) best(layout.name, score, top, o);
+		if (layout.name >= 0) break; // the first such field
+	}
+	// The runes: six i32 Items rows, runes first, then none (0 or -1).
+	int runeRows = 0;
+	for (int o = 0; o + 4 * RuneLayout::RuneCount <= static_cast<int>(size); o += 4) {
+		int score = 0;
+		for (std::uint32_t k = 0; k < runes.count; ++k) {
+			int  count = 0;
+			bool ok    = true, ended = false;
+			for (int r = 0; r < RuneLayout::RuneCount && ok; ++r) {
+				const auto value = Field<std::int32_t>(row(k), o + 4 * r);
+				if (value <= 0) ended = true;
+				else if (ended || !rune(value)) ok = false;
+				else ++count;
+			}
+			score += ok && count > 0;
+		}
+		best(layout.runes, score, runeRows, o);
+	}
+	if (runeRows * 4 < static_cast<int>(runes.count)) return RuneLayout {};
+	// The item types: nine u16 (six allowed, three excluded) before the runes,
+	// every one an ItemTypes row or 0, the first one given wherever runes are.
+	for (int o = layout.runes - 2 * (RuneLayout::TypeCount + RuneLayout::ExcludedCount), top = 0; o >= 0 && o + 2 * (RuneLayout::TypeCount + RuneLayout::ExcludedCount) <= layout.runes + 4; o -= 2) {
+		int score = 0;
+		for (std::uint32_t k = 0; k < runes.count; ++k) {
+			if (Field<std::int32_t>(row(k), layout.runes) <= 0) continue;
+			bool ok = Field<std::uint16_t>(row(k), o) != 0;
+			for (int t = 0; t < RuneLayout::TypeCount + RuneLayout::ExcludedCount && ok; ++t) ok = Field<std::uint16_t>(row(k), o + 2 * t) < typeCount;
+			score += ok;
+		}
+		best(layout.types, score, top, o);
+	}
+	// The stats: seven {code, parameter, min, max} of i32 after the runes.
+	for (int o = layout.runes + 4 * RuneLayout::RuneCount, top = 0; o + 16 * RuneLayout::PropCount <= static_cast<int>(size) && o <= layout.runes + 4 * RuneLayout::RuneCount + 64; o += 4) {
+		int score = 0;
+		for (std::uint32_t k = 0; k < runes.count; ++k) {
+			if (Field<std::int32_t>(row(k), layout.runes) <= 0) continue;
+			const auto code = Field<std::int32_t>(row(k), o);
+			bool       ok   = code >= 0 && static_cast<std::uint32_t>(code) < propCount;
+			for (int p = 0; p < RuneLayout::PropCount && ok; ++p) {
+				const auto c = Field<std::int32_t>(row(k), o + 16 * p);
+				ok = c >= -1 && (c < 0 || static_cast<std::uint32_t>(c) < propCount);
+			}
+			score += ok;
+		}
+		best(layout.props, score, top, o);
+	}
+	if (layout.found()) layout.byShape = true;
+	return layout;
+}
+
+// The "complete" byte: before the item types, 0 or 1 in every row, 1 in
+// nearly every row with types and runes (a mod turns a runeword off with 0).
+// The closest such byte to the types; -1 when no byte fits.
+int FindRuneComplete(TableRows runes, std::uint32_t size, const RuneLayout& layout) {
+	if (!layout.found()) return -1;
+	const auto row = [&](std::uint32_t k) { return runes.rows + static_cast<std::size_t>(k) * size; };
+	for (int o = layout.types - 1; o > layout.name + 8; --o) {
+		bool binary = true;
+		int  given = 0, on = 0;
+		for (std::uint32_t k = 0; k < runes.count && binary; ++k) {
+			const auto value = row(k)[o];
+			binary = value <= 1;
+			if (Field<std::uint16_t>(row(k), layout.types) && Field<std::int32_t>(row(k), layout.runes) > 0) ++given, on += value;
+		}
+		if (binary && given > 0 && on * 10 >= given * 9) return o;
+	}
+	return -1;
 }
 
 // Where Sets keeps UIClass, the class the game lists a set under: the byte that
@@ -980,6 +1090,15 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 			if (!itemCodes[i].empty()) itemRow.try_emplace(itemCodes[i], static_cast<int>(i));
 		}
 		RuneFields = FindRuneLayout(setTables.runes, setTables.runeSize, typeRow, itemRow);
+		if (!RuneFields.found()) {
+			const auto isRune = [&](int item) {
+				if (item <= 0 || static_cast<std::uint32_t>(item) >= items.count) return false;
+				const auto base = Bases.find(itemCodes[item]);
+				return base != Bases.end() && std::find(base->second.types.begin(), base->second.types.end(), "rune") != base->second.types.end();
+			};
+			RuneFields = FindRuneLayoutByShape(setTables.runes, setTables.runeSize, isRune, types.count, setTables.props.count);
+		}
+		RuneFields.complete = FindRuneComplete(setTables.runes, setTables.runeSize, RuneFields);
 		for (std::uint32_t k = 0; RuneFields.found() && k < setTables.runes.count; ++k) {
 			const unsigned char* row = setTables.runes.rows + static_cast<std::size_t>(k) * setTables.runeSize;
 			UniqueEntry          entry;
@@ -1002,6 +1121,7 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 				runeNames += (runeNames.empty() ? "" : " ") + name;
 			}
 			if (entry.types.empty() || entry.runes.empty()) continue; // not in the game
+			if (RuneFields.complete >= 0 && !row[RuneFields.complete]) continue; // turned off
 			const char* key = reinterpret_cast<const char*>(row + RuneFields.name);
 			const std::string index(key, strnlen(key, 64));
 			if (const auto known = setTables.keyNames.find(index); known != setTables.keyNames.end()) entry.name = known->second;
@@ -1562,6 +1682,9 @@ void __cdecl BuildFromGame(const D2RL::PluginContext* context, void*) noexcept {
 		BuildLists(rows(0), rows(1), rows(2), rows(3), GameText, art, extra);
 	}
 	if (!SetClassFound) Say(false, "grailon: the game's set classes were not found; sets go by their class items and class skills");
+	if (RuneFields.found())
+		Say(false, "grailon: Runes table: %u rows of %u bytes, name %d, types %d, runes %d, stats %d, complete %d%s", extra.runes.count, extra.runeSize, RuneFields.name, RuneFields.types,
+		    RuneFields.runes, RuneFields.props, RuneFields.complete, RuneFields.byShape ? " (found from the rows' shape: its first rows are modded)" : "");
 	if (!RuneFields.found())
 		Problem(false, "grailon: the Runes table (%u rows of %u bytes) is laid out differently (name %d, types %d, runes %d, props %d); no runewords", extra.runes.count, extra.runeSize, RuneFields.name,
 		    RuneFields.types, RuneFields.runes, RuneFields.props);
@@ -2614,8 +2737,8 @@ std::string ScrollLayout(bool down) {
 		layout += frame + children.substr(1) + "]}";
 	}
 	char open[512] {};
-	std::snprintf(open, sizeof(open), R"({"type": "Panel", "name": "grail-on/Scroll", "fields": {"priority": 12, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": "$LeftPanelAnchor"}, "children": [)",
-	              236 - MenuRoom, PanelY, PanelWidth + MenuRoom, PanelHeight);
+	std::snprintf(open, sizeof(open), R"({"type": "Panel", "name": "grail-on/Scroll", "fields": {"priority": 12, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": {"x": 0.0, "y": 0.397}}, "children": [)",
+	              WindowX() - MenuRoom, PanelY, PanelSpan(), PanelHeight);
 	return open + ShiftLayout(layout).substr(2) + "]}";
 }
 
@@ -2638,12 +2761,12 @@ std::string TextBlock(const std::string& name, int x, int y, int width, int heig
 std::string ErrorLayout() {
 	char open[1024] {};
 	std::snprintf(open, sizeof(open),
-	              R"({"type": "Panel", "name": "grail-on/Error", "fields": {"priority": 10, "rect": {"x": 236, "y": %d, "width": %d, "height": %d}, "anchor": "$LeftPanelAnchor"}, "children": [)"
+	              R"({"type": "Panel", "name": "grail-on/Error", "fields": {"priority": 10, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": {"x": 0.0, "y": 0.397}}, "children": [)"
 	              R"({"type": "ClickCatcherWidget", "name": "PanelClickCatcher", "fields": {"rect": {"x": 0, "y": 0, "width": %d, "height": %d}}})"
 	              R"(, {"type": "ImageWidget", "name": "Background", "fields": {"rect": {"x": 0, "y": 0}, "filename": "d2rloader\\grail-on\\panel"}})"
 	              R"(, {"type": "ImageWidget", "name": "Cover", "fields": {"rect": {"x": 57, "y": %d}, "filename": "d2rloader\\grail-on\\cover"}})"
 	              R"(, {"type": "ButtonWidget", "name": "CloseButton", "fields": {"rect": {"x": 1600, "y": 9}, "filename": "PANEL\\closebtn_4x", "hoveredFrame": 3, "tooltipString": "@d2r:strClose", "sound": "cursor_close_window_hd", "onClickMessage": %s}})",
-	              PanelY, PanelWidth, PanelHeight, PanelWidth, PanelHeight, ViewTop - 2, Command("close").c_str());
+	              WindowX(), PanelY, PanelWidth, PanelHeight, PanelWidth, PanelHeight, ViewTop - 2, Command("close").c_str());
 	std::string layout = open;
 	const int   left = GridLeft + Cell, width = 14 * Cell;
 	int         y    = ViewTop + 120;
@@ -2905,9 +3028,9 @@ std::string ViewLayout(const std::string& id) {
 	// puts it (x 236, y -856, at the top of the screen; it reaches 88 units lower with the title, still above the skill bar);
 	// the panel starts MenuRoom further left, for the menus.
 	std::snprintf(open, sizeof(open),
-	              R"({"type": "Panel", "name": "grail-on/%s", "fields": {"priority": 10, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": "$LeftPanelAnchor"}, "children": [)"
+	              R"({"type": "Panel", "name": "grail-on/%s", "fields": {"priority": 10, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": {"x": 0.0, "y": 0.397}}, "children": [)"
 	              R"({"type": "ClickCatcherWidget", "name": "PanelClickCatcher", "fields": {"rect": {"x": 0, "y": 0, "width": %d, "height": %d}}})",
-	              id.c_str(), 236 - MenuRoom, PanelY, PanelWidth + MenuRoom, PanelHeight, PanelWidth + MenuRoom, PanelHeight);
+	              id.c_str(), WindowX() - MenuRoom, PanelY, PanelSpan(), PanelHeight, PanelSpan(), PanelHeight);
 	std::snprintf(head, sizeof(head),
 	              R"(, {"type": "ImageWidget", "name": "Background", "fields": {"rect": {"x": 0, "y": 0}, "filename": "d2rloader\\grail-on\\panel"}})"
 	              R"(, {"type": "ImageWidget", "name": "Cover", "fields": {"rect": {"x": 57, "y": %d}, "filename": "d2rloader\\grail-on\\cover"}})"
@@ -2917,7 +3040,7 @@ std::string ViewLayout(const std::string& id) {
 	const int menu = CurrentMenu();
 	// The menus down the left, the stats first.
 	for (int m = 0; m < static_cast<int>(std::size(Menus)); ++m) {
-		const int  x = MenuLeft, y = MenuTop + m * MenuStep;
+		const int  x = MenuX(), y = MenuTop + m * MenuStep;
 		layout += SquareButton("Menu" + std::to_string(m), x, y, m == menu, "menu", "@grail-on:M" + std::to_string(m), "menu" + std::to_string(m), MenuSize);
 		layout += ButtonRing("MenuRing" + std::to_string(m), x, y, MenuSize, CountMenu(m));
 		// The ethereal menus' icons are see-through, like ethereal items.
@@ -3010,11 +3133,11 @@ std::string ViewLayout(const std::string& id) {
 	for (int c = 0; c < CategoryCount() && !settings; ++c) {
 		if (!InMenu(c, menu)) continue;
 		const int y = ButtonTop(c);
-		layout += SquareButton("Cat" + std::to_string(c), CatLeft, y, c == CurrentCategory, "category", "@grail-on:C" + std::to_string(c), "cat" + std::to_string(c), CatSize);
-		layout += ButtonRing("CatRing" + std::to_string(c), CatLeft, y, CatSize, CountCategory(c, ViewEth));
+		layout += SquareButton("Cat" + std::to_string(c), CatX(), y, c == CurrentCategory, "category", "@grail-on:C" + std::to_string(c), "cat" + std::to_string(c), CatSize);
+		layout += ButtonRing("CatRing" + std::to_string(c), CatX(), y, CatSize, CountCategory(c, ViewEth));
 		const auto& category = Categories[c];
 		if (!category.icon.empty())
-			layout += Icon("CatIcon" + std::to_string(c), CatLeft + (CatSize - CatIcon) / 2, y + (CatSize - CatIcon) / 2, CatIcon, category.icon, category.width, category.height, ViewEth ? EthLook : "",
+			layout += Icon("CatIcon" + std::to_string(c), CatX() + (CatSize - CatIcon) / 2, y + (CatSize - CatIcon) / 2, CatIcon, category.icon, category.width, category.height, ViewEth ? EthLook : "",
 			               category.artSize);
 	}
 	// The clicks on the cut slots, after the grid so they reach them.
@@ -3034,11 +3157,11 @@ std::string ViewLayout(const std::string& id) {
 		// The stats pages down the left, like a menu's categories.
 		for (int p = 0; p < 5; ++p) {
 			const int y = ViewTop + p * (Cell + 20) + (Cell - CatSize) / 2;
-			layout += SquareButton("StatPage" + std::to_string(p), CatLeft, y, p == StatsPage, "category", "@grail-on:SP" + std::to_string(p), "stats" + std::to_string(p), CatSize);
-			layout += ButtonRing("StatPageRing" + std::to_string(p), CatLeft, y, CatSize, p ? CountKind(static_cast<Kind>(p - 1)) : CountMenu(StatsMenu));
+			layout += SquareButton("StatPage" + std::to_string(p), CatX(), y, p == StatsPage, "category", "@grail-on:SP" + std::to_string(p), "stats" + std::to_string(p), CatSize);
+			layout += ButtonRing("StatPageRing" + std::to_string(p), CatX(), y, CatSize, p ? CountKind(static_cast<Kind>(p - 1)) : CountMenu(StatsMenu));
 			int        width = 1, height = 1;
 			const auto art = MenuArt(p == 0 ? StatsMenu : p == 1 || p == 2 ? WeaponMenu : p == 3 ? SetMenu : RunewordMenu, width, height);
-			layout += Icon("StatPageIcon" + std::to_string(p), CatLeft + (CatSize - CatIcon) / 2, y + (CatSize - CatIcon) / 2, CatIcon, art, width, height, p == 2 ? EthLook : "");
+			layout += Icon("StatPageIcon" + std::to_string(p), CatX() + (CatSize - CatIcon) / 2, y + (CatSize - CatIcon) / 2, CatIcon, art, width, height, p == 2 ? EthLook : "");
 		}
 		layout += StatsLayout();
 	}
@@ -7397,6 +7520,7 @@ void ClickLower() {
 	else RunDrop();
 }
 
+void CompactChanged();
 void RunCommand(const std::string& command) {
 	if (command == "open") {
 		if (ViewOpen() || PreparedView >= 0 || (ErrorPanel != D2RL::Panels::InvalidHandle && IsOpen(ErrorPanel))) CloseView();
@@ -7466,6 +7590,7 @@ void RunCommand(const std::string& command) {
 		}
 		ApplyTooltipSettings();
 		SaveSettings();
+		if (command == "toggle:compact") CompactChanged();
 		ShowView();
 		return;
 	}
@@ -7633,7 +7758,7 @@ WNDPROC GameProc {};
 
 // Where the panel is in the window: window = panel * scale + offset. The game
 // draws the UI at the window's height / 2160; the panel hangs from
-// $LeftPanelAnchor (x 0, y 39.7% of the height) at x 236, y -856. A click on a
+// the vanilla $LeftPanelAnchor place (x 0, y 39.7% of the height) at x 236, y -856. A click on a
 // scroll step puts the offset where the click was.
 std::atomic<bool>   BarLearned {};
 std::atomic<double> BarOffsetX {}, BarOffsetY {};
@@ -7650,7 +7775,7 @@ std::pair<double, double> PanelOffset() {
 	RECT client {};
 	if (!GameWindow || !GetClientRect(GameWindow, &client)) return {};
 	const double scale = client.bottom / 2160.0;
-	return { 236 * scale, client.bottom * 0.397 + PanelY * scale };
+	return { WindowX() * scale, client.bottom * 0.397 + PanelY * scale };
 }
 
 // UI thread, on a click on step `step`: the cursor is on that step.
@@ -8022,6 +8147,15 @@ auto __cdecl OnUiMessage(const D2RL::PluginContext*, const Events::UiMessageEven
 	return Events::UiMessageAction::Consume;
 }
 
+// The "Open/close the grail" action of the game's Controls menu (unbound by
+// default): the same as the inventory button.
+auto OnGrailAction(const D2RL::PluginContext*, const D2RL::Input::ActionEvent* event, void*) noexcept -> D2RL::Input::ActionResult {
+	if (!D2RL::Input::HasActionEventField(event, D2RL::Input::ActionEventRequiredSize) || event->kind != D2RL::Input::ActionEventKind::Pressed)
+		return D2RL::Input::ActionResult::Ignored;
+	Queue("open");
+	return D2RL::Input::ActionResult::Handled;
+}
+
 D2RL::ConsoleCommandResult __cdecl OnCommand(D2R::Game::Client*, const D2RL::ConsoleCommandContext* command, void*) noexcept {
 	const std::string args = command && command->args ? std::string(command->args, command->argsLength) : "";
 	char              key[16] {};
@@ -8137,7 +8271,7 @@ std::string ScrollTestName(int variant) { return "ScrollTest" + std::to_string(v
 std::string ScrollTestLayout(int variant) {
 	char head[3072] {};
 	std::snprintf(head, sizeof(head),
-	              R"({"type": "Panel", "name": "grail-on/ScrollTest%d", "fields": {"priority": 10, "rect": {"x": 236, "y": -856, "width": %d, "height": %d}, "anchor": "$LeftPanelAnchor"}, "children": [)"
+	              R"({"type": "Panel", "name": "grail-on/ScrollTest%d", "fields": {"priority": 10, "rect": {"x": 236, "y": -856, "width": %d, "height": %d}, "anchor": {"x": 0.0, "y": 0.397}}, "children": [)"
 	              R"({"type": "ClickCatcherWidget", "name": "PanelClickCatcher", "fields": {"rect": {"x": 0, "y": 0, "width": %d, "height": %d}}})"
 	              R"(, {"type": "ImageWidget", "name": "Background", "fields": {"rect": {"x": 0, "y": 0}, "filename": "d2rloader\\grail-on\\panel"}})"
 	              R"(, {"type": "ImageWidget", "name": "Cover", "fields": {"rect": {"x": 57, "y": 175}, "filename": "d2rloader\\grail-on\\cover"}})"
@@ -8259,6 +8393,23 @@ auto __cdecl OnAreaPolicy(PageHost::AreaHandle, const D2RL::Inventory::ItemPolic
 // With Player Page Host: the grail's 16x12 area of its page. The area's grid
 // is the host's, in an overlay panel over the view's grid place (priority 11,
 // over the view; the scroll frames are 12), open while the view shows tiles.
+// The host's grid panel, over the window's grid (it moves with the compact
+// setting; `now`: an open grid moves at once).
+bool SetHostLayout(bool now) {
+	char layout[512] {};
+	std::snprintf(layout, sizeof(layout),
+	              R"({"type": "Panel", "name": "@PANEL@", "fields": {"priority": 11, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": {"x": 0.0, "y": 0.397}}, "children": [@GRID@]})",
+	              WindowX() + GridLeft, PanelY + GridTop, PageSize * Cell, Host::Rows * Cell);
+	const PageHost::LayoutRequest overlay { .structSize = sizeof(overlay), .flags = now ? PageHost::LayoutApplyNow : 0U, .layout = layout, .gridX = 0, .gridY = 0 };
+	return Host::Service->setAreaLayout(Host::Area, &overlay) == PageHost::Result::Success;
+}
+
+// The compact setting changed: the window moved, so did the scroll bar and the host's grid.
+void CompactChanged() {
+	BarLearned = false;
+	if (Host::On()) (void)SetHostLayout(true);
+}
+
 bool JoinHost() {
 	const D2RL::PluginCommunicationService* comm = nullptr;
 	if (Context->QueryService(&comm) != D2RL::ServiceQueryResult::Success || !comm) return false;
@@ -8273,12 +8424,7 @@ bool JoinHost() {
 	Host::Info = info;
 	Host::Area = info.handle;
 	PageRows   = Host::Rows;
-	char layout[512] {};
-	std::snprintf(layout, sizeof(layout),
-	              R"({"type": "Panel", "name": "@PANEL@", "fields": {"priority": 11, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": "$LeftPanelAnchor"}, "children": [@GRID@]})",
-	              236 - MenuRoom + MenuRoom + GridLeft, PanelY + GridTop, PageSize * Cell, Host::Rows * Cell);
-	const PageHost::LayoutRequest overlay { .structSize = sizeof(overlay), .flags = 0, .layout = layout, .gridX = 0, .gridY = 0 };
-	if (Host::Service->setAreaLayout(Host::Area, &overlay) != PageHost::Result::Success) Problem(true, "grail-on: Player Page Host refused the grail's grid layout");
+	if (!SetHostLayout(false)) Problem(true, "grail-on: Player Page Host refused the grail's grid layout");
 	if (Host::Service->setItemPolicy(Host::Area, OnAreaPolicy, nullptr) != PageHost::Result::Success) Problem(true, "grail-on: Player Page Host refused the grail's item check");
 	Say(false, "grailon: Player Page Host: grail area of %ux%u reserved, grid marker %.0f", info.width, info.height, info.gridMarker[0]);
 	return true;
@@ -8517,6 +8663,20 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	InstallPlacementHooks();
 	StoreReady = LocateStore();
 	if (!StoreReady) Problem(true, "grail-on: the game's item save calls were not found, so the grail cannot store items (game update?)");
+	if (const auto* input = Query<D2RL::InputService>("input"); input && D2RL::HasInputServiceField(input, D2RL::InputServiceRequiredSize)) {
+		const D2RL::Input::ActionRegistration action {
+			.structSize       = D2RL::Input::ActionRegistrationSize,
+			.logicalId        = "toggle-grail",
+			.displayName      = "Open/close the grail",
+			.category         = "Grail On!",
+			.defaultPrimary   = { .key = D2RL::Input::Key::None },
+			.defaultSecondary = { .key = D2RL::Input::Key::None },
+			.callback         = OnGrailAction,
+		};
+		D2RL::Input::ActionHandle handle = D2RL::Input::InvalidHandle;
+		if (const auto result = input->registerAction(context, &action, &handle); result != D2RL::Input::Result::Success)
+			Say(true, "grailon: could not add the open/close action to the Controls menu (result %u)", static_cast<unsigned>(result));
+	}
 	auto command = D2RL::MakeConsoleCommand("grailon", OnCommand, "Grail On!: open or close the grail. grailon forget: found entries no longer stored go back to never found. grailon rolls: stored copies' rolls against the best.");
 	if (auto* api = context->GetApi(); !api->registerConsoleCommand || !api->registerConsoleCommand(context, &command)) Say(true, "grail-on: could not register the grailon command");
 	Running = true;
