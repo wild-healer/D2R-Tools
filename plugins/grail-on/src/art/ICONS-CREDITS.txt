@@ -1,0 +1,14 @@
+Menu and category icons: game-icons.net (https://game-icons.net), licensed
+under CC BY 3.0 (https://creativecommons.org/licenses/by/3.0/).
+
+By the game-icons.net contributors (Lorc, Delapouite and others): visored-helm, breastplate,
+round-shield, gauntlet, boots, belt, horned-helm, wolf-head, templar-shield,
+totem-head, evil-book, battle-axe, pocket-bow, wolverine-claws, crossbow,
+plain-dagger, stone-spear, spiked-mace, crystal-ball, halberd, winged-scepter,
+trident, wizard-staff, broadsword, thrown-daggers, crystal-wand, rune-stone,
+gem-pendant, ring, cut-diamond, swap-bag, rank-1, rank-2, rank-3, histogram,
+crossed-swords, chest-armor, linked-rings, rune-sword, cog, holy-grail, woman-elf-face,
+ninja-head, barbarian, bear-head, dread-skull, black-knight-helm, witch-face,
+warlock-hood.
+
+Recoloured and resized for the plugin (tools/gen_icons.py).
