@@ -1,0 +1,11 @@
+# Player Page Host
+#
+# Owns the custom player page (16x16) and shares it: other plugins reserve
+# areas of it. Items on the page stay there when one of those plugins is
+# removed; the console command "pagehost all" shows the whole page.
+#
+# D2RLoader copies this file to d2rloader/config/aaa-player-page-host.toml on
+# first launch. Area places are saved beside it in aaa-player-page-host-areas.txt.
+
+[aaa-player-page-host]
+enabled = true
