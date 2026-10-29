@@ -14,7 +14,10 @@ that change the inventory size keep working.
   the stash) goes straight into its slot when the slot is empty.
 - Click the slotted cube while holding an item to put the item inside, or drop a
   Town Portal / Identify scroll on its tome.
-- Nothing else ever lands in the slots.
+- Nothing else ever lands in the slots, and Sort Inventory leaves them alone.
+- If the inventory isn't the height the plugin gave it (another mod resized it
+  later, or it is already 16 rows tall, the most a save can hold), the slots
+  turn off and the log says why.
 
 - Install: get Inventory Slots from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/invetory-slots) and add it through D2RMM like the other plugins.
 - Config (`d2rloader/config/inventory-slots.toml`): `enabled`, the position of
@@ -40,7 +43,14 @@ How it works (Steam 3.3.93787 / 94995 RVAs):
   call (D2R+0x3866CA -> 0x371850) goes through a relay in an int3 gap
   (D2R+0x380FC1) so the plugin knows the item; the size function itself is left
   alone (Item Quality Backgrounds checks it). The client (purchase destination)
-  and the server search the same way, so they agree.
+  and the server search the same way, so they agree. Only the player's own
+  inventory grid (page 0) at exactly the grown height counts, never a grid that
+  only has the same size (vendor pages).
+- Sort Inventory (D2R+0x160B00): the sort planner call (D2R+0x160C5D ->
+  0x15E790) goes through a relay (int3 gap D2R+0x160281) that leaves slotted
+  items out, and the planner's grid size call (D2R+0x15E838 -> GridInfo
+  0x3C6D80, relay in gap D2R+0x3861B1 shared with FindSpot's 0x38670D) gets the
+  height without the slot rows. A stray item in a slot row moves into the grid.
 - Four InventoryGridWidgets in a child layout of the inventory panel show one
   slot each. They share the stock grid's vtable (D2R+0x1CF3800), whose entries
   are wrapped: Draw (vt3) hides the items a widget must not show, item and cell

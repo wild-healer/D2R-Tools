@@ -56,7 +56,7 @@ namespace {
 namespace Widgets = D2RL::Widgets;
 
 constexpr const char* PluginId      = "inventory-slots";
-constexpr const char* PluginVersion = "1.0.1";
+constexpr const char* PluginVersion = "1.0.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -116,8 +116,9 @@ struct Native {
 constexpr std::uint64_t ClientPlayerIdRva = 0x8B2D0, ClientPlayerRva = 0x9A480, ClientFlagRva = 0x8D3B0, PageGridRva = 0x34A410, InventoryRva = 0x34A360,
                         FirstItemRva = 0x388C10, NextItemRva = 0x38ABA0, NodeModeRva = 0x38A930, ItemCodeRva = 0x36EF50, CursorItemRva = 0x15F100,
                         GridOwnerRva = 0x2A7810, PointToCellRva = 0x2C6300, SearchARva = 0x38D8F0, SearchBRva = 0x38DBB0, SearchCRva = 0x38DCC0,
-                        BankOfRva = 0x300A90, GridInfoRva = 0x3C6D80, ItemSizeRva = 0x371850;
-constexpr std::array<Native, 18> Natives { {
+                        BankOfRva = 0x300A90, GridInfoRva = 0x3C6D80, ItemSizeRva = 0x371850, ClientUnitRva = 0x9A5D0, SortPlanRva = 0x15E790,
+                        UnitBankRva = 0x34A0E0;
+constexpr std::array<Native, 21> Natives { {
 	{ ClientPlayerIdRva, { 0x8B, 0x05, 0x2E, 0x84, 0x99, 0x02, 0xC3, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC } },
 	{ ClientPlayerRva, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x83, 0xF9, 0x08, 0x0F, 0x83, 0x85 } },
 	{ ClientFlagRva, { 0x48, 0x8B, 0x05, 0x29, 0x63, 0x99, 0x02, 0x48, 0x85, 0xC0, 0x74, 0x08, 0x80, 0x78, 0x5C, 0x01 } },
@@ -136,6 +137,9 @@ constexpr std::array<Native, 18> Natives { {
 	{ BankOfRva, { 0x48, 0x83, 0xEC, 0x28, 0x0F, 0xB6, 0xC1, 0x48, 0x89, 0x44, 0x24, 0x38, 0x48, 0x83, 0xF8, 0x04 } },
 	{ GridInfoRva, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57 } },
 	{ ItemSizeRva, { 0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7C, 0x24, 0x20, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x20 } }, // called, never hooked
+	{ ClientUnitRva, { 0x4C, 0x63, 0xCA, 0x48, 0x8D, 0x05, 0x36, 0x93, 0x98, 0x02, 0x8B, 0xD1, 0x44, 0x8B, 0xC1, 0x49 } },
+	{ SortPlanRva, { 0x48, 0x89, 0x5C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57 } }, // called, never hooked
+	{ UnitBankRva, { 0x48, 0x83, 0xEC, 0x28, 0x48, 0x85, 0xC9, 0x75, 0x1A, 0x88, 0x4C, 0x24, 0x30, 0x48, 0x8D, 0x4C } }, // called, never hooked
 } };
 // FindSpot's item size query, redirected through an int3 gap in the game
 // (jmp [rip] to the plugin) so the plugin learns the item. Item size itself
@@ -144,6 +148,18 @@ constexpr std::uint64_t SizeCallRva = 0x3866CA; // call 0x371850
 constexpr std::array<std::uint8_t, 5> SizeCall { 0xE8, 0x81, 0xB1, 0xFE, 0xFF };
 constexpr std::uint64_t RelayRva  = 0x380FC1; // 15 bytes of int3 between two functions
 constexpr std::size_t   RelaySize = 14;
+// The grid size queries (GetInventoryGridInfo 0x3C6D80) of FindSpot, which
+// tells the inventory.txt record the search is for, and of the Sort Inventory
+// planner (0x15E790), which packs the page into a grid of that size; both go
+// through one relay, told apart by their return address.
+constexpr std::uint64_t SpotInfoCallRva = 0x38670D, PlanInfoCallRva = 0x15E838; // call 0x3C6D80
+constexpr std::array<std::uint8_t, 5> SpotInfoCall { 0xE8, 0x6E, 0x06, 0x04, 0x00 }, PlanInfoCall { 0xE8, 0x43, 0x85, 0x26, 0x00 };
+constexpr std::uint64_t InfoRelayRva = 0x3861B1;
+// The Sort Inventory button's (0x160B00) call to its planner, so slotted
+// items stay where they are.
+constexpr std::uint64_t PlanCallRva = 0x160C5D; // call 0x15E790
+constexpr std::array<std::uint8_t, 5> PlanCall { 0xE8, 0x2E, 0xDB, 0xFF, 0xFF };
+constexpr std::uint64_t PlanRelayRva = 0x160281;
 // Data locations, checked through the instructions that use them.
 constexpr std::uint64_t BankArrayLeaRva = 0x300AC0; // lea rcx, [rip + banks]
 constexpr std::uint64_t BankArrayRva    = 0x2A9A580;
@@ -177,8 +193,11 @@ constexpr std::size_t WidgetUseFlags = 0x5C0;
 constexpr std::size_t WidgetUnitId = 0x5C4, WidgetUnitType = 0x5C8, WidgetUnitPointer = 0x5D0;
 constexpr std::size_t UnitData = 0x10, UnitPath = 0x38, PathX = 0x10, PathY = 0x14, DataPage = 0x55;
 constexpr std::size_t GridWidth = 0x10, GridHeight = 0x11, GridCells = 0x18; // cells: item pointers, y * width + x
+// An inventory's grids: a vector of 32-byte grids at +0x20 (count at +0x28),
+// page p at index p + 2 (GetGrid 0x38B070).
+constexpr std::size_t InventoryGrids = 0x20, InventoryGridCount = 0x28, GridStride = 0x20, PageGridIndex = 2;
 constexpr std::uint8_t PageInventory = 0, PageHidden = 0xFE;
-constexpr std::uint32_t UnitItem = 4; // unit type, the first field of a unit
+constexpr std::uint32_t UnitPlayer = 0, UnitItem = 4; // unit type, the first field of a unit
 constexpr int          NodeInGrid = 1;
 constexpr const char*  SourceName = "inventory-slots";
 
@@ -194,6 +213,11 @@ using CursorItemFn     = void* (*)() noexcept;
 using GridOwnerFn      = void* (*)(void* widget) noexcept;
 using CellFn           = std::uint64_t* (*)(void* widget, std::uint64_t* out, std::uint64_t point) noexcept;
 using ItemSizeFn       = void (*)(void* item, std::uint8_t* width, std::uint8_t* height, const char* file, int line) noexcept;
+using GridInfoFn       = std::uint64_t (*)(std::uint64_t bank, std::uint64_t record, std::uint64_t flag, std::uint8_t* info) noexcept;
+using ClientUnitFn     = std::uint8_t* (*)(std::uint32_t id, std::uint32_t type) noexcept;
+using UnitBankFn       = std::uint8_t (*)(void* unit) noexcept; // the data table bank a unit uses
+// Positions as (x, y) 16-bit pairs, one per item id.
+using SortPlanFn       = bool (*)(std::uint16_t* current, std::uint16_t* planned, std::uint32_t* ids, std::uint64_t count, void* player, std::uint8_t page) noexcept;
 using SearchAFn        = int (*)(void* inventory, std::uint8_t* grid, void* x, void* y, std::uint8_t w, std::uint8_t h) noexcept;
 using SearchBFn        = int (*)(std::uint8_t* grid, void* x, void* y, std::uint8_t w, std::uint8_t h) noexcept;
 using DrawFn           = void (*)(void* widget, void* a, void* b, void* c) noexcept;
@@ -217,6 +241,10 @@ NodeModeFn       NodeMode {};
 ItemCodeFn       ItemCode {};
 CursorItemFn     CursorItem {};
 GridOwnerFn      GridOwner {};
+GridInfoFn       GridInfo {};
+ClientUnitFn     ClientUnit {};
+UnitBankFn       UnitBank {};
+SortPlanFn       SortPlan {};
 // Originals.
 ItemSizeFn  ItemSize {};
 SearchAFn   SearchA {};
@@ -231,8 +259,7 @@ void**      Vtable {};
 
 // Each class's grid height before the two rows, by inventory.txt record
 // (-1: unknown), and the grid sizes (width | height << 8) after.
-std::array<std::atomic<int>, RecordCount> OriginalHeight {};
-std::array<std::atomic<std::uint16_t>, 16> GrownSizes {};
+std::array<std::array<std::atomic<int>, RecordCount>, BankCount> OriginalHeight {};
 // Rows already grown: their address and new height, so a second table event
 // for the same tables does not add two more.
 struct GrownRow {
@@ -274,24 +301,12 @@ constexpr std::uint64_t NoCell = ~std::uint64_t { 0 };
 
 // ---- grid rows (game thread, when the tables load) ----
 
-void NoteGrownSize(std::uint8_t width, std::uint8_t height) noexcept {
-	const std::uint16_t size = static_cast<std::uint16_t>(width | height << 8);
-	for (auto& slot : GrownSizes) {
-		std::uint16_t value = slot.load();
-		if (value == size) return;
-		if (value == 0 && slot.compare_exchange_strong(value, size)) return;
-		if (value == size) return;
-	}
-}
-
-bool IsGrownSize(const std::uint8_t* grid) noexcept {
-	const std::uint16_t size = static_cast<std::uint16_t>(grid[GridWidth] | grid[GridHeight] << 8);
-	for (const auto& slot : GrownSizes) {
-		const std::uint16_t value = slot.load(std::memory_order_relaxed);
-		if (value == 0) return false;
-		if (value == size) return true;
-	}
-	return false;
+// The grid height the plugin gave a player record of a table bank (its own +
+// the added rows), or -1 when the record is not one it grew.
+int GrownHeight(std::uint64_t bank, std::int64_t record) noexcept {
+	if (bank >= BankCount || record < 0 || record >= RecordCount) return -1;
+	const int height = OriginalHeight[bank][record].load(std::memory_order_relaxed);
+	return height < 0 ? -1 : height + AddedRows;
 }
 
 void GrowGrids() noexcept {
@@ -319,7 +334,7 @@ void GrowGrids() noexcept {
 				}
 				if (width < MinWidth || height == 0 || height + AddedRows > 16) {
 					++skipped;
-					Log(true, "table bank %zu row %d: grid %ux%u can't take the slot rows", bank, record, width, height);
+					Log(true, "table bank %zu row %d: grid %ux%u can't take the slot rows (an item's row is saved in 4 bits: 16 rows at most)", bank, record, width, height);
 					continue;
 				}
 				DWORD protect = 0;
@@ -327,8 +342,7 @@ void GrowGrids() noexcept {
 				row[RowGridY] = static_cast<std::uint8_t>(height + AddedRows);
 				if (writable) VirtualProtect(row + RowGridY, 1, protect, &protect);
 				GrownRows.push_back({ row, row[RowGridY] });
-				OriginalHeight[record].store(height);
-				NoteGrownSize(width, row[RowGridY]);
+				OriginalHeight[bank][record].store(height);
 				++grown;
 			}
 	}
@@ -345,12 +359,25 @@ void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::D
 
 // ---- free-spot searches (server and client threads) ----
 
+// The inventory.txt record of the free-spot search running on this thread,
+// from FindSpot's grid size query; -1 outside FindSpot. Only a player
+// inventory record the plugin grew, with a grid of that grown height, has the
+// slot rows: a vendor's or a stash's grid of the same size is left alone, and
+// so is a grid another mod resized after this plugin.
+thread_local std::int64_t  SpotRecord = -1;
+thread_local std::uint64_t SpotBank   = 0;
+
+bool IsSlotGrid(const std::uint8_t* grid) noexcept {
+	const int height = GrownHeight(SpotBank, SpotRecord);
+	return grid && height > 0 && grid[GridHeight] == height && grid[GridWidth] >= MinWidth;
+}
+
 // While a search runs, a grown grid looks as tall as before.
 struct HideAddedRows {
 	std::uint8_t* grid {};
 	std::uint8_t  height {};
 	explicit HideAddedRows(std::uint8_t* target) noexcept {
-		if (!target || !IsGrownSize(target)) return;
+		if (!IsSlotGrid(target)) return;
 		grid   = target;
 		height = grid[GridHeight];
 		grid[GridHeight] = static_cast<std::uint8_t>(height - AddedRows);
@@ -368,7 +395,8 @@ struct HideAddedRows {
 thread_local void* SizedItem {};
 
 void FindSpotItemSize(void* item, std::uint8_t* width, std::uint8_t* height, const char* file, int line) noexcept {
-	SizedItem = item;
+	SizedItem  = item;
+	SpotRecord = -1;
 	ItemSize(item, width, height, file, line);
 }
 
@@ -381,13 +409,80 @@ bool RedirectSizeCall() noexcept {
 	       Context->PatchCallRel32(SizeCallRva, SizeCall.data(), SizeCall.size(), RelayRva);
 }
 
+// A 14-byte jmp [rip] to target in an int3 gap of the game, then the call at
+// site redirected to it.
+bool Relay(std::uint64_t gapRva, const void* target, std::uint64_t siteRva, const std::uint8_t* call) noexcept {
+	std::array<std::uint8_t, RelaySize> gap {}, relay { 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 };
+	gap.fill(0xCC);
+	const auto address = reinterpret_cast<std::uint64_t>(target);
+	std::memcpy(relay.data() + 6, &address, sizeof(address));
+	return Context->PatchBytes(gapRva, gap.data(), gap.size(), relay.data(), relay.size()) && Context->PatchCallRel32(siteRva, call, 5, gapRva);
+}
+
+int AddedRowTop(void* player) noexcept;
+
+// The grid size queries of FindSpot (notes the record for the searches) and
+// of the sort planner (hides the added rows of a grown player record).
+std::uint64_t GridInfoAt(std::uint64_t bank, std::uint64_t record, std::uint64_t flag, std::uint8_t* info) noexcept {
+	const auto from = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+	const std::uint64_t result = GridInfo(bank, record, flag, info);
+	const auto rec = static_cast<std::int64_t>(static_cast<std::int32_t>(record));
+	if (from == Base + SpotInfoCallRva + 5) {
+		SpotRecord = rec;
+		SpotBank   = bank & 0xFF;
+	} else if (from == Base + PlanInfoCallRva + 5 && info) {
+		const int height = GrownHeight(bank & 0xFF, rec);
+		if (height > 0 && info[1] == height) info[1] = static_cast<std::uint8_t>(height - AddedRows);
+	}
+	return result;
+}
+
+// Sort Inventory: the planner packs every item of the page into the grid
+// without the added rows (GridInfoAt), so a stray item in a slot row moves into
+// the grid; items in their own slot are left out of the plan and stay put.
+bool PlanSort(std::uint16_t* current, std::uint16_t* planned, std::uint32_t* ids, std::uint64_t count, void* player, std::uint8_t page) noexcept {
+	const int top = page == PageInventory && count <= 256 ? AddedRowTop(player) : -1;
+	if (top < 0) return SortPlan(current, planned, ids, count, player, page);
+	std::array<std::uint32_t, 256> keptIds {};
+	std::array<std::uint16_t, 512> keptCurrent {}, keptPlanned {};
+	std::array<bool, 256> slotted {};
+	std::uint64_t kept = 0;
+	for (std::uint64_t i = 0; i < count; ++i) {
+		std::uint8_t* const item = ClientUnit(ids[i], UnitItem);
+		auto* const path = item ? *reinterpret_cast<std::uint8_t**>(item + UnitPath) : nullptr;
+		if (path) {
+			const int x = *reinterpret_cast<std::int32_t*>(path + PathX), y = *reinterpret_cast<std::int32_t*>(path + PathY);
+			const std::uint32_t code = ItemCode(item);
+			for (const auto& def : Slots)
+				if (def.code == code && def.column == x && top == y) slotted[i] = true;
+			if (slotted[i]) {
+				current[i * 2] = planned[i * 2] = static_cast<std::uint16_t>(x);
+				current[i * 2 + 1] = planned[i * 2 + 1] = static_cast<std::uint16_t>(y);
+				continue;
+			}
+		}
+		keptIds[kept++] = ids[i];
+	}
+	if (kept == count) return SortPlan(current, planned, ids, count, player, page);
+	if (!SortPlan(keptCurrent.data(), keptPlanned.data(), keptIds.data(), kept, player, page)) return false;
+	for (std::uint64_t i = 0, j = 0; i < count; ++i) {
+		if (slotted[i]) continue;
+		current[i * 2]     = keptCurrent[j * 2];
+		current[i * 2 + 1] = keptCurrent[j * 2 + 1];
+		planned[i * 2]     = keptPlanned[j * 2];
+		planned[i * 2 + 1] = keptPlanned[j * 2 + 1];
+		++j;
+	}
+	return true;
+}
+
 // A cube, tome or key looking for room goes to its own slot when that slot is
 // empty: purchases, pickups, quest rewards and Ctrl+click moves alike. The
 // client and the server search the same way, so both agree on the spot.
 bool SlotSpot(std::uint8_t* grid, void* x, void* y, std::uint8_t w, std::uint8_t h) noexcept {
 	auto* const item = static_cast<std::uint8_t*>(SizedItem);
 	SizedItem        = nullptr;
-	if (!grid || !item || !IsGrownSize(grid) || *reinterpret_cast<const std::uint32_t*>(item) != UnitItem) return false;
+	if (!item || !IsSlotGrid(grid) || *reinterpret_cast<const std::uint32_t*>(item) != UnitItem) return false;
 	const std::uint32_t code = ItemCode(item);
 	for (const auto& def : Slots) {
 		if (def.code != code || def.width != w || def.height != h) continue;
@@ -437,11 +532,34 @@ bool IsInventoryGrid(const void* widget) noexcept {
 	return static_cast<const std::uint8_t*>(widget)[WidgetPage] == PageInventory;
 }
 
-// First added row for that player: their class's own grid height.
+// The grid of an inventory's page, or null.
+std::uint8_t* PageGridOf(void* inventory, int page) noexcept {
+	if (!inventory) return nullptr;
+	auto* const bytes = static_cast<std::uint8_t*>(inventory);
+	std::uint8_t* const grids = *reinterpret_cast<std::uint8_t**>(bytes + InventoryGrids);
+	const std::uint64_t count = *reinterpret_cast<std::uint64_t*>(bytes + InventoryGridCount);
+	const std::uint64_t index = static_cast<std::uint64_t>(page) + PageGridIndex;
+	return grids && index < count ? grids + index * GridStride : nullptr;
+}
+
+// First added row for that player: their class's own grid height, when their
+// inventory grid really has the added rows; -1 otherwise (another mod resized
+// it after this plugin: the slots stay empty and nothing is hidden).
 int AddedRowTop(void* player) noexcept {
 	if (!player) return -1;
 	const int record = PageGrid(player, PageInventory, !ClientFlag());
-	return record >= 0 && record < RecordCount ? OriginalHeight[record].load() : -1;
+	const int height = GrownHeight(UnitBank(player), record);
+	if (height < 0) return -1;
+	const std::uint8_t* const grid = PageGridOf(InventoryOf(player, SourceName, __LINE__), PageInventory);
+	if (!grid) return -1;
+	if (grid[GridHeight] != height) {
+		static std::atomic<int> logged { -1 };
+		if (logged.exchange(grid[GridHeight]) != grid[GridHeight])
+			Log(true, "the inventory grid is %u rows, not the %d this plugin made (another mod changed its size after this plugin loaded); the slots are off",
+			    grid[GridHeight], height);
+		return -1;
+	}
+	return height - AddedRows;
 }
 
 // A slot's cell for the widget's owner (packed x | y << 32), or NoCell.
@@ -509,6 +627,10 @@ void ShareUnit(std::uint8_t* widget, int slot) noexcept {
 // half second because D2R rebuilds the panel with everything shown.
 
 std::array<std::atomic<int>, Slots.size()> Filled {}; // 0 empty, 1 filled, by the last draw
+// Whether the shown player's inventory has the slot rows, by the last grid
+// draw: without them the whole slot layout is hidden.
+std::atomic<int> SlotsOn { 1 };
+int              AppliedOn { 1 };
 std::array<int, Slots.size()>              Applied {};
 std::atomic<std::uint64_t>                 LastApply {};
 std::atomic<bool>                          ApplyQueued {};
@@ -539,6 +661,8 @@ bool FindArt() {
 
 void __cdecl ApplySlots(const D2RL::PluginContext*, void*) noexcept {
 	bool ok = FindRoot();
+	const int on = SlotsOn.load();
+	if (ok && WidgetApi->setWidgetVisible(Context, Root, on != 0) == Widgets::Result::Success) AppliedOn = on;
 	if (Config.showArt) {
 		ok = ok && FindArt();
 		for (std::size_t slot = 0; ok && slot < Slots.size(); ++slot) {
@@ -551,6 +675,17 @@ void __cdecl ApplySlots(const D2RL::PluginContext*, void*) noexcept {
 	}
 	LastApply.store(ok ? GetTickCount64() : GetTickCount64() + 4500); // a failure retries in 5 s
 	ApplyQueued.store(false);
+}
+
+void QueueApply() noexcept {
+	if (ApplyQueued.exchange(true)) return;
+	if (Threads->runOnUiThread(Context, ApplySlots, nullptr) != D2RL::Threads::Result::Success) ApplyQueued.store(false);
+}
+
+void NoteSlotsOn(bool on) noexcept {
+	if (!Threads || !WidgetApi) return;
+	SlotsOn.store(on);
+	if (AppliedOn != static_cast<int>(on) || GetTickCount64() >= LastApply.load() + 500) QueueApply();
 }
 
 void NoteFilled(int slot, bool filled) noexcept {
@@ -568,6 +703,7 @@ void HookDraw(void* widget, void* a, void* b, void* c) noexcept {
 	void* const owner = GridOwner(widget);
 	const int   top   = AddedRowTop(owner);
 	NoteWidget(widget, slot, owner, top);
+	if (owner && *static_cast<const std::uint32_t*>(owner) == UnitPlayer) NoteSlotsOn(top >= 0);
 	void* const inventory = owner && top >= 0 ? InventoryOf(owner, SourceName, __LINE__) : nullptr;
 	// A slot that can't tell its cell shows nothing rather than the whole inventory.
 	if (!inventory) {
@@ -1000,6 +1136,10 @@ bool Locate() noexcept {
 	ItemSize       = At<ItemSizeFn>(ItemSizeRva);
 	CursorItem     = At<CursorItemFn>(CursorItemRva);
 	GridOwner      = At<GridOwnerFn>(GridOwnerRva);
+	GridInfo       = At<GridInfoFn>(GridInfoRva);
+	ClientUnit     = At<ClientUnitFn>(ClientUnitRva);
+	UnitBank       = At<UnitBankFn>(UnitBankRva);
+	SortPlan       = At<SortPlanFn>(SortPlanRva);
 	return true;
 }
 
@@ -1050,7 +1190,8 @@ bool RegisterLayout() noexcept {
 D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) noexcept -> bool {
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
-	for (auto& height : OriginalHeight) height.store(-1);
+	for (auto& bank : OriginalHeight)
+		for (auto& height : bank) height.store(-1);
 	LoadConfig();
 	if (!Config.enabled) {
 		Log(false, "Inventory Slots %s: disabled in config", PluginVersion);
@@ -1079,6 +1220,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		return true;
 	}
 	if (!RedirectSizeCall()) Log(true, "new cubes, tomes and keys won't go to their empty slot by themselves (the free-spot search could not be patched)");
+	// Without the record, no search uses the slot rows: they stay empty.
+	if (!Relay(InfoRelayRva, reinterpret_cast<const void*>(&GridInfoAt), SpotInfoCallRva, SpotInfoCall.data()))
+		Log(true, "the free-spot search's grid could not be followed; new items won't use the slots");
+	else if (!Context->PatchCallRel32(PlanInfoCallRva, PlanInfoCall.data(), PlanInfoCall.size(), InfoRelayRva) ||
+	         !Relay(PlanRelayRva, reinterpret_cast<const void*>(&PlanSort), PlanCallRva, PlanCall.data()))
+		Log(true, "Sort Inventory could not be patched; it may move items into or out of the slots");
 	if (!PatchVtable()) {
 		Log(true, "Inventory Slots %s: inactive, the inventory grid widget could not be wrapped", PluginVersion);
 		return true;
