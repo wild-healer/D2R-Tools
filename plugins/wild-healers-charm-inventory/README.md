@@ -12,7 +12,7 @@ Needs Player Page Host (`aaa-player-page-host`). The charms stay on the player p
 
 ## Install
 
-Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/wild-healers-charm-inventory). Load `wild-healers-charm-inventory-<version>.zip` (the DLL alone; its default settings are built in) in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Remove the DLL to uninstall.
+Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/wild-healer-s-charm-inventory). Load `wild-healers-charm-inventory-<version>.zip` (the DLL alone; its default settings are built in) in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Remove the DLL to uninstall.
 
 ## Settings
 
