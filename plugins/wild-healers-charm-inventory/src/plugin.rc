@@ -1,0 +1,8 @@
+#include <D2RLPlugin/resource.h>
+#include <D2RLPlugin/version.h>
+
+D2RL_PLUGIN_MANIFEST_RESOURCE_ID RCDATA { D2RL_PLUGIN_RESOURCE_DWORD(D2RL_PLUGIN_ABI_VERSION) }
+D2RL_PLUGIN_CONFIG_RESOURCE_ID RCDATA "wild-healers-charm-inventory.toml"
+201 RCDATA "src/art/frame.png"
+202 RCDATA "src/art/frame.lowend.png"
+203 RCDATA "src/art/slot.png"

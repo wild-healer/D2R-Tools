@@ -1,0 +1,8 @@
+# Wild Healer's Charm Inventory
+#
+# A 10x4 charm inventory on Player Page Host's page, opened from the charm
+# button on the inventory's left edge (or the console command "charms", or a key set in the game's Controls menu).
+# Only charms go in it, and the charms in it give their bonuses.
+
+[wild-healers-charm-inventory]
+enabled = true
