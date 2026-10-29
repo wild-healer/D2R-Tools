@@ -2,26 +2,26 @@
 //   - reserves one 10x4 area of the host's page (the size of the inventory),
 //     with active charms, and takes only charms;
 //   - shows it in a game-style left panel: the stash frame Run Counter ships
-//     (src/art/frame.png), its plain stone inside, and the area's cells;
+//     (its border in src/frame_art.inc, the plain stone inside drawn here), and the
+//     area's cells;
 //   - a button on the inventory's left edge, made like Grail On!'s (the mold
 //     and Grail On!'s charm category icon), under Grail On!'s, opens and
 //     closes it.
 #include "page_host_api.h"
 
 #include <windows.h>
-#include <wincodec.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <initializer_list>
 #include <string>
 #include <vector>
 
 #include "mold.inc"
 #include "charm_icon.inc"
+#include "frame_art.inc"
 
 namespace {
 
@@ -29,7 +29,7 @@ namespace Comm   = D2RL::PluginCommunication;
 namespace Events = D2RL::SharedEvents;
 
 constexpr const char* PluginId      = "wild-healers-charm-inventory";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.2";
 constexpr const char* CommandPrefix = "wild-healers-charm-inventory/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -130,37 +130,14 @@ bool RegisterSprite(const std::string& name, const std::vector<Picture>& frames,
 
 // ---- packaged art ----
 
-constexpr int FrameArtId = 201, FrameArtLowEndId = 202, SlotArtId = 203;
-
-// A PNG resource of this DLL, decoded with Windows' imaging component.
-bool DecodePng(int id, Picture& out) {
-	HMODULE module {};
-	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&DecodePng), &module)) return false;
-	HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10)); // RT_RCDATA
-	if (!resource) return false;
-	auto*       bytes = static_cast<BYTE*>(LockResource(LoadResource(module, resource)));
-	const DWORD size  = SizeofResource(module, resource);
-	if (!bytes || !size) return false;
-	const HRESULT          com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-	IWICImagingFactory*    factory {};
-	IWICStream*            stream {};
-	IWICBitmapDecoder*     decoder {};
-	IWICBitmapFrameDecode* frame {};
-	IWICFormatConverter*   converter {};
-	UINT                   width = 0, height = 0;
-	bool done = SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) && SUCCEEDED(factory->CreateStream(&stream))
-	         && SUCCEEDED(stream->InitializeFromMemory(bytes, size)) && SUCCEEDED(factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder))
-	         && SUCCEEDED(decoder->GetFrame(0, &frame)) && SUCCEEDED(factory->CreateFormatConverter(&converter))
-	         && SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))
-	         && SUCCEEDED(converter->GetSize(&width, &height));
-	if (done) {
-		out  = Blank(static_cast<int>(width), static_cast<int>(height));
-		done = SUCCEEDED(converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(out.rgba.size()), out.rgba.data()));
+// A 256-colour piece of the frame (tools/make_art.py), opaque.
+Picture Unpack(const ArtPiece& piece) {
+	Picture out = Blank(piece.width, piece.height);
+	for (std::size_t p = 0; p < static_cast<std::size_t>(piece.width) * piece.height; ++p) {
+		std::memcpy(out.rgba.data() + p * 4, piece.palette + piece.pixels[p] * 3, 3);
+		out.rgba[p * 4 + 3] = 255;
 	}
-	for (IUnknown* object : std::initializer_list<IUnknown*> { converter, frame, decoder, stream, factory })
-		if (object) object->Release();
-	if (SUCCEEDED(com)) CoUninitialize();
-	return done;
+	return out;
 }
 
 // ---- the inventory button (as Grail On!'s) ----
@@ -252,10 +229,41 @@ void AddButton() {
 constexpr int PanelWidth = 1162, PanelHeight = 1507, PanelY = -651;
 constexpr int GridX = (PanelWidth - Columns * Cell) / 2, GridY = 178 + (1451 - 178 - Rows * Cell) / 2;
 
+// The frame: the border pieces around dark stone with the grain of the
+// game's panels (fine noise over a coarser 3x3 one).
+bool MakeFrame(Picture& frame) {
+	const Picture top = Unpack(TopArt), bottom = Unpack(BottomArt), left = Unpack(LeftArt), right = Unpack(RightArt);
+	const int width = top.width, height = top.height + left.height + bottom.height;
+	if (bottom.width != width || right.height != left.height || left.width + right.width >= width) return false;
+	frame = Blank(width, height);
+	const auto noise = [](std::uint32_t x, std::uint32_t y, std::uint32_t seed) {
+		std::uint32_t h = x * 374761393u + y * 668265263u + seed * 2246822519u;
+		h               = (h ^ (h >> 13)) * 1274126177u;
+		return ((h ^ (h >> 16)) & 0xFF) / 255.0;
+	};
+	for (int y = top.height; y < top.height + left.height; ++y)
+		for (int x = left.width; x < width - right.width; ++x) {
+			const double n  = 0.6 * noise(x, y, 1) + 0.4 * noise(x / 3, y / 3, 2) - 0.5;
+			auto*        px = frame.at(x, y);
+			px[0] = px[1] = static_cast<unsigned char>(std::clamp(18 + static_cast<int>(n * 12), 0, 255));
+			px[2]         = static_cast<unsigned char>(std::clamp(19 + static_cast<int>(n * 12), 0, 255));
+			px[3]         = 255;
+		}
+	const auto paste = [&](const Picture& part, int x0, int y0) {
+		for (int y = 0; y < part.height; ++y) std::memcpy(frame.at(x0, y0 + y), part.at(0, y), static_cast<std::size_t>(part.width) * 4);
+	};
+	paste(top, 0, 0);
+	paste(bottom, 0, height - bottom.height);
+	paste(left, 0, top.height);
+	paste(right, width - right.width, top.height);
+	return true;
+}
+
 bool RegisterPanelArt() {
-	Picture frame, frameLow, slot;
-	if (!DecodePng(FrameArtId, frame) || !DecodePng(FrameArtLowEndId, frameLow) || !RegisterSprite("frame", { frame }, { frameLow })) return false;
-	if (!DecodePng(SlotArtId, slot) || slot.width != Cell || slot.height != Cell) return false;
+	Picture frame;
+	if (!MakeFrame(frame) || frame.width != PanelWidth || frame.height != PanelHeight || !RegisterSprite("frame", { frame })) return false;
+	const Picture slot = Unpack(SlotArt);
+	if (slot.width != Cell || slot.height != Cell) return false;
 	Picture cells = Blank(Columns * Cell, Rows * Cell);
 	for (int y = 0; y < cells.height; ++y)
 		for (int x = 0; x < cells.width; ++x) std::memcpy(cells.at(x, y), slot.at(x % Cell, y % Cell), 4);

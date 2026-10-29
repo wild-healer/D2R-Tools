@@ -1,6 +1,16 @@
-# Wild Healer's Charm Inventory 1.0.0: release texts
+# Wild Healer's Charm Inventory 1.0.2: release texts
 
 ## Patch notes
+
+```
+**Wild Healer's Charm Inventory 1.0.2**
+
+**Fixed**
+
+* Elastic's antivirus no longer flags the DLL: the panel's art is built into the code, and the DLL is a quarter of the size.
+```
+
+## Patch notes 1.0.0
 
 ```
 **Wild Healer's Charm Inventory 1.0.0**
@@ -17,14 +27,14 @@
 
 ## GitHub release
 
-- Tag: `wild-healers-charm-inventory-v1.0.0`
-- Title: `Wild Healer's Charm Inventory 1.0.0`
-- Asset: `wild-healers-charm-inventory-1.0.0.zip`
+- Tag: `wild-healers-charm-inventory-v1.0.2`
+- Title: `Wild Healer's Charm Inventory 1.0.2`
+- Asset: `wild-healers-charm-inventory-1.0.2.zip`
 
 Body:
 
 ```markdown
-**Wild Healer's Charm Inventory** 1.0.0: a 10x4 charm inventory on Player Page Host's player page.
+**Wild Healer's Charm Inventory** 1.0.2: a 10x4 charm inventory on Player Page Host's player page.
 
 ### Features
 - 10x4 cells, the size of the inventory's grid. Only charms go in, and they give their bonuses.
@@ -38,7 +48,7 @@ Body:
 - Player Page Host (`aaa-player-page-host`).
 
 ### Install
-Load `wild-healers-charm-inventory-1.0.0.zip` in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/wild-healers-charm-inventory.toml`, written on first launch.
+Load `wild-healers-charm-inventory-1.0.2.zip` in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/wild-healers-charm-inventory.toml`, written on first launch.
 ```
 
 ## D2RLoader Hub

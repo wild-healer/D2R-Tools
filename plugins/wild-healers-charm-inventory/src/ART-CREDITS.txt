@@ -1,6 +1,5 @@
-Panel frame and cells (frame.png, frame.lowend.png, slot.png): cropped from the
-stash art Grail On! packages (plugins/grail-on/src/art/stash.png) by
-tools/make_art.py.
+Panel frame pieces and cell (src/frame_art.inc): cropped from the stash art
+Grail On! packages (plugins/grail-on/src/art/stash.png) by tools/make_art.py.
 
 Charm icon (src/charm_icon.inc): "rune-stone" from game-icons.net
 (https://game-icons.net), by the game-icons.net contributors (Lorc, Delapouite

@@ -28,4 +28,4 @@ Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/wild-heal
 
 ## Credits
 
-Charm icon "rune-stone" by Lorc, Delapouite and contributors, [game-icons.net](https://game-icons.net), CC BY 3.0. Panel frame cropped from the stash art Grail On! packages (`tools/make_art.py`). See `src/art/CREDITS.txt`.
+Charm icon "rune-stone" by Lorc, Delapouite and contributors, [game-icons.net](https://game-icons.net), CC BY 3.0. Panel frame cropped from the stash art Grail On! packages (`tools/make_art.py`). See `src/ART-CREDITS.txt`.
