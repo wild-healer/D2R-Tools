@@ -14,6 +14,7 @@ Every plugin, mod and patch is downloaded from its page on the D2RLoader Hub, li
 
 | Plugin | What it does |
 | --- | --- |
+| [Compare Indicators](https://d2rloader.net/hub/plugins/compare-indicators) | Indicators on tooltip lines while comparing items: perfect, better, worse, same, new and lost, sockets included. |
 | [Cube Empty](https://d2rloader.net/hub/plugins/cube-empty) | Middle-click the Horadric Cube in your inventory to move everything in it to your inventory. |
 | [Cube Fill](https://d2rloader.net/hub/plugins/cube-fill) | Shows what is in the cube on its inventory icon: the items drawn small, a count badge or a mini grid. |
 | [Cube Overflow](https://d2rloader.net/hub/plugins/cube-overflow) | When your inventory is full, pickups, purchases, gambling and quest rewards go into the cube instead. |
