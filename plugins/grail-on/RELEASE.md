@@ -1,3 +1,15 @@
+# Grail On! 1.0.4: patch notes
+
+```
+**Grail On! 1.0.4**
+
+**Fixed**
+
+* Runewords are found again with mods that give runewords their own keys in the Runes table, such as D2R Reimagined.
+* A mod's own runewords show their name in the game's language.
+* Two runewords a mod gives the same key each get their own tile.
+```
+
 # Grail On! 1.0.3: patch notes
 
 ```

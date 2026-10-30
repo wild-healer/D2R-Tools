@@ -100,7 +100,7 @@
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.0.3";
+constexpr const char* PluginVersion = "1.0.4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -597,7 +597,7 @@ std::string KeyText(const char* key) {
 	return text;
 }
 
-// The runewords' names by their Runes key ("Runeword1"), from the game's
+// The runewords' names by their Runes key ("Runeword1", or a mod's own such as "Friendship"), from the game's
 // strings file (data/local/lng/strings/item-runes.json: objects with "id",
 // "Key", "enUS"...): the string by its id in the game's language, else its
 // English text. The localization service does not find these keys by name.
@@ -623,7 +623,7 @@ std::map<std::string, std::string> RunewordNames(const std::string& text) {
 		const auto end = text.find('}', open);
 		if (end == std::string::npos) break;
 		const auto key = value(open, end, "Key");
-		if (key.rfind("Runeword", 0) != 0) continue;
+		if (key.empty()) continue; // every key: mods name runewords "Friendship", "Beast1"...
 		const long  id   = std::strtol(value(open, end, "id").c_str(), nullptr, 10);
 		std::string name = id > 0 && id <= 0xFFFF ? GameText(static_cast<std::uint16_t>(id)) : std::string();
 		if (name.empty()) name = value(open, end, "enUS");
@@ -794,6 +794,24 @@ RuneLayout FindRuneLayoutByShape(TableRows runes, std::uint32_t size, const std:
 			score += ok;
 		}
 		best(layout.props, score, top, o);
+	}
+	// Keys that are not "Runeword..." (a mod naming its runewords "Friendship",
+	// "Beast1"...): the first text field before the item types, filled in
+	// nearly every row and different in most rows.
+	if (layout.name < 0 && layout.types > 0) {
+		const auto text = [&](const unsigned char* at, int room) {
+			int n = 0;
+			while (n < room && at[n] >= 0x20 && at[n] != 0x7F) ++n;
+			return n >= 2 && n < room ? n : 0; // ends with a 0 before the room does
+		};
+		for (int o = 0; o < layout.types && layout.name < 0; ++o) {
+			const int room = std::min(64, layout.types - o);
+			int       given = 0;
+			std::set<std::string> keys;
+			for (std::uint32_t k = 0; k < runes.count; ++k)
+				if (const int n = text(row(k) + o, room)) ++given, keys.emplace(reinterpret_cast<const char*>(row(k) + o), n);
+			if (given * 10 >= static_cast<int>(runes.count) * 9 && keys.size() * 2 > runes.count) layout.name = o;
+		}
 	}
 	if (layout.found()) layout.byShape = true;
 	return layout;
@@ -1161,6 +1179,10 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 			// Ids stay as they were for a runeword of one kind.
 			for (auto& [which, split] : kinds) {
 				split.id = "r:" + index + (kinds.size() > 1 ? std::string("/") + RunewordRules[which].icon : std::string());
+				// A key a mod gives twice (Doom1 for staves and for melee weapons): told apart by kind, else by row.
+				const auto used = [&](const std::string& id) { return std::any_of(found.begin(), found.end(), [&](const UniqueEntry& e) { return e.id == id; }); };
+				if (used(split.id) && kinds.size() == 1) split.id += std::string("/") + RunewordRules[which].icon;
+				if (used(split.id)) split.id += "#" + std::to_string(k);
 				found.push_back(split);
 				rule.push_back(firstRunewordRule + which);
 			}
