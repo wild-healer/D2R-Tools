@@ -35,7 +35,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -44,7 +43,6 @@
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -55,7 +53,7 @@ namespace Tables = D2RL::DataTables;
 namespace Events = D2RL::SharedEvents;
 
 constexpr const char* PluginId      = "perfect-frame";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -198,7 +196,24 @@ std::map<std::uint32_t, int> BaseByCode; // Items code -> row
 std::vector<int>           MaxDefense, MinDefense; // by Items row, 0 for none
 std::vector<int>           MaxSockets; // by Items row (gemsockets), -1 when not known
 std::atomic<bool>          Ready {}, Running {};
-std::thread                Ticker;
+// The table worker: a plain Windows thread, not a std::thread. D2RLoader may
+// free the DLL at exit without calling D2RLoaderUnloadPlugin; a joinable
+// std::thread would then call std::terminate in its static destructor, and
+// joining there would deadlock under the loader lock. Stopping only asks the
+// worker to stop and waits for it to say it is out of the plugin's code.
+HANDLE                     Ticker {};
+std::atomic<bool>          TickerDone { true };
+DWORD WINAPI               TickerMain(void*) noexcept;
+
+// Asks the worker to stop and waits (at most a second) until it is done.
+void StopTicker() noexcept {
+	Running = false;
+	// A zero wait never blocks: at process exit the worker may already be gone.
+	for (int i = 0; i < 100 && !TickerDone && !(Ticker && WaitForSingleObject(Ticker, 0) == WAIT_OBJECT_0); ++i) Sleep(10);
+}
+struct TickerGuard {
+	~TickerGuard() { StopTicker(); }
+} StopAtExit;
 
 constexpr std::uint32_t ItemRowSize = 448, UniqueRowSize = 348, SetRowSize = 460;
 constexpr int ItemCode = 128, ItemMinDefense = 212, ItemMaxDefense = 216;
@@ -1168,6 +1183,18 @@ const char* HookTooltipSlot() {
 	return nullptr;
 }
 
+// The tables are read on the game thread once a game is loaded: asked every
+// 2 seconds until they are. The last thing it does is say it is done (it
+// returns straight to Windows after that).
+DWORD WINAPI TickerMain(void*) noexcept {
+	while (Running && !Ready) {
+		(void)Threads->runOnGameThread(Context, BuildTables, nullptr);
+		for (int i = 0; i < 20 && Running && !Ready; ++i) Sleep(100);
+	}
+	TickerDone = true;
+	return 0;
+}
+
 template <typename Service>
 const Service* Query(const char* name) {
 	const Service* service = nullptr;
@@ -1237,18 +1264,22 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (auto* api = context->GetApi(); !api->registerConsoleCommand || !api->registerConsoleCommand(context, &command)) Say(true, "Perfect Frame: could not register the perfect-frame command");
 	// The tables are read on the game thread once a game is loaded.
 	Running = true;
-	Ticker  = std::thread([] {
-        while (Running && !Ready) {
-            (void)Threads->runOnGameThread(Context, BuildTables, nullptr);
-            for (int i = 0; i < 20 && Running && !Ready; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-    });
+	TickerDone = false;
+	Ticker     = CreateThread(nullptr, 0, TickerMain, nullptr, 0, nullptr);
+	if (!Ticker) {
+		TickerDone = true;
+		Say(true, "Perfect Frame: could not start its worker; the tables are not read");
+	}
 	Say(false, "Perfect Frame %s: active (uniques %s, sets %s, runewords %s)", PluginVersion, Config.uniques ? "on" : "off", Config.sets ? "on" : "off",
 	    Config.runewords ? "on" : "off");
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
-	Running = false;
-	if (Ticker.joinable()) Ticker.join();
+	StopTicker();
+	if (Ticker) {
+		WaitForSingleObject(Ticker, 1000);
+		CloseHandle(Ticker);
+		Ticker = nullptr;
+	}
 }
