@@ -8,6 +8,7 @@ D2RLoader 1.3.1 gives each character a single custom player page, and the first 
 - **Drops and Ctrl+click**: an area's grid takes items only into its own cells, and each plugin decides what may go in its area. Ctrl+click puts the item in the area's first free cell.
 - **Charms**: a charm on the page gives its bonuses only inside an area that asked for active charms.
 - **Removing a plugin**: its items stay on the page and its place stays reserved. `pagehost all` opens the whole page to take them out.
+- **TCP/IP games**: each player's host tells the hosting player's host which area is open and whether the item held may go in it, so drops, Ctrl+click and charms work for every player, whatever plugins each one has. A player who joins a game whose hosting player doesn't run the host (1.0.1 or later) gets a message instead of an area; a player without the host is unaffected.
 - **Items left behind**: the host records where each character's page items lie and which area each was put in. If an area is placed over items that belong to another area or to none, those items go back to that character's inventory (or personal stash) at the next game load.
 
 On its own the host does nothing visible: it is used by other plugins. Plugins that register their own custom page (such as Charm Inventory) can't share it.
@@ -36,7 +37,7 @@ The host also writes `aaa-player-page-host-areas.txt` (where each area is) and `
 | `pagehost all` | Opens the whole page with no area limits, to take items out. |
 | `pagehost free <plugin>/<area>` | Frees a saved place, only when it is empty on every character. |
 
-Log: `d2rloader/logs/aaa-player-page-host.log`.
+Log: `d2rloader/logs/aaa-player-page-host.log`. Two games running on one PC share that file, so each game also writes its own, `aaa-player-page-host-game1.log`, `-game2.log` and so on.
 
 ## For plugin developers
 

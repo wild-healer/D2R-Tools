@@ -35,6 +35,8 @@
 //     `pagehost free` only frees a place empty on every character. The record
 //     is refreshed when the character is ready, on every host grid draw and
 //     after every host item call.
+//   - TCP/IP games: see "TCP/IP games" (each player's host tells the hosting
+//     game's host which area it has open, what it holds and its area's verdict).
 
 #include "page_host_api.h"
 
@@ -51,6 +53,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -63,7 +66,7 @@ using PageHost::AreaHandle;
 using PageHost::Result;
 
 constexpr const char* PluginId      = "aaa-player-page-host";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.1";
 constexpr const char* LogicalPageId = "page"; // keep: saved items are keyed by it
 
 const D2RL::PluginInfo Info {
@@ -166,6 +169,23 @@ CellFn      NextCellAtPoint {};
 CellRectFn  NextCellRect {};
 void**      Vtable {};
 
+// Two games on one PC share D2RLoader's plugin log, so each process also
+// writes its own: d2rloader/logs/aaa-player-page-host-game<N>.log, N the first
+// one no other running game holds (1 for a single game).
+HANDLE           OwnLog = INVALID_HANDLE_VALUE;
+std::mutex       OwnLogLock;
+
+void OpenOwnLog(const std::wstring& configFolder) {
+	std::wstring folder = configFolder;
+	if (!folder.empty() && (folder.back() == L'\\' || folder.back() == L'/')) folder.pop_back();
+	const auto up = folder.find_last_of(L"\\/");
+	if (up == std::wstring::npos) return;
+	for (int n = 1; n <= 8 && OwnLog == INVALID_HANDLE_VALUE; ++n) {
+		const std::wstring path = folder.substr(0, up + 1) + L"logs\\aaa-player-page-host-game" + std::to_wstring(n) + L".log";
+		OwnLog = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	}
+}
+
 void Log(bool warn, const char* format, ...) noexcept {
 	if (!Context) return;
 	char    line[768] {};
@@ -174,6 +194,14 @@ void Log(bool warn, const char* format, ...) noexcept {
 	std::vsnprintf(line, sizeof(line), format, args);
 	va_end(args);
 	warn ? Context->LogWarn(line) : Context->LogInfo(line);
+	if (OwnLog == INVALID_HANDLE_VALUE) return;
+	SYSTEMTIME now {};
+	GetLocalTime(&now);
+	char stamped[860] {};
+	const int length = std::snprintf(stamped, sizeof(stamped), "[%02u:%02u:%02u.%03u] [%s] %s\r\n", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds, warn ? "WARN" : "INFO", line);
+	std::lock_guard guard(OwnLogLock);
+	DWORD written = 0;
+	WriteFile(OwnLog, stamped, static_cast<DWORD>(std::min<int>(length, sizeof(stamped) - 1)), &written, nullptr);
 }
 
 bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
@@ -699,12 +727,15 @@ void ScanPage(bool giveBack = false) noexcept {
 	SaveItems();
 }
 
+void SendState() noexcept;
+
 std::uint64_t HookDraw(void* widget, void* a, void* b, void* c) noexcept {
 	const int slot = widget ? SlotOf(widget) : -1;
 	if (slot >= 0) {
 		LastDrawn[slot].store(GetTickCount64());
 		PageByte.store(static_cast<const std::uint8_t*>(widget)[WidgetPage]);
 		ScanPage(); // drops and pick-ups only happen while a host grid shows
+		SendState(); // a joined TCP/IP game: the hosting game learns what is held over the area
 	}
 	if (slot < 0 || slot == AllSlot) return NextDraw(widget, a, b, c);
 	NoteWidget(widget, slot);
@@ -844,6 +875,8 @@ bool CheckCharmSlot() noexcept {
 	return true;
 }
 
+bool PeerCharmsAt(void* unit, int x, int y, bool& counts) noexcept;
+
 std::int32_t HookCharm(void* item, void* unit) noexcept {
 	auto* const bytes = static_cast<std::uint8_t*>(item);
 	auto* const data  = bytes ? *reinterpret_cast<std::uint8_t**>(bytes + UnitData) : nullptr;
@@ -851,6 +884,8 @@ std::int32_t HookCharm(void* item, void* unit) noexcept {
 	auto* const path = *reinterpret_cast<std::uint8_t**>(bytes + UnitPath);
 	if (!path) return 0;
 	const int           x = *reinterpret_cast<std::int32_t*>(path + PathX), y = *reinterpret_cast<std::int32_t*>(path + PathY);
+	// A joined player's charms (in the hosting game): by that player's charm areas.
+	if (bool counts = false; PeerCharmsAt(unit, x, y, counts)) return counts ? (CoreCharm ? CoreCharm(item, unit) : NextCharm(item, unit)) : 0;
 	const std::uint32_t charms = CharmSlots.load();
 	for (int slot = 0; slot < SlotCount; ++slot)
 		if ((charms >> slot & 1) && Inside(AreaOfSlot(slot), x, y)) return CoreCharm ? CoreCharm(item, unit) : NextCharm(item, unit);
@@ -1000,6 +1035,622 @@ void __cdecl RunCtrlMove(const D2RL::PluginContext*, void* user) noexcept {
 	ScanPage();
 }
 
+// ---- TCP/IP games ----
+// In a TCP/IP game the hosting player's game owns every item: a joined
+// player's drop onto the page, and the page's item policy for it, run there,
+// where nothing says which player drops or which area that player has open.
+// So each player's host connects to the hosting game's host over D2RLoader's
+// plugin messages (no plugin has to match: a game without the other side just
+// has no connection):
+//   - Hello: the player's id and its charm areas (the hosting game counts that
+//     player's page charms by them).
+//   - State: the area that player has open, the held item, and the verdict of
+//     the area's plugin for it (asked on that player's PC, where the plugin is).
+//     The hosting game's page policy, for a drop it can't tie to its own
+//     player, takes the verdict of the joined player holding an item over an
+//     open area.
+//   - Ctrl: a Ctrl+click move, done by the hosting game for that player.
+// A hosting game without the host (or with an older one) refuses the
+// connection: the player's areas then don't open and say why.
+namespace Net = D2RL::Network;
+namespace Tables = D2RL::DataTables;
+
+const D2RL::NetworkService*   NetApi {};
+const D2RL::DataTableService* TableApi {};
+Net::ChannelHandle            Channel = Net::InvalidChannelHandle;
+std::uint64_t                 Nonce {}; // this process: a hosting game's own player connects to itself
+constexpr std::uint64_t       NetToken    = 0x5048'4E45'5401'0001; // protocol 1
+constexpr std::uint32_t       NetProtocol = 1;
+constexpr std::uint16_t       NetChannelId = 1;
+enum : std::uint16_t { MsgHello = 1, MsgState = 2, MsgCtrl = 3, MsgWelcome = 101, MsgCtrlDone = 102 };
+enum : std::uint8_t { VerdictNone = 0, VerdictAllow = 1, VerdictReject = 2, VerdictUnknown = 3 };
+
+#pragma pack(push, 1)
+struct NetRect {
+	std::uint8_t x, y, w, h;
+	bool operator==(const NetRect&) const = default;
+};
+struct HelloMsg {
+	std::uint32_t protocol;
+	std::uint64_t nonce;
+	std::uint32_t playerId;
+	std::uint8_t  count;
+	NetRect       charms[SlotCount];
+	bool          operator==(const HelloMsg&) const = default;
+};
+struct StateMsg {
+	std::uint32_t seq;
+	std::uint8_t  open, verdict;
+	NetRect       area;
+	std::uint32_t runtimeId, classId;
+};
+struct CtrlMsg {
+	std::uint32_t seq, runtimeId;
+	std::uint8_t  x, y, verdict;
+	NetRect       area;
+};
+struct WelcomeMsg {
+	std::uint32_t protocol;
+	std::uint64_t nonce;
+	char          version[24];
+};
+struct CtrlDoneMsg {
+	std::uint32_t seq, runtimeId, result; // result: 0 moved, else what failed
+};
+#pragma pack(pop)
+static_assert(sizeof(HelloMsg) <= Net::MaxPayloadSize && sizeof(StateMsg) <= Net::MaxPayloadSize);
+
+const char* VerdictName(std::uint8_t v) {
+	return v == VerdictAllow ? "allowed" : v == VerdictReject ? "refused" : v == VerdictUnknown ? "unknown (item types unreadable)" : "none";
+}
+
+// ---- item types (for a plugin's policy asked outside D2RCore's request) ----
+// Each item class (Items row) -> its types with their parents, as D2RCore's
+// request lists them; read on every table load. Row layout of Steam 3.3.94995.
+constexpr std::uint32_t TypeRowSize = 232, ItemRowSize = 448;
+constexpr int           TypeCode = 0, TypeEquiv1 = 4, TypeEquiv2 = 6, ItemType1 = 302, ItemType2 = 304;
+std::mutex                                  TypesLock;
+std::vector<std::vector<Inv::ItemTypeFourCC>> TypesOfClass;
+
+template <typename T> T Field(const void* row, int offset) {
+	T value {};
+	std::memcpy(&value, static_cast<const std::uint8_t*>(row) + offset, sizeof(T));
+	return value;
+}
+
+void BuildTypes(const D2RL::PluginContext* context) {
+	if (!TableApi) return;
+	Tables::TableView types { .structSize = Tables::TableViewSize }, items { .structSize = Tables::TableViewSize };
+	const auto t = TableApi->getTable(context, Tables::Bank::Rotw, Tables::TableId::ItemTypes, &types);
+	const auto i = TableApi->getTable(context, Tables::Bank::Rotw, Tables::TableId::Items, &items);
+	if (t != Tables::Result::Success || i != Tables::Result::Success || !types.rows || !items.rows) {
+		Log(true, "multiplayer: item tables unreadable (results %u, %u): a joined player's Ctrl+click and drops go by the hosting game", static_cast<unsigned>(t), static_cast<unsigned>(i));
+		return;
+	}
+	if (types.rowSize != TypeRowSize || items.rowSize != ItemRowSize) {
+		Log(true, "multiplayer: item tables laid out differently (rows of %u, %u bytes): item types unknown", types.rowSize, items.rowSize);
+		return;
+	}
+	std::vector<std::vector<Inv::ItemTypeFourCC>> built(items.rowCount);
+	const auto* typeRows = static_cast<const std::uint8_t*>(types.rows);
+	const auto* itemRows = static_cast<const std::uint8_t*>(items.rows);
+	for (std::uint32_t c = 0; c < items.rowCount; ++c) {
+		const auto* row = itemRows + static_cast<std::size_t>(c) * ItemRowSize;
+		std::vector<std::uint16_t> todo { Field<std::uint16_t>(row, ItemType2), Field<std::uint16_t>(row, ItemType1) };
+		std::vector<std::uint16_t> seen;
+		while (!todo.empty() && seen.size() < 32) {
+			const auto k = todo.back();
+			todo.pop_back();
+			if (!k || k >= types.rowCount || std::find(seen.begin(), seen.end(), k) != seen.end()) continue;
+			seen.push_back(k);
+			const auto*         type = typeRows + static_cast<std::size_t>(k) * TypeRowSize;
+			Inv::ItemTypeFourCC code {};
+			std::memcpy(code.value, type + TypeCode, 4);
+			built[c].push_back(code);
+			todo.push_back(Field<std::uint16_t>(type, TypeEquiv2));
+			todo.push_back(Field<std::uint16_t>(type, TypeEquiv1));
+		}
+	}
+	std::lock_guard guard(TypesLock);
+	TypesOfClass = std::move(built);
+	Log(false, "multiplayer: item types of %u item classes read", items.rowCount);
+}
+
+bool TypesOf(std::uint32_t classId, std::vector<Inv::ItemTypeFourCC>& out) {
+	std::lock_guard guard(TypesLock);
+	if (classId >= TypesOfClass.size() || TypesOfClass[classId].empty()) return false;
+	out = TypesOfClass[classId];
+	return true;
+}
+
+// The policy of the area in `slot` (its plugin's callback) for a request.
+Inv::ItemPolicyDecision AskSlot(int slot, const Inv::ItemPolicyRequest* request) noexcept {
+	using Decision = Inv::ItemPolicyDecision;
+	if (slot == AllSlot) return Decision::Allow;
+	PageHost::ItemPolicyFn policy {};
+	void*                  user {};
+	AreaHandle             handle {};
+	{
+		std::lock_guard guard(Lock);
+		for (const auto& lease : Leases)
+			if (lease.slot == slot) policy = lease.policy, user = lease.user, handle = lease.handle;
+	}
+	if (!handle) return Decision::Reject;
+	if (!policy) return Decision::Allow;
+	// A client whose DLL is gone (removed or unloaded): its area takes nothing new.
+	HMODULE module {};
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(policy), &module)) return Decision::Reject;
+	return policy(handle, request, user);
+}
+
+// The verdict of the area in `slot` for an item of that class, asked on this PC.
+std::uint8_t VerdictFor(int slot, std::uint32_t classId) noexcept {
+	if (slot == AllSlot) return VerdictAllow;
+	std::vector<Inv::ItemTypeFourCC> types;
+	if (!TypesOf(classId, types)) return VerdictUnknown;
+	const Inv::ItemPolicyRequest request {
+		.structSize = Inv::ItemPolicyRequestSize, .page = Page, .reason = Inv::ItemPlacementReason::LocalMove,
+		.matchingItemTypeCount = static_cast<std::uint32_t>(types.size()), .matchingItemTypes = types.data() };
+	return AskSlot(slot, &request) == Inv::ItemPolicyDecision::Allow ? VerdictAllow : VerdictReject;
+}
+
+NetRect RectOfSlot(int slot) {
+	if (slot == AllSlot) return { 0, 0, PageSize, PageSize };
+	const Area a = AreaOfSlot(slot);
+	return { static_cast<std::uint8_t>(a.x), static_cast<std::uint8_t>(a.y), static_cast<std::uint8_t>(a.width), static_cast<std::uint8_t>(a.height) };
+}
+
+// ---- the hosting game's side ----
+
+struct Peer {
+	Net::PeerHandle handle {};
+	bool            self {};
+	std::uint32_t   playerId {};
+	std::vector<NetRect> charms;
+	StateMsg        state {};
+	std::uint64_t   stateAt {};
+};
+std::mutex        PeerLock;
+std::vector<Peer> Peers;
+std::atomic<int>  RemotePeers {}; // joined players (not this PC's own)
+thread_local bool RemoteAllow = false; // a joined player's Ctrl+click move, its verdict already Allow
+
+Peer* PeerOf(Net::PeerHandle handle) {
+	for (auto& peer : Peers)
+		if (peer.handle == handle) return &peer;
+	return nullptr;
+}
+
+void CountPeers() {
+	RemotePeers.store(static_cast<int>(std::count_if(Peers.begin(), Peers.end(), [](const Peer& p) { return !p.self; })));
+}
+
+// Charms of a joined player's page: counted by that player's charm areas.
+// False when the unit isn't a joined player this game knows.
+bool PeerCharmsAt(void* unit, int x, int y, bool& counts) noexcept {
+	if (!unit || RemotePeers.load() == 0) return false;
+	std::uint32_t type = ~0U, id = 0;
+	std::memcpy(&type, unit, sizeof(type));
+	std::memcpy(&id, static_cast<const std::uint8_t*>(unit) + UnitId, sizeof(id));
+	if (type != 0) return false; // not a player
+	std::lock_guard guard(PeerLock);
+	for (const auto& peer : Peers)
+		if (!peer.self && peer.playerId == id) {
+			counts = std::any_of(peer.charms.begin(), peer.charms.end(), [&](const NetRect& r) { return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h; });
+			return true;
+		}
+	return false;
+}
+
+// For a drop the hosting game can't tie to its own player: the verdict of the
+// joined player holding an item over an open area (fresh state), if any.
+bool RemoteDecision(const Inv::ItemPolicyRequest* request, Inv::ItemPolicyDecision& decision) noexcept {
+	if (RemotePeers.load() == 0) return false;
+	const std::uint64_t now = GetTickCount64();
+	std::lock_guard     guard(PeerLock);
+	std::vector<const Peer*> holding;
+	for (const auto& peer : Peers)
+		if (!peer.self && peer.state.open && peer.state.runtimeId && now - peer.stateAt < 2000) holding.push_back(&peer);
+	if (holding.empty()) {
+		Log(false, "multiplayer: a page drop with no area open here and no joined player holding an item over an open area (%d joined with the host)", RemotePeers.load());
+		return false;
+	}
+	const Peer* chosen = holding.front();
+	if (holding.size() > 1) // several at once: the one whose item has the request's own type
+		for (const Peer* peer : holding) {
+			std::vector<Inv::ItemTypeFourCC> types;
+			if (TypesOf(peer->state.classId, types) && request && request->matchingItemTypeCount
+			    && std::any_of(types.begin(), types.end(), [&](const Inv::ItemTypeFourCC& t) { return Inv::ItemPolicyRequestMatchesType(request, t); })) {
+				chosen = peer;
+				break;
+			}
+		}
+	const auto& s = chosen->state;
+	decision      = s.verdict == VerdictReject ? Inv::ItemPolicyDecision::Reject : Inv::ItemPolicyDecision::Allow;
+	Log(s.verdict == VerdictUnknown, "multiplayer: page drop by player %u (item %u) into their area %u,%u %ux%u: %s, %s%s", chosen->playerId, s.runtimeId, s.area.x, s.area.y, s.area.w, s.area.h,
+	    VerdictName(s.verdict), decision == Inv::ItemPolicyDecision::Allow ? "allowed" : "refused", holding.size() > 1 ? " (several players held items)" : "");
+	return true;
+}
+
+struct RemoteCtrl {
+	Net::PeerHandle peer;
+	CtrlMsg         msg;
+};
+
+void SendCtrlDone(Net::PeerHandle peer, const CtrlMsg& msg, std::uint32_t result) {
+	const CtrlDoneMsg done { msg.seq, msg.runtimeId, result };
+	if (const auto sent = NetApi->sendToClient(Context, Channel, peer, MsgCtrlDone, &done, sizeof(done)); sent != Net::Result::Success)
+		Log(true, "multiplayer: could not answer a Ctrl+click move (network result %u)", static_cast<unsigned>(sent));
+}
+
+// Game thread: the joined player's Ctrl+click move, for that player.
+void __cdecl RunRemoteCtrl(const D2RL::PluginContext*, void* user) noexcept {
+	const RemoteCtrl job = *static_cast<RemoteCtrl*>(user);
+	delete static_cast<RemoteCtrl*>(user);
+	const auto& m = job.msg;
+	D2RL::PlayerHandle player {};
+	if (const auto found = NetApi->getPeerPlayer(Context, Channel, job.peer, &player); found != Net::Result::Success || !player) {
+		Log(true, "multiplayer: Ctrl+click of a joined player: their player not found (network result %u)", static_cast<unsigned>(found));
+		return SendCtrlDone(job.peer, m, 1);
+	}
+	Find find { m.runtimeId, {} };
+	const Inv::ItemFilter everything { .structSize = sizeof(Inv::ItemFilter), .containerMask = ~0U };
+	(void)Inventory->forEachInventoryItem(Context, player, &everything, FindItem, &find);
+	if (!find.handle) {
+		Log(true, "multiplayer: Ctrl+click of a joined player: item %u not found among theirs", m.runtimeId);
+		return SendCtrlDone(job.peer, m, 2);
+	}
+	D2RL::Items::ExistingItemOperation operation { .structSize = sizeof(D2RL::Items::ExistingItemOperation), .kind = D2RL::Items::ExistingItemOperationKind::Move, .item = find.handle };
+	operation.move.destination = { .structSize = sizeof(D2RL::Items::ItemDestination), .container = D2RL::Items::ItemContainer::CustomPage, .placement = D2RL::Items::Placement::Exact,
+		                           .customPageHandle = Page, .x = m.x, .y = m.y };
+	const D2RL::Items::ExistingItemTransaction transaction { .structSize = sizeof(D2RL::Items::ExistingItemTransaction), .player = player, .operationCount = 1, .operations = &operation };
+	D2RL::Items::ExistingItemTransactionResult result { .structSize = sizeof(D2RL::Items::ExistingItemTransactionResult) };
+	RemoteAllow      = true;
+	const auto moved = ItemApi->executeExistingItemTransaction(Context, &transaction, &result);
+	RemoteAllow      = false;
+	Log(moved != D2RL::Items::Result::Success, "multiplayer: Ctrl+click of a joined player: item %u to page cell %u,%u: item result %u", m.runtimeId, m.x, m.y, static_cast<unsigned>(moved));
+	SendCtrlDone(job.peer, m, moved == D2RL::Items::Result::Success ? 0 : 100 + static_cast<std::uint32_t>(moved));
+}
+
+void __cdecl OnHostMessage(const D2RL::PluginContext*, Net::ChannelHandle, Net::PeerHandle peer, std::uint16_t id, const void* data, std::uint32_t size, void*) noexcept {
+	if (id == MsgHello && size >= sizeof(HelloMsg)) {
+		HelloMsg hello {};
+		std::memcpy(&hello, data, sizeof(hello));
+		bool fresh = false;
+		{
+			std::lock_guard guard(PeerLock);
+			Peer*           known = PeerOf(peer);
+			if (!known) Peers.push_back({ .handle = peer }), known = &Peers.back(), fresh = true;
+			known->self     = hello.nonce == Nonce;
+			known->playerId = hello.playerId;
+			known->charms.assign(hello.charms, hello.charms + std::min<int>(hello.count, SlotCount));
+			CountPeers();
+		}
+		if (fresh || hello.nonce != Nonce)
+			Log(false, "multiplayer: %s player %u connected (protocol %u, %u charm area(s))", hello.nonce == Nonce ? "this PC's own" : "joined", hello.playerId, hello.protocol, hello.count);
+		WelcomeMsg welcome { NetProtocol, Nonce, {} };
+		std::snprintf(welcome.version, sizeof(welcome.version), "%s", PluginVersion);
+		if (const auto sent = NetApi->sendToClient(Context, Channel, peer, MsgWelcome, &welcome, sizeof(welcome)); sent != Net::Result::Success)
+			Log(true, "multiplayer: could not answer player %u (network result %u)", hello.playerId, static_cast<unsigned>(sent));
+		return;
+	}
+	if (id == MsgState && size >= sizeof(StateMsg)) {
+		StateMsg state {};
+		std::memcpy(&state, data, sizeof(state));
+		std::lock_guard guard(PeerLock);
+		Peer*           known = PeerOf(peer);
+		if (!known) {
+			static std::atomic<int> told {};
+			if (told.fetch_add(1) < 5) Log(true, "multiplayer: an area state from a player who didn't say hello: ignored");
+			return;
+		}
+		if (!known->self && (state.open != known->state.open || (state.runtimeId != 0) != (known->state.runtimeId != 0)))
+			Log(false, "multiplayer: player %u: area %s %u,%u %ux%u, %s%s", known->playerId, state.open ? "open" : "closed", state.area.x, state.area.y, state.area.w, state.area.h,
+			    state.runtimeId ? "holding an item, " : "nothing held", state.runtimeId ? VerdictName(state.verdict) : "");
+		known->state   = state;
+		known->stateAt = GetTickCount64();
+		return;
+	}
+	if (id == MsgCtrl && size >= sizeof(CtrlMsg)) {
+		CtrlMsg msg {};
+		std::memcpy(&msg, data, sizeof(msg));
+		std::uint32_t player = 0;
+		{
+			std::lock_guard guard(PeerLock);
+			const Peer*     known = PeerOf(peer);
+			if (!known) {
+				Log(true, "multiplayer: a Ctrl+click from a player who didn't say hello: refused");
+				return SendCtrlDone(peer, msg, 3);
+			}
+			player = known->playerId;
+		}
+		const bool inside = msg.x >= msg.area.x && msg.y >= msg.area.y && msg.x < msg.area.x + msg.area.w && msg.y < msg.area.y + msg.area.h && msg.area.x + msg.area.w <= PageSize
+		                    && msg.area.y + msg.area.h <= PageSize;
+		if (msg.verdict == VerdictReject || !inside || Page == Inv::InvalidHandle || !ItemApi || !ThreadApi) {
+			Log(true, "multiplayer: Ctrl+click of player %u (item %u to %u,%u): refused (%s)", player, msg.runtimeId, msg.x, msg.y,
+			    msg.verdict == VerdictReject ? "their area refused it" : !inside ? "cell outside their area" : "this game has no page or item service");
+			return SendCtrlDone(peer, msg, 4);
+		}
+		auto* job = new (std::nothrow) RemoteCtrl { peer, msg };
+		if (const auto queued = job ? ThreadApi->runOnGameThread(Context, RunRemoteCtrl, job) : D2RL::Threads::Result::Busy; queued != D2RL::Threads::Result::Success) {
+			delete job;
+			Log(true, "multiplayer: Ctrl+click of player %u could not be queued (thread result %u)", player, static_cast<unsigned>(queued));
+			SendCtrlDone(peer, msg, 5);
+		}
+		return;
+	}
+	static std::atomic<int> told {};
+	if (told.fetch_add(1) < 5) Log(true, "multiplayer: unknown message %u (%u bytes) ignored", id, size);
+}
+
+// ---- the joined player's side ----
+
+enum class Link { Idle, Connecting, Connected, Refused };
+std::atomic<Link>          LinkState { Link::Idle };
+std::atomic<bool>          InGame {}, Remote {}, HostMissing {};
+std::atomic<std::uint32_t> PlayerId {};
+std::uint64_t              LinkTriedAt {};
+int                        LinkTries {};
+HelloMsg                   HelloSent {};
+StateMsg                   StateSent {};
+std::uint64_t              StateSentAt {};
+std::uint32_t              StateSeq {}, CtrlSeq {};
+std::uint32_t              VerdictItem = ~0U; // the held item and slot the verdict below is for
+int                        VerdictSlot = -2;
+std::uint8_t               Verdict {};
+bool                       HostMissingSaid {};
+
+const char* RejectionName(Net::RejectionReason reason) {
+	switch (reason) {
+	case Net::RejectionReason::UnknownPlugin: return "the hosting player doesn't run Player Page Host";
+	case Net::RejectionReason::UnknownChannel: return "the hosting player runs a Player Page Host without multiplayer support (1.0.0)";
+	case Net::RejectionReason::Incompatible: return "the hosting player runs another Player Page Host protocol";
+	case Net::RejectionReason::ScopeMismatch: return "the hosting player loads Player Page Host in another scope (mod)";
+	case Net::RejectionReason::ProtocolMismatch: return "the hosting player's D2RLoader speaks another protocol";
+	case Net::RejectionReason::HostUnavailable: return "the hosting game isn't ready yet";
+	case Net::RejectionReason::RegistrationClosed: return "the hosting player's host registered too late";
+	default: return "no reason given";
+	}
+}
+
+void __cdecl OnLinkState(const D2RL::PluginContext*, const Net::ConnectionEvent* event, void*) noexcept {
+	if (!event) return;
+	Log(false, "multiplayer: connection event: state %u, reason %u, peer %llu (link %d)", static_cast<unsigned>(event->state), static_cast<unsigned>(event->reason),
+	    static_cast<unsigned long long>(event->peer), static_cast<int>(LinkState.load()));
+	bool hostSide = false;
+	if (event->peer != Net::InvalidPeerHandle) {
+		std::lock_guard guard(PeerLock);
+		hostSide = PeerOf(event->peer) != nullptr;
+	}
+	if (hostSide) { // the hosting game: a player left
+		if (event->state == Net::ConnectionState::Disconnected) {
+			std::lock_guard guard(PeerLock);
+			const auto      gone = std::remove_if(Peers.begin(), Peers.end(), [&](const Peer& p) { return p.handle == event->peer; });
+			for (auto p = gone; p != Peers.end(); ++p)
+				if (!p->self) Log(false, "multiplayer: player %u disconnected", p->playerId);
+			Peers.erase(gone, Peers.end());
+			CountPeers();
+		}
+		return;
+	}
+	switch (event->state) {
+	case Net::ConnectionState::Connected:
+		LinkState = Link::Connected;
+		HelloSent = {};
+		Log(false, "multiplayer: connected to the hosting game's Player Page Host");
+		break;
+	case Net::ConnectionState::Rejected:
+		if (event->reason == Net::RejectionReason::HostUnavailable) {
+			LinkState = Link::Idle; // tried again
+			break;
+		}
+		LinkState   = Link::Refused;
+		HostMissing = true;
+		Log(true, "multiplayer: the hosting game refused the connection: %s (reason %u). Page areas can't take items in this game.", RejectionName(event->reason),
+		    static_cast<unsigned>(event->reason));
+		break;
+	case Net::ConnectionState::Disconnected:
+		if (LinkState == Link::Connected) Log(false, "multiplayer: disconnected from the hosting game");
+		LinkState = Link::Idle;
+		Remote    = false;
+		break;
+	default: break;
+	}
+}
+
+void __cdecl OnClientMessage(const D2RL::PluginContext*, Net::ChannelHandle, std::uint16_t id, const void* data, std::uint32_t size, void*) noexcept {
+	if (id == MsgWelcome && size >= sizeof(WelcomeMsg)) {
+		WelcomeMsg welcome {};
+		std::memcpy(&welcome, data, sizeof(welcome));
+		welcome.version[sizeof(welcome.version) - 1] = 0;
+		const bool remote = welcome.nonce != Nonce;
+		if (remote != Remote.load() || remote) Log(false, "multiplayer: %s (Player Page Host %s, protocol %u)", remote ? "joined a TCP/IP game; the hosting game runs the host" : "this PC hosts the game",
+		                                          welcome.version, welcome.protocol);
+		Remote = remote;
+		return;
+	}
+	if (id == MsgCtrlDone && size >= sizeof(CtrlDoneMsg)) {
+		CtrlDoneMsg done {};
+		std::memcpy(&done, data, sizeof(done));
+		Log(done.result != 0, "multiplayer: Ctrl+click move of item %u by the hosting game: %s (code %u)", done.runtimeId, done.result == 0 ? "moved" : "failed, see the hosting player's log", done.result);
+		if (done.result == 0 && ItemSound && PlaySoundAt)
+			if (std::uint8_t* const unit = ItemUnit(done.runtimeId)) PlaySoundAt(ItemSound(unit), nullptr, 0, 0, false);
+		return;
+	}
+	static std::atomic<int> told {};
+	if (told.fetch_add(1) < 5) Log(true, "multiplayer: unknown message %u (%u bytes) from the hosting game ignored", id, size);
+}
+
+HelloMsg MakeHello() {
+	HelloMsg hello { .protocol = NetProtocol, .nonce = Nonce, .playerId = PlayerId.load() };
+	const std::uint32_t charms = CharmSlots.load();
+	for (int slot = 0; slot < SlotCount; ++slot)
+		if (charms >> slot & 1) hello.charms[hello.count++] = RectOfSlot(slot);
+	return hello;
+}
+
+// The area open here, the held item and the area's verdict for it, sent when
+// it changes and every half second while an area shows (UI thread: on every
+// host grid draw and on the ticker).
+void SendState() noexcept {
+	if (LinkState != Link::Connected || !Remote || !NetApi) return;
+	const int     slot = ShownSlot();
+	void* const   held = slot >= 0 && NativesOk ? CursorItem() : nullptr;
+	std::uint32_t runtimeId = 0, classId = 0;
+	if (held) std::memcpy(&classId, static_cast<const std::uint8_t*>(held) + 4, 4), std::memcpy(&runtimeId, static_cast<const std::uint8_t*>(held) + UnitId, 4);
+	if (runtimeId != VerdictItem || slot != VerdictSlot) {
+		VerdictItem = runtimeId, VerdictSlot = slot;
+		Verdict     = runtimeId ? VerdictFor(slot, classId) : VerdictNone;
+	}
+	StateMsg state { .seq = StateSeq, .open = static_cast<std::uint8_t>(slot >= 0), .verdict = Verdict, .area = slot >= 0 ? RectOfSlot(slot) : NetRect {}, .runtimeId = runtimeId, .classId = classId };
+	const std::uint64_t now     = GetTickCount64();
+	const bool          changed = state.open != StateSent.open || state.runtimeId != StateSent.runtimeId || state.verdict != StateSent.verdict || !(state.area == StateSent.area);
+	if (!changed && (!state.open || now - StateSentAt < 500)) return;
+	state.seq = ++StateSeq;
+	if (const auto sent = NetApi->sendToHost(Context, Channel, MsgState, &state, sizeof(state)); sent != Net::Result::Success) {
+		static std::atomic<int> told {};
+		if (told.fetch_add(1) < 10) Log(true, "multiplayer: could not send the open area to the hosting game (network result %u)", static_cast<unsigned>(sent));
+		return;
+	}
+	if (changed && state.runtimeId && state.open)
+		Log(false, "multiplayer: holding item %u over %s: %s", runtimeId, slot == AllSlot ? "the whole page" : Slots[slot].id.c_str(), VerdictName(Verdict));
+	StateSent   = state;
+	StateSentAt = now;
+}
+
+// Ticker (UI thread): connects once in a game, says hello, keeps the state.
+void __cdecl NetTick(const D2RL::PluginContext*, void*) noexcept {
+	if (!NetApi || Channel == Net::InvalidChannelHandle || !InGame) return;
+	const std::uint64_t now = GetTickCount64();
+	if (LinkState == Link::Idle || (LinkState == Link::Connecting && now - LinkTriedAt > 5000)) {
+		if (LinkTries >= 30) return; // given up; the log says why
+		if (LinkTries > 0 && now - LinkTriedAt < 2000) return;
+		LinkTriedAt     = now;
+		const auto tried = NetApi->connectToHost(Context, Channel);
+		++LinkTries;
+		if (tried == Net::Result::Success) {
+			if (LinkState == Link::Idle) LinkState = Link::Connecting;
+		} else if (tried == Net::Result::Incompatible) {
+			LinkState   = Link::Refused;
+			HostMissing = true;
+			Log(true, "multiplayer: the hosting game uses another D2RLoader transport: page areas can't take items in this game");
+		}
+		if (LinkTries <= 3 || LinkTries == 10 || LinkTries == 30)
+			Log(LinkTries == 30 && LinkState != Link::Connected, "multiplayer: connecting to the hosting game: network result %u (try %d of 30)", static_cast<unsigned>(tried), LinkTries);
+		return;
+	}
+	// The channel's own connection state, in case the event didn't come.
+	if (LinkState != Link::Connected && NetApi->getChannelInfo) {
+		Net::ChannelInfo info { .structSize = Net::ChannelInfoSize };
+		if (NetApi->getChannelInfo(Context, Channel, &info) == Net::Result::Success) {
+			static Net::ConnectionState told = Net::ConnectionState::Disconnected;
+			if (info.connectionState != told) {
+				told = info.connectionState;
+				Log(false, "multiplayer: channel state %u, connection %u, rejection %u", static_cast<unsigned>(info.state), static_cast<unsigned>(info.connectionState),
+				    static_cast<unsigned>(info.rejectionReason));
+			}
+			if (info.connectionState == Net::ConnectionState::Connected) {
+				LinkState = Link::Connected;
+				HelloSent = {};
+				Log(false, "multiplayer: connected to the hosting game's Player Page Host (channel state)");
+			} else if (info.connectionState == Net::ConnectionState::Rejected && info.rejectionReason != Net::RejectionReason::HostUnavailable && LinkState != Link::Refused) {
+				LinkState   = Link::Refused;
+				HostMissing = true;
+				Log(true, "multiplayer: the hosting game refused the connection: %s (reason %u). Page areas can't take items in this game.", RejectionName(info.rejectionReason),
+				    static_cast<unsigned>(info.rejectionReason));
+			}
+		}
+	}
+	if (LinkState != Link::Connected) return;
+	if (const HelloMsg hello = MakeHello(); !(hello == HelloSent)) {
+		if (const auto sent = NetApi->sendToHost(Context, Channel, MsgHello, &hello, sizeof(hello)); sent == Net::Result::Success) {
+			HelloSent = hello;
+			Log(false, "multiplayer: hello sent (player %u, %u charm area(s))", hello.playerId, hello.count);
+		} else Log(true, "multiplayer: could not say hello to the hosting game (network result %u)", static_cast<unsigned>(sent));
+	}
+	SendState();
+}
+
+void ResetLink(bool inGame, std::uint32_t player) {
+	InGame      = inGame;
+	PlayerId    = player;
+	LinkState   = Link::Idle;
+	Remote      = false;
+	HostMissing = false;
+	HostMissingSaid = false;
+	LinkTries   = 0;
+	HelloSent   = {};
+	StateSent   = {};
+	VerdictItem = ~0U, VerdictSlot = -2;
+	std::lock_guard guard(PeerLock);
+	Peers.clear(); // a new game: new players
+	CountPeers();
+}
+
+// A joined player's Ctrl+click: the hosting game moves it. True when sent.
+bool SendCtrl(int slot, std::uint32_t runtimeId, std::uint32_t classId, int x, int y) noexcept {
+	const std::uint8_t verdict = VerdictFor(slot, classId);
+	if (verdict == VerdictReject) {
+		Log(false, "multiplayer: Ctrl+click of item %u: refused by %s", runtimeId, Slots[slot].id.c_str());
+		return true;
+	}
+	const CtrlMsg msg { ++CtrlSeq, runtimeId, static_cast<std::uint8_t>(x), static_cast<std::uint8_t>(y), verdict, RectOfSlot(slot) };
+	const auto    sent = NetApi->sendToHost(Context, Channel, MsgCtrl, &msg, sizeof(msg));
+	Log(sent != Net::Result::Success, "multiplayer: Ctrl+click of item %u to page cell %d,%d (%s, %s): sent to the hosting game, network result %u", runtimeId, x, y,
+	    slot == AllSlot ? "whole page" : Slots[slot].id.c_str(), VerdictName(verdict), static_cast<unsigned>(sent));
+	return sent == Net::Result::Success;
+}
+
+std::atomic<bool> Ticking {};
+HANDLE            TickerThread {};
+
+DWORD WINAPI Ticker(void*) {
+	while (Ticking) {
+		Sleep(200);
+		if (Ticking && ThreadApi) (void)ThreadApi->runOnUiThread(Context, NetTick, nullptr);
+	}
+	return 0;
+}
+
+void StartNetwork() {
+	if (Context->QueryService(&TableApi) != D2RL::ServiceQueryResult::Success) TableApi = nullptr;
+	if (Context->QueryService(&NetApi) != D2RL::ServiceQueryResult::Success || !D2RL::HasNetworkServiceField(NetApi, D2RL::NetworkServiceRequiredSize)) {
+		NetApi = nullptr;
+		Log(true, "multiplayer: no network service in this D2RLoader: in TCP/IP games only the hosting player can use page areas");
+		return;
+	}
+	LARGE_INTEGER counter {};
+	QueryPerformanceCounter(&counter);
+	Nonce = (static_cast<std::uint64_t>(GetCurrentProcessId()) << 32) ^ static_cast<std::uint64_t>(counter.QuadPart) ^ 0x9E3779B97F4A7C15ULL;
+	const Net::ChannelRegistration channel {
+		.structSize         = Net::ChannelRegistrationSize,
+		.localChannelId     = NetChannelId,
+		.compatibilityToken = NetToken,
+		.hostMessage        = OnHostMessage,
+		.clientMessage      = OnClientMessage,
+		.connectionState    = OnLinkState,
+	};
+	if (const auto registered = NetApi->registerChannel(Context, &channel, &Channel); registered != Net::Result::Success) {
+		Channel = Net::InvalidChannelHandle;
+		Log(true, "multiplayer: could not register the network channel (result %u): in TCP/IP games only the hosting player can use page areas", static_cast<unsigned>(registered));
+		return;
+	}
+	if (!ThreadApi && (Context->QueryService(&ThreadApi) != D2RL::ServiceQueryResult::Success || !ThreadApi)) {
+		Log(true, "multiplayer: no thread service: no connection to the hosting game");
+		return;
+	}
+	Ticking      = true;
+	TickerThread = CreateThread(nullptr, 0, Ticker, nullptr, 0, nullptr);
+	Log(false, "multiplayer: network channel registered (protocol %u)", NetProtocol);
+}
+
+void StopNetwork() {
+	Ticking = false;
+	if (TickerThread) WaitForSingleObject(TickerThread, 2000), CloseHandle(TickerThread), TickerThread = nullptr;
+	if (NetApi && Channel != Net::InvalidChannelHandle) (void)NetApi->unregisterChannel(Context, Channel);
+	Channel = Net::InvalidChannelHandle;
+}
+
 auto __cdecl OnItemClick(const D2RL::PluginContext*, const Clicks::ItemInteractionEvent* event, void*) noexcept -> Clicks::Decision {
 	if (!event || event->action != Clicks::Action::Activate || event->container == D2RL::Items::ItemContainer::CustomPage) return Clicks::Decision::Continue;
 	const bool ctrl = (event->modifiers & Clicks::ModifierBit(Clicks::Modifier::Control)) || (GetAsyncKeyState(VK_CONTROL) & 0x8000);
@@ -1016,17 +1667,42 @@ auto __cdecl OnItemClick(const D2RL::PluginContext*, const Clicks::ItemInteracti
 		Log(false, "Ctrl+click: no room for a %ux%u item in %s%s", w, h, slot == AllSlot ? "the page outside the areas" : Slots[slot].id.c_str(), unit ? "" : " (item not found)");
 		return Clicks::Decision::Consume;
 	}
+	if (Remote) { // a joined TCP/IP game: only the hosting game moves items
+		std::uint32_t classId = 0;
+		std::memcpy(&classId, unit + 4, sizeof(classId));
+		(void)SendCtrl(slot, info.runtimeId, classId, x, y);
+		return Clicks::Decision::Consume;
+	}
 	auto* move = new (std::nothrow) CtrlMove { slot, info.runtimeId, x, y };
-	if (!move || ThreadApi->runOnGameThread(Context, RunCtrlMove, move) != D2RL::Threads::Result::Success) delete move;
+	if (const auto queued = move ? ThreadApi->runOnGameThread(Context, RunCtrlMove, move) : D2RL::Threads::Result::Busy; queued != D2RL::Threads::Result::Success) {
+		delete move;
+		Log(true, "Ctrl+click: the move could not be queued (thread result %u%s)", static_cast<unsigned>(queued),
+		    queued == D2RL::Threads::Result::Unavailable ? ": a joined TCP/IP game whose hosting game has no Player Page Host 1.0.1 or later" : "");
+	}
 	return Clicks::Decision::Consume;
 }
 
 auto __cdecl OnPagePolicy(const D2RL::PluginContext*, const Inv::ItemPolicyRequest* request, void*) noexcept -> Inv::ItemPolicyDecision {
 	using Decision = Inv::ItemPolicyDecision;
-	if (!request || request->reason == Inv::ItemPlacementReason::SavedItemRestore || HostMoving) return Decision::Allow;
+	if (!request || request->reason == Inv::ItemPlacementReason::SavedItemRestore || HostMoving || RemoteAllow) return Decision::Allow;
 	const int slot = CtrlSlot >= 0 ? CtrlSlot : ShownSlot();
+	if (InGame && (Remote || RemotePeers.load() > 0 || LinkState != Link::Connected)) { // a TCP/IP game: every check in the log
+		static std::atomic<int> told {};
+		if (told.fetch_add(1) < 200)
+			Log(false, "multiplayer: page policy asked (reason %u, %u types, first %.4s): area on screen here %d, item held here %s, %s, %d joined player(s) known",
+			    static_cast<unsigned>(request->reason), request->matchingItemTypeCount, request->matchingItemTypeCount && request->matchingItemTypes ? request->matchingItemTypes[0].value : "-",
+			    slot, NativesOk && CursorItem() ? "yes" : "no", Remote ? "this game joined another" : "this game hosts or is local", RemotePeers.load());
+	}
+	// Not this PC's own player's drop (no area of it on screen, or nothing
+	// held): in a TCP/IP game, a joined player's.
+	if (const bool own = CtrlSlot >= 0 || (slot >= 0 && (!NativesOk || CursorItem())); !own)
+		if (Decision remote {}; RemoteDecision(request, remote)) return remote;
 	if (slot == AllSlot) return Decision::Allow;
-	if (slot < 0) return Decision::Reject;
+	if (slot < 0) {
+		static std::atomic<int> told {};
+		if (told.fetch_add(1) < 10) Log(false, "a page drop with no area on screen and no joined player's area open: refused");
+		return Decision::Reject;
+	}
 	// D2RLoader's own Ctrl+click transfer (no cursor item) would choose any cell
 	// of the page: refused. The host's own Ctrl+click move comes with CtrlSlot.
 	if (CtrlSlot < 0 && NativesOk && !CursorItem()) {
@@ -1034,20 +1710,7 @@ auto __cdecl OnPagePolicy(const D2RL::PluginContext*, const Inv::ItemPolicyReque
 		if (told.fetch_add(1) < 5) Log(false, "a Ctrl+click transfer the host didn't place was refused (item click listener %s)", ClicksOn ? "on" : "off");
 		return Decision::Reject;
 	}
-	PageHost::ItemPolicyFn policy {};
-	void*                  user {};
-	AreaHandle             handle {};
-	{
-		std::lock_guard guard(Lock);
-		for (const auto& lease : Leases)
-			if (lease.slot == slot) policy = lease.policy, user = lease.user, handle = lease.handle;
-	}
-	if (!handle) return Decision::Reject;
-	if (!policy) return Decision::Allow;
-	// A client whose DLL is gone (removed or unloaded): its area takes nothing new.
-	HMODULE module {};
-	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(policy), &module)) return Decision::Reject;
-	return policy(handle, request, user);
+	return AskSlot(slot, request);
 }
 
 // ---- the service ----
@@ -1296,6 +1959,12 @@ auto __cdecl OpenArea(AreaHandle handle) noexcept -> Result {
 	const Lease* lease = LeaseOf(handle);
 	if (!lease) return std::find(Refused.begin(), Refused.end(), handle) != Refused.end() ? Result::NoRoom : Result::NotFound;
 	if (!lease->placed) return Result::Busy; // waits for every plugin to load
+	if (HostMissing) { // a joined TCP/IP game without the host on the hosting side
+		if (!HostMissingSaid && Context) Context->WriteConsoleMessage("Player Page Host: the hosting player doesn't run Player Page Host 1.0.1 or later, so page areas can't take items in this game.");
+		HostMissingSaid = true;
+		Log(true, "%s not opened: the hosting game has no Player Page Host 1.0.1 or later", lease->key.c_str());
+		return Result::Failed;
+	}
 	return OpenSlot(lease->slot);
 }
 
@@ -1583,7 +2252,8 @@ bool Locate() noexcept {
 	return true;
 }
 
-void __cdecl AfterAllLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
+void __cdecl AfterAllLoaded(const D2RL::PluginContext* context, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
+	BuildTypes(context); // on every table load
 	static bool done = false;
 	if (done) return;
 	done = true;
@@ -1663,6 +2333,8 @@ bool Load() {
 		const auto slash = PlacesPath.find_last_of(L"\\/");
 		const std::wstring folder = slash == std::wstring::npos ? std::wstring() : PlacesPath.substr(0, slash + 1);
 		PlacesPath       = folder + L"aaa-player-page-host-areas.txt";
+		OpenOwnLog(folder);
+		Log(false, "Player Page Host %s, process %lu", PluginVersion, GetCurrentProcessId());
 		ItemsPath        = folder + L"aaa-player-page-host-items.txt";
 		LoadPlaces();
 		LoadItems();
@@ -1716,9 +2388,18 @@ bool Load() {
 		const D2RL::Lifecycle::GameplayEventListener ready {
 			.structSize = D2RL::Lifecycle::GameplayEventListenerSize,
 			.kind       = D2RL::Lifecycle::GameplayEventKind::LocalPlayerReady,
-			.callback   = [](const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent*, void*) noexcept { ScanPage(true); },
+			.callback   = [](const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
+                if (event && (!InGame || PlayerId != event->playerId)) ResetLink(true, event->playerId);
+                ScanPage(true);
+            },
 		};
 		if (lifecycle->registerGameplayEventListener(Context, &ready, &handle) != D2RL::Lifecycle::Result::Success) Log(true, "could not follow character loads: page items are recorded when an area shows");
+		const D2RL::Lifecycle::GameplayEventListener left {
+			.structSize = D2RL::Lifecycle::GameplayEventListenerSize,
+			.kind       = D2RL::Lifecycle::GameplayEventKind::GameLeft,
+			.callback   = [](const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent*, void*) noexcept { ResetLink(false, 0); },
+		};
+		if (lifecycle->registerGameplayEventListener(Context, &left, &handle) != D2RL::Lifecycle::Result::Success) Log(true, "multiplayer: could not follow leaving games");
 	}
 	// Ctrl+click into the page.
 	if (const D2RL::ItemInteractionService* clicks = nullptr; Page != Inv::InvalidHandle && ItemApi && NativesOk && PlayerUnit
@@ -1729,6 +2410,7 @@ bool Load() {
 		ClicksOn = clicks->registerListener(Context, &listener, &handle) == Clicks::Result::Success;
 	}
 	if (!ClicksOn) Log(true, "no item click listener: Ctrl+click into an area is refused");
+	if (Page != Inv::InvalidHandle) StartNetwork();
 	(void)Context->RegisterConsoleCommand("pagehost", Command, "Player Page Host: list the areas. 'pagehost all' opens the whole page, 'pagehost free <plugin>/<area>' frees an empty saved place.");
 	Log(false, "Player Page Host %s: %s, %d area panels + %d overlay panels", PluginVersion, Page == Inv::InvalidHandle ? "WITHOUT the page" : "page 16x16 owned", OverlayFirst,
 	    SlotCount - OverlayFirst);
@@ -1755,6 +2437,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	StopNetwork();
 	UnwrapCharmSlot();
 	RestoreVtable();
 }

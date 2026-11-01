@@ -151,6 +151,9 @@ Host->setItemPolicy(Area, CharmsOnly, nullptr); // nullptr policy: allow everyth
   the cell, so you only see D2RLoader's request (item types, no cell).
 - Saved items loading back are always allowed, and so are your own host item calls.
 - If your DLL is gone, the host refuses new drops into your area by itself.
+- In a TCP/IP game your policy runs on the PC of the player who drops the item, even when another
+  player hosts the game: the host sends your answer to the hosting game. Keep it a plain check of
+  the item types, with no state of your own.
 
 ## 6. Move items in and out
 
@@ -187,6 +190,10 @@ Host->moveItems(Area, &transaction, &outcome, &itemResult);
 // Destroy an item whose top-left cell is in your area.
 Host->destroyItem(Area, runtimeId, D2RL::Items::SocketedItemPolicy::DestroyContents, &itemResult);
 ```
+
+In a TCP/IP game only the hosting player's game may change items: on a player who joined another
+player's game, `createItem`, `moveItems`, `destroyItem` and `moveItem` fail (`itemResult` says why).
+Drops into your area work there, through your policy.
 
 `itemResult` gets D2RLoader's `Items::Result` whenever the call reached D2RLoader. Moves to other
 containers (inventory, stash) in the same transaction are passed through unchanged.

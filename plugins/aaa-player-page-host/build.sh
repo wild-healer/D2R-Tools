@@ -18,7 +18,7 @@ $cc -DPH_EARLY "$here/src/test_client.cpp" "$out/test.res" -o "$out/test/aa-page
 $cc -DPH_LATE "$here/src/test_client.cpp" "$out/test.res" -o "$out/test/d2rl-page-host-test-late.dll"
 # D2RMM package: the DLL alone (its default config is embedded).
 rm -f "$here"/*.zip
-(cd "$out/host" && zip -q -X "$here/aaa-player-page-host-1.0.0.zip" aaa-player-page-host.dll)
+(cd "$out/host" && zip -q -X "$here/aaa-player-page-host-1.0.1.zip" aaa-player-page-host.dll)
 (cd "$out/test" && zip -q -X "$here/page-host-test-1.0.0.zip" *.dll)
 cp "$here/src/page_host_api.h" "$out/"
-echo "built $here/aaa-player-page-host-1.0.0.zip and $here/page-host-test-1.0.0.zip"
+echo "built $here/aaa-player-page-host-1.0.1.zip and $here/page-host-test-1.0.0.zip"

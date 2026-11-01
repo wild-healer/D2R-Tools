@@ -1,6 +1,33 @@
-# Player Page Host 1.0.0: release texts
+# Player Page Host: release texts
 
-## Patch notes
+## 1.0.1
+
+### Patch notes
+
+```
+**Player Page Host 1.0.1**
+
+**New**
+
+* Each game also writes its own log (aaa-player-page-host-game1.log, game2 and so on), so two games on one PC don't share one.
+
+**Fixed**
+
+* Areas took no items for a player who joined a TCP/IP game: drops, Ctrl+click and charms now work for every player. The player who hosts the game needs Player Page Host 1.0.1 or later; a player who joins without it is unaffected.
+* Joining a game whose hosting player has no Player Page Host 1.0.1 now says so when an area is opened, instead of showing a grid that takes nothing.
+```
+
+### GitHub release
+
+- Tag: `aaa-player-page-host-v1.0.1`
+- Title: `Player Page Host 1.0.1`
+- Asset: `aaa-player-page-host-1.0.1.zip`
+
+Body: the patch notes above, then the 1.0.0 body below from "### Requirements" on.
+
+## 1.0.0
+
+### Patch notes
 
 ```
 **Player Page Host 1.0.0**
@@ -16,7 +43,7 @@
 * pagehost console command: lists the areas; pagehost all opens the whole page; pagehost free frees an empty saved place.
 ```
 
-## GitHub release
+### GitHub release
 
 - Tag: `aaa-player-page-host-v1.0.0`
 - Title: `Player Page Host 1.0.0`
@@ -38,6 +65,7 @@ Body:
 
 ### Requirements
 - D2RLoader 1.3.1 or later.
+- TCP/IP games: the player who hosts needs Player Page Host 1.0.1 or later for the others to use their areas.
 - Steam 3.3.93787 or 3.3.94995. The plugin checks the game code when it loads; on another build its area limits stay off and it says so in its log.
 - On its own it does nothing visible: it is used by other plugins. Plugins that register their own custom page (such as Charm Inventory) can't share it.
 
@@ -48,7 +76,7 @@ Load `aaa-player-page-host-1.0.0.zip` in D2RMM, or copy `aaa-player-page-host.dl
 To use the page from your own plugin, read the [client guide](https://github.com/wild-healer/D2R-Tools/blob/main/plugins/aaa-player-page-host/CLIENT_GUIDE.md). The API is the single header [`page_host_api.h`](https://github.com/wild-healer/D2R-Tools/blob/main/plugins/aaa-player-page-host/src/page_host_api.h).
 ```
 
-## D2RLoader Hub
+### D2RLoader Hub
 
 Name: `Player Page Host`
 
