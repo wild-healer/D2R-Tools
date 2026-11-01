@@ -1,6 +1,17 @@
-# Wild Healer's Charm Inventory 1.0.2: release texts
+# Wild Healer's Charm Inventory 1.0.3: release texts
 
 ## Patch notes
+
+```
+**Wild Healer's Charm Inventory 1.0.3**
+
+**New**
+
+* Charms in the normal inventory no longer give their bonuses: only the charm inventory's do.
+* The charm inventory holds one of each unique charm: a second copy is refused, except when swapped with the first.
+```
+
+## Patch notes 1.0.2
 
 ```
 **Wild Healer's Charm Inventory 1.0.2**
@@ -27,17 +38,17 @@
 
 ## GitHub release
 
-- Tag: `wild-healers-charm-inventory-v1.0.2`
-- Title: `Wild Healer's Charm Inventory 1.0.2`
-- Asset: `wild-healers-charm-inventory-1.0.2.zip`
+- Tag: `wild-healers-charm-inventory-v1.0.3`
+- Title: `Wild Healer's Charm Inventory 1.0.3`
+- Asset: `wild-healers-charm-inventory-1.0.3.zip`
 
 Body:
 
 ```markdown
-**Wild Healer's Charm Inventory** 1.0.2: a 10x4 charm inventory on Player Page Host's player page.
+**Wild Healer's Charm Inventory** 1.0.3: a 10x4 charm inventory on Player Page Host's player page.
 
 ### Features
-- 10x4 cells, the size of the inventory's grid. Only charms go in, and they give their bonuses.
+- 10x4 cells, the size of the inventory's grid. Only charms go in, one of each unique charm (a second copy can only be swapped with the first), and only these charms give their bonuses: charms in the normal inventory don't.
 - A game-style left panel: "Charms" title, plain stone and the grid.
 - Opens from the charm button on the inventory's left edge (under Grail On!'s grail button), from the "Open/close charms" action of the Controls menu (no key by default), or with the `charms` console command.
 - Ctrl+click moves charms between the inventory and the open panel.
@@ -48,7 +59,7 @@ Body:
 - Player Page Host (`aaa-player-page-host`).
 
 ### Install
-Load `wild-healers-charm-inventory-1.0.2.zip` in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/wild-healers-charm-inventory.toml`, written on first launch.
+Load `wild-healers-charm-inventory-1.0.3.zip` in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/wild-healers-charm-inventory.toml`, written on first launch.
 ```
 
 ## D2RLoader Hub

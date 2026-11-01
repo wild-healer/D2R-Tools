@@ -6,11 +6,15 @@
 //     area's cells;
 //   - a button on the inventory's left edge, made like Grail On!'s (the mold
 //     and Grail On!'s charm category icon), under Grail On!'s, opens and
-//     closes it.
+//     closes it;
+//   - charms in the normal inventory give no bonus (the local player's), and
+//     the charm inventory holds one of each unique charm (a second copy can
+//     only be swapped with the first).
 #include "page_host_api.h"
 
 #include <windows.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -29,7 +33,7 @@ namespace Comm   = D2RL::PluginCommunication;
 namespace Events = D2RL::SharedEvents;
 
 constexpr const char* PluginId      = "wild-healers-charm-inventory";
-constexpr const char* PluginVersion = "1.0.2";
+constexpr const char* PluginVersion = "1.0.3";
 constexpr const char* CommandPrefix = "wild-healers-charm-inventory/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -48,6 +52,8 @@ const D2RL::PluginCommunicationService* CommApi {};
 const D2RL::ResourceService*            ResourceApi {};
 const D2RL::PanelService*               PanelApi {};
 const D2RL::SharedEventService*         EventApi {};
+const D2RL::InventoryService*           Inventory {};
+const D2RL::ItemService*                ItemApi {};
 Comm::ServiceLease<PageHost::Service>   Host;
 PageHost::AreaHandle                    Area {};
 constexpr int                           Columns = 10, Rows = 4, Cell = 98;
@@ -288,10 +294,251 @@ std::string PanelLayout() {
 
 // ---- the area ----
 
-auto __cdecl CharmsOnly(PageHost::AreaHandle, const D2RL::Inventory::ItemPolicyRequest* request, void*) noexcept -> D2RL::Inventory::ItemPolicyDecision {
-	return D2RL::Inventory::ItemPolicyRequestMatchesType(request, D2RL::Inventory::MakeItemTypeFourCC("char")) ? D2RL::Inventory::ItemPolicyDecision::Allow
-	                                                                                                           : D2RL::Inventory::ItemPolicyDecision::Reject;
+// ---- no bonus from inventory charms ----
+// The game asks whether a charm gives its bonuses through a D2RCore jump table
+// slot (thunk exe+0x3E2B61C: jmp [exe+0x3E2ACA0]) that Player Page Host wraps
+// for its charm areas. This plugin wraps it too, in either order: a charm of
+// the local player that isn't on the custom page (the stock inventory) gives
+// nothing; anything else goes to the slot's previous target. Other players'
+// charms (a TCP/IP game this player hosts) keep the game's rule.
+
+constexpr std::uint64_t CharmThunkRva = 0x3E2B61C, CharmSlotRva = 0x3E2ACA0, LocalIndexRva = 0x8B2D0, PlayerUnitRva = 0x9A480;
+constexpr std::uint8_t  PlayerUnitBytes[] { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x83, 0xF9, 0x08, 0x0F, 0x83, 0x85 };
+constexpr std::size_t   UnitId = 0x08, UnitData = 0x10, DataPage = 0x55;
+constexpr std::uint8_t  CustomPage = 6; // the custom page's item page byte (D2RCore "custom page-6")
+using CharmFn       = std::int32_t (*)(void* item, void* unit) noexcept;
+using LocalIndexFn  = int (*)() noexcept;
+using PlayerUnitFn  = void* (*)(int index) noexcept;
+std::uintptr_t Base {};
+CharmFn        NextCharm {};
+LocalIndexFn   LocalIndex {};
+PlayerUnitFn   PlayerUnit {};
+
+bool IsLocalPlayer(void* unit) noexcept {
+	if (!unit) return false;
+	std::uint32_t type = ~0U, id = 0;
+	std::memcpy(&type, unit, sizeof(type));
+	if (type != 0) return false;
+	std::memcpy(&id, static_cast<const std::uint8_t*>(unit) + UnitId, sizeof(id));
+	const auto* local = static_cast<const std::uint8_t*>(PlayerUnit(LocalIndex()));
+	if (!local) return false;
+	std::uint32_t localId = 0;
+	std::memcpy(&localId, local + UnitId, sizeof(localId));
+	return id == localId;
 }
+
+std::int32_t HookCharm(void* item, void* unit) noexcept {
+	const auto* data = item ? *reinterpret_cast<std::uint8_t* const*>(static_cast<const std::uint8_t*>(item) + UnitData) : nullptr;
+	if (data && data[DataPage] != CustomPage && IsLocalPlayer(unit)) return 0;
+	return NextCharm(item, unit);
+}
+
+bool SwapSlot(std::uint64_t* slot, std::uint64_t from, std::uint64_t to) noexcept {
+	DWORD keep = 0;
+	if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &keep)) return false;
+	const bool swapped = InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(slot), static_cast<LONG64>(to), static_cast<LONG64>(from)) == static_cast<LONG64>(from);
+	VirtualProtect(slot, sizeof(*slot), keep, &keep);
+	return swapped;
+}
+
+// Checks the game code it relies on first; on another build nothing is wrapped.
+void WrapCharmSlot() noexcept {
+	Base = static_cast<std::uintptr_t>(Context->exeBase);
+	const auto* thunk = reinterpret_cast<const std::uint8_t*>(Base + CharmThunkRva);
+	const auto* index = reinterpret_cast<const std::uint8_t*>(Base + LocalIndexRva);
+	std::int32_t rel  = 0;
+	if (Base) std::memcpy(&rel, thunk + 2, sizeof(rel));
+	if (!Base || thunk[0] != 0xFF || thunk[1] != 0x25 || CharmThunkRva + 6 + rel != CharmSlotRva || std::memcmp(reinterpret_cast<const void*>(Base + PlayerUnitRva), PlayerUnitBytes, sizeof(PlayerUnitBytes)) != 0
+	    || index[0] != 0x8B || index[1] != 0x05 || index[6] != 0xC3) {
+		Log(true, "this game build's charm check isn't the expected one: inventory charms keep their bonuses");
+		return;
+	}
+	LocalIndex          = reinterpret_cast<LocalIndexFn>(Base + LocalIndexRva);
+	PlayerUnit          = reinterpret_cast<PlayerUnitFn>(Base + PlayerUnitRva);
+	auto* const   slot    = reinterpret_cast<std::uint64_t*>(Base + CharmSlotRva);
+	const auto    current = *slot;
+	NextCharm             = reinterpret_cast<CharmFn>(current);
+	if (!current || !SwapSlot(slot, current, reinterpret_cast<std::uint64_t>(&HookCharm))) {
+		NextCharm = nullptr;
+		Log(true, "the charm check could not be wrapped: inventory charms keep their bonuses");
+		return;
+	}
+	Log(false, "charm check wrapped: inventory charms give no bonus");
+}
+
+void UnwrapCharmSlot() noexcept {
+	// Only when nothing wrapped it after this plugin (else that wrapper keeps calling HookCharm, which stays in place).
+	if (NextCharm && SwapSlot(reinterpret_cast<std::uint64_t*>(Base + CharmSlotRva), reinterpret_cast<std::uint64_t>(&HookCharm), reinterpret_cast<std::uint64_t>(NextCharm))) NextCharm = nullptr;
+}
+
+// ---- one of each unique charm ----
+
+namespace Items = D2RL::Items;
+
+struct UniqueSearch {
+	PageHost::AreaInfo area;
+	std::int32_t       record;
+	std::uint32_t      skip; // the item being placed
+	bool               found;
+	std::uint32_t      copy; // the copy found
+};
+
+auto __cdecl FindUnique(const D2RL::PluginContext*, const Items::ItemInfo* item, void* user) noexcept -> D2RL::Inventory::IterationAction {
+	auto& search = *static_cast<UniqueSearch*>(user);
+	const auto& a = search.area;
+	if (item->container == Items::ItemContainer::CustomPage && item->quality == Items::Quality::Unique && item->qualityRecordId == search.record && item->runtimeId != search.skip
+	    && item->x >= a.x && item->y >= a.y && item->x < a.x + static_cast<std::int32_t>(a.width) && item->y < a.y + static_cast<std::int32_t>(a.height)) {
+		search.found = true;
+		search.copy  = item->runtimeId;
+		return D2RL::Inventory::IterationAction::Stop;
+	}
+	return D2RL::Inventory::IterationAction::Continue;
+}
+
+// Whether `item` is a unique charm with a copy already in the charm area
+// (`ids` gets the item's and the copy's runtime ids). UI thread or a
+// game-thread callback.
+bool UniqueAlreadyIn(D2RL::PlayerHandle player, D2RL::ItemHandle item, std::uint32_t* ids = nullptr) {
+	if (!Inventory || !ItemApi || !Area || !Host) return false;
+	Items::ItemInfo info { .structSize = Items::ItemInfoSize };
+	if (ItemApi->getItemInfo(Context, item, &info) != Items::Result::Success || info.quality != Items::Quality::Unique) return false;
+	UniqueSearch search { .area = { .structSize = sizeof(PageHost::AreaInfo) }, .record = info.qualityRecordId, .skip = info.runtimeId, .found = false };
+	if (Host->getAreaInfo(Area, &search.area) != PageHost::Result::Success || search.area.x < 0) return false;
+	const D2RL::Inventory::ItemFilter filter { .structSize = sizeof(D2RL::Inventory::ItemFilter), .containerMask = Items::ContainerBit(Items::ItemContainer::CustomPage) };
+	(void)Inventory->forEachInventoryItem(Context, player, &filter, FindUnique, &search);
+	if (ids) ids[0] = info.runtimeId, ids[1] = search.copy;
+	return search.found;
+}
+
+void SayDuplicate() {
+	static ULONGLONG last {};
+	if (const ULONGLONG now = GetTickCount64(); now - last > 1000) {
+		last = now;
+		Context->WriteConsoleMessage("Charms: only one of each unique charm fits in the charm inventory");
+	}
+}
+
+struct FindById {
+	std::uint32_t    id;
+	D2RL::ItemHandle handle;
+	std::int32_t     x, y;
+};
+
+auto __cdecl FindItem(const D2RL::PluginContext*, const Items::ItemInfo* item, void* user) noexcept -> D2RL::Inventory::IterationAction {
+	auto& find = *static_cast<FindById*>(user);
+	if (item->runtimeId != find.id) return D2RL::Inventory::IterationAction::Continue;
+	find.handle = item->handle, find.x = item->x, find.y = item->y;
+	return D2RL::Inventory::IterationAction::Stop;
+}
+
+// ---- where a drop lands ----
+// A second copy may only be dropped onto the copy: the game swaps them. The
+// policy doesn't see the cell, so the grid's "element under the mouse" (the
+// game's grid vtable, Base+0x1CF3800, entry 19) is wrapped on top of Player
+// Page Host's, which already answers with the held item's top-left PAGE cell
+// for an area grid: the last answer for this plugin's grid is kept.
+
+constexpr std::uint64_t GridVtableRva = 0x1CF3800, CursorItemRva = 0x15F100, ItemSizeRva = 0x371850;
+constexpr int           VtCellAtPoint = 19;
+constexpr std::size_t   WidgetMarker = 0x634;
+constexpr std::uint64_t NoCell = ~std::uint64_t { 0 };
+constexpr std::uint8_t  CursorItemBytes[] { 0x48, 0x83, 0xEC, 0x28, 0xE8, 0xC7, 0xC1, 0xF2, 0xFF, 0x8B, 0xC8, 0xE8, 0x70, 0xB3, 0xF3, 0xFF };
+constexpr std::uint8_t  ItemSizeBytes[] { 0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7C, 0x24, 0x20, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x20 };
+using CellFn       = std::uint64_t* (*)(void* widget, std::uint64_t* out, std::uint64_t point) noexcept;
+using CursorItemFn = void* (*)() noexcept;
+using ItemSizeFn   = void (*)(void* item, std::uint8_t* width, std::uint8_t* height, const char* file, int line) noexcept;
+CellFn                     NextCellAtPoint {};
+CursorItemFn               CursorItem {};
+ItemSizeFn                 ItemSize {};
+float                      GridMarker[2] {};
+std::atomic<std::uint64_t> HoverCell { NoCell }, HoverTick {};
+
+std::uint64_t* HookCellAtPoint(void* widget, std::uint64_t* out, std::uint64_t point) noexcept {
+	std::uint64_t* const result = NextCellAtPoint(widget, out, point);
+	float marker[2] {};
+	if (widget) std::memcpy(marker, static_cast<const std::uint8_t*>(widget) + WidgetMarker, sizeof(marker));
+	if (widget && marker[0] == GridMarker[0] && marker[1] == GridMarker[1]) HoverCell = *out, HoverTick = GetTickCount64();
+	return result;
+}
+
+// Once, when the charm inventory first opens (Player Page Host wrapped the
+// grid at load, so this goes on top of it).
+void WrapCellAtPoint() noexcept {
+	static bool tried = false;
+	if (tried || !Base) return;
+	tried = true;
+	PageHost::AreaInfo info { .structSize = sizeof(info) };
+	if (Host->getAreaInfo(Area, &info) != PageHost::Result::Success || std::memcmp(reinterpret_cast<const void*>(Base + CursorItemRva), CursorItemBytes, sizeof(CursorItemBytes)) != 0
+	    || std::memcmp(reinterpret_cast<const void*>(Base + ItemSizeRva), ItemSizeBytes, sizeof(ItemSizeBytes)) != 0) {
+		Log(true, "this game build's item lookups aren't the expected ones: a second copy of a unique charm can't be swapped with the first");
+		return;
+	}
+	std::memcpy(GridMarker, info.gridMarker, sizeof(GridMarker));
+	CursorItem   = reinterpret_cast<CursorItemFn>(Base + CursorItemRva);
+	ItemSize     = reinterpret_cast<ItemSizeFn>(Base + ItemSizeRva);
+	auto* const entry = reinterpret_cast<std::uint64_t*>(Base + GridVtableRva) + VtCellAtPoint;
+	const auto  current = *entry;
+	NextCellAtPoint     = reinterpret_cast<CellFn>(current);
+	if (!current || !SwapSlot(entry, current, reinterpret_cast<std::uint64_t>(&HookCellAtPoint))) {
+		NextCellAtPoint = nullptr;
+		Log(true, "the grid's cell lookup could not be wrapped: a second copy of a unique charm can't be swapped with the first");
+		return;
+	}
+	Log(false, "grid cell lookup wrapped (charm area marker %.0f,%.0f)", GridMarker[0], GridMarker[1]);
+}
+
+void UnwrapCellAtPoint() noexcept {
+	if (NextCellAtPoint && SwapSlot(reinterpret_cast<std::uint64_t*>(Base + GridVtableRva) + VtCellAtPoint, reinterpret_cast<std::uint64_t>(&HookCellAtPoint), reinterpret_cast<std::uint64_t>(NextCellAtPoint)))
+		NextCellAtPoint = nullptr;
+}
+
+// Whether the held item, put at the cell under the mouse, covers the copy
+// (the game then swaps them; covering another item too means no drop at all).
+bool DropsOnCopy(std::uint32_t copy, D2RL::PlayerHandle player) {
+	const std::uint64_t cell = HoverCell.load();
+	if (!NextCellAtPoint || !CursorItem || cell == NoCell || GetTickCount64() - HoverTick.load() > 500) return false;
+	void* const held = CursorItem();
+	if (!held) return false;
+	std::uint8_t w = 1, h = 1;
+	ItemSize(held, &w, &h, PluginId, __LINE__);
+	FindById                          find { .id = copy };
+	const D2RL::Inventory::ItemFilter filter { .structSize = sizeof(D2RL::Inventory::ItemFilter), .containerMask = Items::ContainerBit(Items::ItemContainer::CustomPage) };
+	(void)Inventory->forEachInventoryItem(Context, player, &filter, FindItem, &find);
+	if (!find.handle) return false;
+	// The copy is the same item, so the same size.
+	const int x = static_cast<std::int32_t>(cell & 0xFFFFFFFF), y = static_cast<std::int32_t>(cell >> 32);
+	return x < find.x + w && find.x < x + w && y < find.y + h && find.y < y + h;
+}
+
+// A drop on the area: charms only, and a second copy of a unique charm only
+// onto the copy (a Ctrl+click is checked in OnItemClick before the host moves
+// it).
+auto __cdecl CharmsOnly(PageHost::AreaHandle, const D2RL::Inventory::ItemPolicyRequest* request, void*) noexcept -> D2RL::Inventory::ItemPolicyDecision {
+	using Decision = D2RL::Inventory::ItemPolicyDecision;
+	if (!D2RL::Inventory::ItemPolicyRequestMatchesType(request, D2RL::Inventory::MakeItemTypeFourCC("char"))) return Decision::Reject;
+	D2RL::PlayerHandle player {};
+	D2RL::ItemHandle   cursor {};
+	std::uint32_t      ids[2] {};
+	if (!Inventory || Inventory->getLocalPlayer(Context, &player) != D2RL::Inventory::Result::Success || Inventory->getCursorItem(Context, player, &cursor) != D2RL::Inventory::Result::Success
+	    || !cursor || !UniqueAlreadyIn(player, cursor, ids) || DropsOnCopy(ids[1], player))
+		return Decision::Allow;
+	SayDuplicate();
+	return Decision::Reject;
+}
+
+namespace Clicks = D2RL::ItemInteractions;
+
+// Ctrl+click on a unique charm outside the page while the charm inventory is
+// open: refused when a copy is already in it (before the host's own Ctrl+click,
+// priority -1000, moves it).
+auto __cdecl OnItemClick(const D2RL::PluginContext*, const Clicks::ItemInteractionEvent* event, void*) noexcept -> Clicks::Decision {
+	if (!event || event->action != Clicks::Action::Activate || event->container == Items::ItemContainer::CustomPage || !Area || !Host) return Clicks::Decision::Continue;
+	const bool ctrl = (event->modifiers & Clicks::ModifierBit(Clicks::Modifier::Control)) || (GetAsyncKeyState(VK_CONTROL) & 0x8000);
+	if (!ctrl || !Host->isAreaOpen(Area) || !UniqueAlreadyIn(event->player, event->item)) return Clicks::Decision::Continue;
+	SayDuplicate();
+	return Clicks::Decision::Consume;
+}
+
 
 bool PanelArt = false;
 
@@ -320,6 +567,7 @@ void __cdecl AfterAllLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::D
 	if (done) return;
 	done = true;
 	if (!Join()) Log(true, "Player Page Host not found: install aaa-player-page-host");
+	WrapCharmSlot();
 	PageHost::AreaInfo info { .structSize = sizeof(info) };
 	if (Area && Host->getAreaInfo(Area, &info) == PageHost::Result::Success)
 		Log(false, "area at %d,%d of the page (-1: not placed yet), charms active %u", info.x, info.y, info.charmsActive);
@@ -334,6 +582,7 @@ void Toggle() {
 		(void)Host->closeArea(Area);
 		return;
 	}
+	WrapCellAtPoint();
 	const auto opened = Host->openArea(Area);
 	if (opened == PageHost::Result::NoRoom) Context->WriteConsoleMessage("Charms: no room on the player page beside the other plugins' areas");
 	else if (opened != PageHost::Result::Success) Log(true, "open: result %u", static_cast<unsigned>(opened));
@@ -387,6 +636,9 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (context->QueryService(&ResourceApi) != D2RL::ServiceQueryResult::Success) ResourceApi = nullptr;
 	if (context->QueryService(&PanelApi) != D2RL::ServiceQueryResult::Success) PanelApi = nullptr;
 	if (context->QueryService(&EventApi) != D2RL::ServiceQueryResult::Success) EventApi = nullptr;
+	if (context->QueryService(&Inventory) != D2RL::ServiceQueryResult::Success) Inventory = nullptr;
+	if (context->QueryService(&ItemApi) != D2RL::ServiceQueryResult::Success) ItemApi = nullptr;
+	if (!Inventory || !ItemApi) Log(true, "no inventory or item service: unique charms aren't limited to one each");
 	PanelArt = ResourceApi && RegisterPanelArt();
 	if (!PanelArt) Log(true, "could not unpack the panel's art: the host's plain panel shows");
 	(void)Join(); // the host loads first (its DLL name sorts first); else after every plugin has loaded
@@ -417,11 +669,18 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		if (const auto result = input->registerAction(context, &action, &handle); result != D2RL::Input::Result::Success)
 			Log(true, "could not add the open/close action to the Controls menu (result %u)", static_cast<unsigned>(result));
 	}
+	if (const D2RL::ItemInteractionService* clicks = nullptr; context->QueryService(&clicks) == D2RL::ServiceQueryResult::Success && clicks) {
+		const Clicks::ItemInteractionListener listener { .structSize = Clicks::ItemInteractionListenerSize, .priority = 0, .callback = OnItemClick };
+		Clicks::ListenerHandle                handle {};
+		if (clicks->registerListener(Context, &listener, &handle) != Clicks::Result::Success) Log(true, "could not listen to Ctrl+clicks: a second copy of a unique charm can be Ctrl+clicked in");
+	}
 	(void)context->RegisterConsoleCommand("charms", Command, "Opens or closes the charm inventory.");
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	UnwrapCellAtPoint();
+	UnwrapCharmSlot();
 	if (Area && Host) (void)Host->releaseArea(Context, Area);
 	Area = 0;
 	(void)Host.Reset();

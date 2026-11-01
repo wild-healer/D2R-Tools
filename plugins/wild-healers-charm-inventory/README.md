@@ -2,7 +2,8 @@
 
 D2RLoader plugin that gives you a 10x4 charm inventory, the size of the inventory's grid, on the custom player page that [Player Page Host](../aaa-player-page-host) shares between plugins.
 
-- **Charms only**: small, large and grand charms go in, anything else is refused. The charms in it give their bonuses like charms in the inventory.
+- **Charms only**: small, large and grand charms go in, anything else is refused. The charms in it give their bonuses; charms in the normal inventory don't (your own character only: other players in a TCP/IP game you host keep the game's rule).
+- **One of each unique charm**: a second Annihilus, Torch, Gheed's or Sunder charm of the same kind is refused, dropped or Ctrl+clicked. Dropping it onto the first one swaps them.
 - **Panel**: a game-style left panel with a "Charms" title, plain stone inside and the 10x4 grid of cells.
 - **Opening it**: the charm button on the inventory's left edge, under Grail On!'s grail button; the "Open/close charms" action of the game's Controls menu (no key by default); or the `charms` console command.
 - **Fixed position**: the panel sits where the game's left panels sit, written out rather than taken from `$LeftPanelAnchor`, so mods that move that anchor don't carry it off screen.
