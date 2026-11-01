@@ -1,3 +1,33 @@
+# Perfect Frame 1.0.1: release texts
+
+## Patch notes
+
+```
+**Perfect Frame 1.0.1**
+
+**Fixed**
+
+* The game no longer aborts when you quit after playing a game (terminate called without an active exception).
+```
+
+## GitHub release
+
+- Tag: `perfect-frame-v1.0.1`
+- Title: `Perfect Frame 1.0.1`
+- Asset: `perfect-frame-1.0.1.zip`
+
+Body:
+
+```markdown
+**Perfect Frame** 1.0.1: fixes a crash when quitting the game.
+
+### Fixed
+- Quitting after playing a game no longer aborts the game at the very end ("terminate called without an active exception", Windows event 1000 in d2rl-perfect-frame.dll). D2RLoader can free the plugin at exit without unloading it first; the plugin's worker thread now stops cleanly either way.
+
+### Install
+Load `perfect-frame-1.0.1.zip` in D2RMM, or copy `d2rl-perfect-frame.dll` to `<game>/d2rloader/plugins/` over the old one. Settings are unchanged.
+```
+
 # Perfect Frame 1.0.0: release texts
 
 ## Patch notes
