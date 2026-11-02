@@ -15,9 +15,7 @@ x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s \
   -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion \
   -o "$out/d2rl-inventory-slots.dll"
 cp "$out/d2rl-inventory-slots.dll" "$here/"
-# D2RMM package: the DLL and its config at the zip root.
-version=$(sed -n 's/.*PluginVersion = "\(.*\)";/\1/p' "$here/src/plugin.cpp")
-zip=inventory-slots-$version.zip
+# Package: the DLL alone (its config is built in; D2RLoader writes it on first launch).
 rm -f "$here"/inventory-slots*.zip
-(cd "$here" && zip -q -X "$zip" d2rl-inventory-slots.dll inventory-slots.toml)
-echo "built $here/d2rl-inventory-slots.dll and $here/$zip"
+(cd "$here" && zip -q -X inventory-slots.zip d2rl-inventory-slots.dll)
+echo "built $here/d2rl-inventory-slots.dll and $here/inventory-slots.zip"

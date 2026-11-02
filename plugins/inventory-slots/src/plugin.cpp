@@ -39,6 +39,7 @@
 //     art in gray, hidden through the widget service while the slot is filled.
 
 #include <D2RLPlugin/api.h>
+#include "i_hate_tomls_client.h"
 #include <windows.h>
 
 #include <array>
@@ -56,7 +57,7 @@ namespace {
 namespace Widgets = D2RL::Widgets;
 
 constexpr const char* PluginId      = "inventory-slots";
-constexpr const char* PluginVersion = "1.0.2";
+constexpr const char* PluginVersion = "1.0.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -98,11 +99,13 @@ constexpr int MinWidth  = 5; // the slots use columns 0-4
 constexpr int Cell      = 98;
 constexpr float Marker  = 7000.0f; // chronicleFlourishOffset {Marker + slot, Marker}
 
+// Every setting applies while playing (read live by the hooks, the draw and
+// the UI thread), so all of them are atomics.
 struct Settings {
-	bool                           enabled    = true;
-	bool                           showFrames = true;
-	bool                           showArt    = true;
-	std::array<std::array<int, 2>, 4> position { { { 1400, 955 }, { 1400, 1161 }, { 1498, 1161 }, { 1449, 1367 } } };
+	std::atomic<bool>                              enabled { true };
+	std::atomic<bool>                              showFrames { true };
+	std::atomic<bool>                              showArt { true };
+	std::array<std::array<std::atomic<int>, 2>, 4> position { { { 1400, 955 }, { 1400, 1161 }, { 1498, 1161 }, { 1449, 1367 } } };
 } Config;
 
 // ---- native layout (Steam 3.3.93787 / 94995) ----
@@ -278,9 +281,18 @@ void Log(bool warn, const char* format, ...) noexcept {
 	warn ? Context->LogWarn(line) : Context->LogInfo(line);
 }
 
+// Reads the game's own memory after checking it is committed and readable
+// (ReadProcessMemory made one antivirus heuristic call a DLL an injector).
 bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
-	SIZE_T copied = 0;
-	return address != 0 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), output, size, &copied) && copied == size;
+	if (address == 0) return false;
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+	if (address + size > end) return false;
+	std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	return true;
 }
 
 template <typename T>
@@ -351,6 +363,8 @@ void GrowGrids() noexcept {
 
 bool ReadPanelOffset() noexcept;
 bool RegisterLayout() noexcept;
+const D2RL::ResourceService*        Resources {};
+D2RL::Resources::RegistrationHandle LayoutHandle {};
 
 void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
 	GrowGrids();
@@ -482,7 +496,7 @@ bool PlanSort(std::uint16_t* current, std::uint16_t* planned, std::uint32_t* ids
 bool SlotSpot(std::uint8_t* grid, void* x, void* y, std::uint8_t w, std::uint8_t h) noexcept {
 	auto* const item = static_cast<std::uint8_t*>(SizedItem);
 	SizedItem        = nullptr;
-	if (!item || !IsSlotGrid(grid) || *reinterpret_cast<const std::uint32_t*>(item) != UnitItem) return false;
+	if (!Config.enabled || !item || !IsSlotGrid(grid) || *reinterpret_cast<const std::uint32_t*>(item) != UnitItem) return false;
 	const std::uint32_t code = ItemCode(item);
 	for (const auto& def : Slots) {
 		if (def.code != code || def.width != w || def.height != h) continue;
@@ -636,6 +650,7 @@ std::atomic<std::uint64_t>                 LastApply {};
 std::atomic<bool>                          ApplyQueued {};
 Widgets::WidgetHandle                      Root {};
 std::array<Widgets::WidgetHandle, Slots.size()> ArtHandles {};
+std::array<Widgets::WidgetHandle, Slots.size()> FrameHandles {};
 bool                                       ArtFailLogged {};
 
 bool FindRoot() {
@@ -651,28 +666,35 @@ bool FindRoot() {
 }
 
 bool FindArt() {
-	for (std::size_t slot = 0; slot < Slots.size(); ++slot)
+	for (std::size_t slot = 0; slot < Slots.size(); ++slot) {
 		if (!ArtHandles[slot] && WidgetApi->findWidget(Context, Root, ("Art" + std::to_string(slot)).c_str(), &ArtHandles[slot]) != Widgets::Result::Success) {
 			ArtHandles[slot] = {};
 			return false;
 		}
+		if (!FrameHandles[slot] && WidgetApi->findWidget(Context, Root, ("Frame" + std::to_string(slot)).c_str(), &FrameHandles[slot]) != Widgets::Result::Success) {
+			FrameHandles[slot] = {};
+			return false;
+		}
+	}
 	return true;
 }
 
 void __cdecl ApplySlots(const D2RL::PluginContext*, void*) noexcept {
 	bool ok = FindRoot();
 	const int on = SlotsOn.load();
-	if (ok && WidgetApi->setWidgetVisible(Context, Root, on != 0) == Widgets::Result::Success) AppliedOn = on;
-	if (Config.showArt) {
-		ok = ok && FindArt();
-		for (std::size_t slot = 0; ok && slot < Slots.size(); ++slot) {
-			const int filled = Filled[slot].load();
-			ok               = WidgetApi->setWidgetVisible(Context, ArtHandles[slot], filled == 0) == Widgets::Result::Success;
-			Applied[slot]    = filled;
-		}
-		if (!ok && !ArtFailLogged) Log(true, "slot art: the widgets were not found, empty slots keep their art when filled");
-		ArtFailLogged = ArtFailLogged || !ok;
+	const int shown = on != 0 && Config.enabled;
+	if (ok && WidgetApi->setWidgetVisible(Context, Root, shown != 0) == Widgets::Result::Success) AppliedOn = shown;
+	// Frames and art are always in the layout, so both settings apply while playing.
+	ok = ok && FindArt();
+	const bool frames = Config.showFrames.load(), art = Config.showArt.load();
+	for (std::size_t slot = 0; ok && slot < Slots.size(); ++slot) {
+		const int filled = Filled[slot].load();
+		ok = WidgetApi->setWidgetVisible(Context, FrameHandles[slot], frames) == Widgets::Result::Success &&
+		     WidgetApi->setWidgetVisible(Context, ArtHandles[slot], art && filled == 0) == Widgets::Result::Success;
+		Applied[slot] = filled;
 	}
+	if (!ok && !ArtFailLogged) Log(true, "slot art: the widgets were not found, frames and art can't follow the slots");
+	ArtFailLogged = ArtFailLogged || !ok;
 	LastApply.store(ok ? GetTickCount64() : GetTickCount64() + 4500); // a failure retries in 5 s
 	ApplyQueued.store(false);
 }
@@ -682,23 +704,61 @@ void QueueApply() noexcept {
 	if (Threads->runOnUiThread(Context, ApplySlots, nullptr) != D2RL::Threads::Result::Success) ApplyQueued.store(false);
 }
 
+// A setting changed in I Hate TOMLs: frames and art follow at once.
+void ApplyNow() noexcept {
+	if (Threads && WidgetApi) QueueApply();
+}
+
 void NoteSlotsOn(bool on) noexcept {
 	if (!Threads || !WidgetApi) return;
 	SlotsOn.store(on);
-	if (AppliedOn != static_cast<int>(on) || GetTickCount64() >= LastApply.load() + 500) QueueApply();
+	if (AppliedOn != static_cast<int>(on && Config.enabled) || GetTickCount64() >= LastApply.load() + 500) QueueApply();
 }
 
 void NoteFilled(int slot, bool filled) noexcept {
 	if (!Threads || !WidgetApi) return;
 	Filled[slot].store(filled);
 	const std::uint64_t now = GetTickCount64();
-	if (((!Config.showArt || Applied[slot] == static_cast<int>(filled)) && now < LastApply.load() + 500) || ApplyQueued.exchange(true)) return;
+	if ((Applied[slot] == static_cast<int>(filled) && now < LastApply.load() + 500) || ApplyQueued.exchange(true)) return;
 	if (Threads->runOnUiThread(Context, ApplySlots, nullptr) != D2RL::Threads::Result::Success) ApplyQueued.store(false);
+}
+
+// Live slot positions. D2RLoader 1.3.1 can't move widgets, so the slot's
+// three widgets (Frame, Art, Slot, in that order among the root's children)
+// get their rect written directly: Widget +0x30 parent, +0x58/+0x60 children
+// (pointers, count), +0x70 rect {x, y, w, h} in parent units, used by the
+// screen position 0x8562F0 when +0x52 (anchored) is 0. Done from the slot's
+// own draw, so the widgets are alive; the siblings follow from the next frame.
+constexpr std::size_t WidgetParent = 0x30, WidgetAnchored = 0x52, WidgetChildren = 0x58, WidgetChildCount = 0x60, WidgetRect = 0x70;
+
+void MoveSlot(std::uint8_t* widget, int slot) noexcept {
+	auto* const rect = reinterpret_cast<std::int32_t*>(widget + WidgetRect);
+	const int   x = Config.position[slot][0], y = Config.position[slot][1];
+	if (rect[0] == x && rect[1] == y) return;
+	auto* const root = *reinterpret_cast<std::uint8_t**>(widget + WidgetParent);
+	if (!root) return;
+	auto* const* children = *reinterpret_cast<std::uint8_t* const* const*>(root + WidgetChildren);
+	const auto   count    = *reinterpret_cast<const std::uint64_t*>(root + WidgetChildCount);
+	const auto   first    = static_cast<std::size_t>(slot) * 3;
+	if (!children || count != Slots.size() * 3 || children[first + 2] != widget) {
+		static bool logged = false;
+		if (!logged) Log(true, "slot positions: the slot layout isn't as built (%llu widgets); positions apply after a restart", static_cast<unsigned long long>(count));
+		logged = true;
+		return;
+	}
+	for (std::size_t k = 0; k < 3; ++k) {
+		std::uint8_t* const child = children[first + k];
+		if (!child || child[WidgetAnchored]) continue;
+		auto* const childRect = reinterpret_cast<std::int32_t*>(child + WidgetRect);
+		childRect[0]          = x;
+		childRect[1]          = y;
+	}
 }
 
 void HookDraw(void* widget, void* a, void* b, void* c) noexcept {
 	if (!widget || !IsInventoryGrid(widget)) return Draw(widget, a, b, c);
 	const int   slot  = SlotOf(widget);
+	if (slot >= 0) MoveSlot(static_cast<std::uint8_t*>(widget), slot);
 	ShareUnit(static_cast<std::uint8_t*>(widget), slot);
 	void* const owner = GridOwner(widget);
 	const int   top   = AddedRowTop(owner);
@@ -769,6 +829,7 @@ std::uint64_t* HookCellAtPoint(void* widget, std::uint64_t* out, std::uint64_t p
 	const int slot = widget && IsInventoryGrid(widget) ? SlotOf(widget) : -1;
 	if (slot < 0) return CellAtPoint(widget, out, point);
 	*out = NoCell;
+	if (!Config.enabled) return out;
 	const std::uint64_t origin = SlotCell(widget, slot);
 	if (origin == NoCell) return out;
 	// The widget's own cells on screen: (0,0) and (1,1) give the corner and the cell size.
@@ -1011,16 +1072,14 @@ std::string BuildLayout() {
 		const std::string n = std::to_string(slot);
 		// The paperdoll slot's own background and border, then the item's art
 		// in gray (Item Dictionary's recolouring), then the grid over both.
-		if (Config.showFrames) {
-			char frame[256] {};
-			std::snprintf(frame, sizeof(frame), R"({"type": "ImageWidget", "name": "Frame%d", "fields": {"rect": {"x": %d, "y": %d, "scale": %.2f}, "filename": "%s"}})", slot, x, y,
-			              def.scale, def.background);
-			add(frame);
-		}
-		if (Config.showArt)
-			add(R"({"type": "ImageWidget", "name": "Art)" + n + R"(", "fields": {"rect": {"x": )" + std::to_string(x) + R"(, "y": )" + std::to_string(y) + R"(}, "filename": ")" +
-			    def.art + R"(", "useAdvancedColoring": true, "recolorRange": {"hue": [0.5, 0.501], "saturation": [0.5, 0.501], "value": [0.5, 0.501]}, )"
-			              R"("hsvTransform": [0.0, -1.0, -0.35, 0.0], "tintTransform": [0.0, 0.0, 0.0, 0.0]}})");
+		// Both always present; show_frames and show_art hide them while playing.
+		char frame[256] {};
+		std::snprintf(frame, sizeof(frame), R"({"type": "ImageWidget", "name": "Frame%d", "fields": {"rect": {"x": %d, "y": %d, "scale": %.2f}, "filename": "%s"}})", slot, x, y,
+		              def.scale, def.background);
+		add(frame);
+		add(R"({"type": "ImageWidget", "name": "Art)" + n + R"(", "fields": {"rect": {"x": )" + std::to_string(x) + R"(, "y": )" + std::to_string(y) + R"(}, "filename": ")" +
+		    def.art + R"(", "useAdvancedColoring": true, "recolorRange": {"hue": [0.5, 0.501], "saturation": [0.5, 0.501], "value": [0.5, 0.501]}, )"
+		              R"("hsvTransform": [0.0, -1.0, -0.35, 0.0], "tintTransform": [0.0, 0.0, 0.0, 0.0]}})");
 		char grid[512] {};
 		std::snprintf(grid, sizeof(grid),
 		              R"({"type": "InventoryGridWidget", "name": "Slot%d", "fields": {"rect": {"x": %d, "y": %d}, "cellCount": {"x": %d, "y": %d}, )"
@@ -1047,6 +1106,98 @@ std::string Unquote(std::string value) {
 	return value;
 }
 
+const std::array<std::array<int, 2>, 4> DefaultPosition { { { 1400, 955 }, { 1400, 1161 }, { 1498, 1161 }, { 1449, 1367 } } };
+
+// Applies one setting from its TOML text (strings unquoted); false + reason
+// when refused. A slot's position is "cube" = [x, y] for I Hate TOMLs and
+// cube_x / cube_y in the file.
+bool Apply(const std::string& key, const std::string& value, std::string& error) {
+	const auto flag = [&](auto& target) {
+		if (value != "true" && value != "false") return error = "true or false", false;
+		target = value == "true";
+		return true;
+	};
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "show_frames") return flag(Config.showFrames);
+	if (key == "show_art") return flag(Config.showArt);
+	for (int slot = 0; slot < static_cast<int>(Slots.size()); ++slot) {
+		const std::string name = Slots[slot].key;
+		if (key == name) {
+			int x = 0, y = 0;
+			if (std::sscanf(value.c_str(), " [ %d , %d ]", &x, &y) != 2) return error = "[x, y]", false;
+			Config.position[slot][0] = x;
+			Config.position[slot][1] = y;
+			return true;
+		}
+		for (int axis = 0; axis < 2; ++axis)
+			if (key == name + (axis ? "_y" : "_x")) {
+				char* rest = nullptr;
+				const long number = std::strtol(value.c_str(), &rest, 10);
+				if (rest == value.c_str()) return error = "a number", false;
+				Config.position[slot][axis] = static_cast<int>(number);
+				return true;
+			}
+	}
+	return error = "unknown setting", false;
+}
+
+std::string ValueOf(const std::string& key) {
+	const auto flag = [](bool on) { return std::string(on ? "true" : "false"); };
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "show_frames") return flag(Config.showFrames);
+	if (key == "show_art") return flag(Config.showArt);
+	for (int slot = 0; slot < static_cast<int>(Slots.size()); ++slot) {
+		const std::string name = Slots[slot].key;
+		if (key == name) return "[" + std::to_string(Config.position[slot][0]) + ", " + std::to_string(Config.position[slot][1]) + "]";
+		if (key == name + "_x") return std::to_string(Config.position[slot][0]);
+		if (key == name + "_y") return std::to_string(Config.position[slot][1]);
+	}
+	return {};
+}
+
+std::string Render() {
+	return R"(# Inventory Slots
+#
+# Adds four slots to the inventory panel, outside the inventory grid: the
+# Horadric Cube, the Tome of Town Portal, the Tome of Identify and keys. Each
+# slot only takes its own item. Items in the slots are still in your
+# inventory for the game: tomes work, keys open chests, the cube opens.
+# Every setting can also be changed in game with I Hate TOMLs.
+#
+# Before removing the plugin, take the items out of the slots: without it the
+# game has no room for them.
+
+[inventory-slots]
+# Shows the slots. Turned off, they are hidden and take nothing by themselves;
+# items already in them stay there and come back when turned on.
+enabled = )" + ValueOf("enabled") + R"(
+
+# Slot positions on screen, in inventory panel units (one inventory cell is
+# 98 units), measured from the top-left corner of Expanded Inventory's panel
+# (1382 x 1507). They don't depend on the inventory mod you use: whatever size
+# and place a mod gives the inventory panel, the slots stay at the same spot.
+cube_x = )" + ValueOf("cube_x") + R"(
+cube_y = )" + ValueOf("cube_y") + R"(
+tp_tome_x = )" + ValueOf("tp_tome_x") + R"(
+tp_tome_y = )" + ValueOf("tp_tome_y") + R"(
+id_tome_x = )" + ValueOf("id_tome_x") + R"(
+id_tome_y = )" + ValueOf("id_tome_y") + R"(
+keys_x = )" + ValueOf("keys_x") + R"(
+keys_y = )" + ValueOf("keys_y") + R"(
+
+# The game's own equipment slot background and border behind each slot (the
+# tomes use the weapon slot at half size).
+show_frames = )" + ValueOf("show_frames") + R"(
+
+# The slot's item in gray while the slot is empty.
+show_art = )" + ValueOf("show_art") + "\n";
+}
+
+void SaveConfig() {
+	const std::string toml = Render();
+	if (!Context->WriteConfig(toml.c_str())) Log(true, "config: could not write the config file");
+}
+
 void LoadConfig() {
 	(void)Context->EnsureConfig();
 	std::uint32_t     required = 0;
@@ -1070,27 +1221,71 @@ void LoadConfig() {
 		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
 		const std::string key   = Trim(std::string_view(line).substr(0, equals));
 		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
-		if (key == "enabled") {
-			Config.enabled = value != "false";
-			continue;
-		}
-		if (key == "show_frames") {
-			Config.showFrames = value != "false";
-			continue;
-		}
-		if (key == "show_art") {
-			Config.showArt = value != "false";
-			continue;
-		}
-		bool known = false;
-		for (int slot = 0; slot < static_cast<int>(Slots.size()); ++slot)
-			for (int axis = 0; axis < 2; ++axis)
-				if (key == std::string(Slots[slot].key) + (axis ? "_y" : "_x")) {
-					Config.position[slot][axis] = std::atoi(value.c_str());
-					known                       = true;
-				}
-		if (!known) Log(true, "config: unknown key %s", key.c_str());
+		std::string       error;
+		if (!Apply(key, value, error)) Log(true, "config: %s = %s ignored (%s)", key.c_str(), value.c_str(), error.c_str());
 	}
+}
+
+// ---- I Hate TOMLs ----
+
+std::string BuildSchema() {
+	std::string schema = R"toml(title = "Inventory Slots"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Inventory slots"
+note = "Off: the slots hide and take nothing; their items stay and come back when on."
+[[setting]]
+key = "show_frames"
+type = "bool"
+label = "Slot frames"
+note = "The game's equipment slot background behind each slot."
+[[setting]]
+key = "show_art"
+type = "bool"
+label = "Gray item in empty slots"
+[[setting]]
+type = "header"
+label = "Positions"
+[[setting]]
+type = "text"
+label = "In inventory panel units: one inventory cell is 98. Ctrl+click moves one cell."
+)toml";
+	constexpr const char* Labels[] { "Horadric Cube", "Tome of Town Portal", "Tome of Identify", "Keys" };
+	for (int slot = 0; slot < static_cast<int>(Slots.size()); ++slot)
+		schema += std::string("[[setting]]\nkey = \"") + Slots[slot].key + "\"\ntype = \"position\"\nlabel = \"" + Labels[slot] +
+		          "\"\nmin = -4000\nmax = 6000\nshift_step = 10\nctrl_step = 98\ndefault = [" + std::to_string(DefaultPosition[slot][0]) + ", " +
+		          std::to_string(DefaultPosition[slot][1]) + "]\n";
+	return schema;
+}
+
+const std::string      Schema = BuildSchema();
+PluginMenu::Connection Menu;
+
+void ApplyNow() noexcept;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	std::string reason;
+	if (!Apply(key, Unquote(Trim(value)), reason)) {
+		std::snprintf(error, size, "%s", reason.c_str());
+		return false;
+	}
+	SaveConfig();
+	// A moved slot: the layout is registered again, so a rebuilt panel keeps it.
+	bool position = false;
+	for (const auto& def : Slots) position = position || std::strncmp(key, def.key, std::strlen(def.key)) == 0;
+	if (position && Resources && !RegisterLayout()) Log(true, "slot positions: the layout could not be registered again");
+	ApplyNow();
+	return true;
 }
 
 template <typename Service>
@@ -1167,8 +1362,6 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderGetPluginInfo() noexcept -> const D2RL::PluginI
 
 namespace {
 
-const D2RL::ResourceService*        Resources {};
-D2RL::Resources::RegistrationHandle LayoutHandle {};
 
 // (Re)registers the slots' layout with the current offset.
 bool RegisterLayout() noexcept {
@@ -1193,10 +1386,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	for (auto& bank : OriginalHeight)
 		for (auto& height : bank) height.store(-1);
 	LoadConfig();
-	if (!Config.enabled) {
-		Log(false, "Inventory Slots %s: disabled in config", PluginVersion);
-		return true;
-	}
+	(void)Menu.Start(context, Schema.c_str(), MenuGet, MenuSet, nullptr);
+	// Set up even when turned off, so it can be turned on while playing; off,
+	// the slots are hidden and take nothing by themselves.
+	if (!Config.enabled) Log(false, "Inventory Slots %s: turned off in config (slots hidden until turned on)", PluginVersion);
 	Base = context->exeBase;
 	if (!Base || !Locate()) {
 		Log(true, "Inventory Slots %s: inactive, this game build isn't supported (Steam 3.3.93787 / 3.3.94995 are)", PluginVersion);
@@ -1256,11 +1449,13 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	} else if (const auto result = panels->registerChildLayout(context, &child, &childHandle); result != D2RL::Panels::Result::Success) {
 		Log(true, "Inventory Slots %s: the inventory panel refused the slots (result %u); slots are invisible", PluginVersion, static_cast<unsigned>(result));
 	}
-	Log(false, "Inventory Slots %s: active, cube %d,%d, Town Portal %d,%d, Identify %d,%d, keys %d,%d", PluginVersion, Config.position[0][0], Config.position[0][1],
-	    Config.position[1][0], Config.position[1][1], Config.position[2][0], Config.position[2][1], Config.position[3][0], Config.position[3][1]);
+	Log(false, "Inventory Slots %s: active, cube %d,%d, Town Portal %d,%d, Identify %d,%d, keys %d,%d", PluginVersion, Config.position[0][0].load(), Config.position[0][1].load(),
+	    Config.position[1][0].load(), Config.position[1][1].load(), Config.position[2][0].load(), Config.position[2][1].load(), Config.position[3][0].load(),
+	    Config.position[3][1].load());
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	Menu.Stop();
 	RestoreVtable();
 }

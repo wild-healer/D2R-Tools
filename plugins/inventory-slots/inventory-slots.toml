@@ -4,14 +4,14 @@
 # Horadric Cube, the Tome of Town Portal, the Tome of Identify and keys. Each
 # slot only takes its own item. Items in the slots are still in your
 # inventory for the game: tomes work, keys open chests, the cube opens.
-#
-# D2RLoader copies this file to d2rloader/config/inventory-slots.toml on first
-# launch; edit that copy. Changes apply the next time the game starts.
+# Every setting can also be changed in game with I Hate TOMLs.
 #
 # Before removing the plugin, take the items out of the slots: without it the
 # game has no room for them.
 
 [inventory-slots]
+# Shows the slots. Turned off, they are hidden and take nothing by themselves;
+# items already in them stay there and come back when turned on.
 enabled = true
 
 # Slot positions on screen, in inventory panel units (one inventory cell is

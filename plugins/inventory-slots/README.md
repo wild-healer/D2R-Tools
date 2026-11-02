@@ -19,13 +19,17 @@ that change the inventory size keep working.
   later, or it is already 16 rows tall, the most a save can hold), the slots
   turn off and the log says why.
 
-- Install: get Inventory Slots from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/invetory-slots) and add it through D2RMM like the other plugins.
-- Config (`d2rloader/config/inventory-slots.toml`): `enabled`, the position of
-  each slot (`cube_x`/`cube_y`, `tp_tome_x`/`tp_tome_y`, `id_tome_x`/`id_tome_y`,
-  `keys_x`/`keys_y`), `show_frames` (the slot backgrounds), `show_art` (the gray
-  item in empty slots). Positions are on screen, in inventory panel units (one
-  cell is 98) from the top-left corner of Expanded Inventory's panel: the slots
-  stay at the same spot whatever size and place an inventory mod gives the panel.
+- Install: get Inventory Slots from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/invetory-slots) and load `inventory-slots.zip` (the DLL alone; its default settings are built in) in D2RMM, or copy `d2rl-inventory-slots.dll` to `<game>/d2rloader/plugins/`.
+- Config (`d2rloader/config/inventory-slots.toml`, written on first launch), also
+  in game with [I Hate TOMLs](../i-hate-tomls), where every change applies at
+  once: `enabled` (off, the slots hide and take nothing by themselves; their
+  items stay and come back when it is on again), the position of each slot
+  (`cube_x`/`cube_y`, `tp_tome_x`/`tp_tome_y`, `id_tome_x`/`id_tome_y`,
+  `keys_x`/`keys_y`), `show_frames` (the slot backgrounds) and `show_art` (the
+  gray item in empty slots). Positions are on screen, in inventory panel units
+  (one cell is 98) from the top-left corner of Expanded Inventory's panel: the
+  slots stay at the same spot whatever size and place an inventory mod gives
+  the panel.
 - Take the items out of the slots before removing the plugin: without it, the
   game has no room for them.
 - Works in single player and in games you host, not in games you join.
@@ -67,7 +71,12 @@ How it works (Steam 3.3.93787 / 94995 RVAs):
   ordinal 160), and the layout is registered again if it changed.
 - Behind each slot: the paperdoll slot sprite of its size (the tomes use the 2x4
   weapon slot at half size) and the item's art in gray, hidden while the slot is
-  filled.
+  filled. Both are always in the layout and shown or hidden through the widget
+  service, so their settings apply while playing.
+- Live positions: D2RLoader 1.3.1 can't move widgets, so each slot's draw writes
+  the new position into its own widget and its frame and art (Widget +0x70 rect,
+  children at the root's +0x58/+0x60), and the layout is registered again so a
+  rebuilt panel keeps it.
 
 Every function's first 16 bytes are checked at load; otherwise the plugin stays
 inactive.
