@@ -100,7 +100,7 @@
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.1.1";
+constexpr const char* PluginVersion = "1.1.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -5778,6 +5778,17 @@ std::set<std::string>                 FoundIds;     // entries ever stored
 std::map<std::uint32_t, std::uint32_t> Materialized; // runtime id of a record's item on the page -> fingerprint
 std::map<std::uint32_t, std::uint32_t> Fingerprints; // runtime id -> fingerprint, read once
 std::wstring                          StorePath;    // the open storage file, empty before a character
+// Records taken out of the grail, kept until the game has saved the character
+// (it leaves the game): after a crash the item taken out was never saved, so
+// its record comes back (see RestoreTakenOut).
+struct TakenOutRecord {
+	Record      record;
+	std::string owner; // the character that took it out
+};
+std::map<std::uint32_t, TakenOutRecord> TakenOut;
+std::string                           StoreCharacter; // the open storage's character (UTF-8 name)
+bool                                  TakenOutChecked {}; // this character's leftovers from a crash were looked at
+bool StaleChecked {}; // the page this character came in with was checked against the records; guarded by Lock
 bool                                  StoreReady {}; // the native calls are there
 D2RL::PlayerHandle                    StoreOwner {}; // the character it was opened for
 
@@ -5882,18 +5893,25 @@ void SaveStore() {
 	w.out = "GRL1";
 	w.u32(2);
 	w.u32(static_cast<std::uint32_t>(Records.size()));
-	for (const auto& [fingerprint, record] : Records) {
+	const auto put = [&](const Record& record) {
 		w.text(record.base ? "b|" + record.id : record.id);
 		w.u8(record.eth), w.u8(record.perfect);
 		w.u32(record.fingerprint), w.u32(record.code), w.u32(record.quality), w.u32(static_cast<std::uint32_t>(record.qualityRecordId)), w.u32(record.itemLevel), w.u32(record.stateFlags);
 		w.u32(static_cast<std::uint32_t>(record.bytes.size()));
 		w.out.append(reinterpret_cast<const char*>(record.bytes.data()), record.bytes.size());
-	}
+	};
+	for (const auto& [fingerprint, record] : Records) put(record);
 	w.u32(static_cast<std::uint32_t>(Tombstones.size()));
 	for (const auto fingerprint : Tombstones) w.u32(fingerprint);
 	w.u32(static_cast<std::uint32_t>(FoundIds.size() + CheckedIds.size()));
 	for (const auto& id : FoundIds) w.text(id);
 	for (const auto& id : CheckedIds) w.text("c|" + id);
+	// After what older versions read (they stop before it): the records taken
+	// out and not saved by the game yet.
+	std::erase_if(TakenOut, [](const auto& out) { return Records.count(out.first) != 0; }); // back in the grail
+	w.out += "OUT1";
+	w.u32(static_cast<std::uint32_t>(TakenOut.size()));
+	for (const auto& [fingerprint, out] : TakenOut) w.text(out.owner), put(out.record);
 	const std::wstring temporary = StorePath + L".tmp";
 	FILE*              file      = _wfopen(temporary.c_str(), L"wb");
 	if (!file || std::fwrite(w.out.data(), 1, w.out.size(), file) != w.out.size()) {
@@ -5909,7 +5927,7 @@ void SaveStore() {
 // Lock held. Reads the storage file at `path` (none yet: an empty grail).
 std::uint32_t FingerprintInBytes(const std::vector<std::uint8_t>& bytes, std::uint32_t itemLevel, std::uint32_t quality);
 bool          LoadStore(const std::wstring& path) {
-	Records.clear(), Tombstones.clear(), FoundIds.clear(), CheckedIds.clear(), Materialized.clear(), Fingerprints.clear();
+	Records.clear(), Tombstones.clear(), FoundIds.clear(), CheckedIds.clear(), Materialized.clear(), Fingerprints.clear(), TakenOut.clear();
 	StorePath = path;
 	FILE* file = _wfopen(path.c_str(), L"rb");
 	if (!file && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
@@ -5930,8 +5948,7 @@ bool          LoadStore(const std::wstring& path) {
 		StorePath.clear();
 		return false;
 	}
-	for (std::uint32_t n = r.get(4); r.ok && n--;) {
-		Record record;
+	const auto take = [&](Record& record) {
 		record.id              = r.text();
 		if (record.id.rfind("b|", 0) == 0) record.id.erase(0, 2), record.base = true;
 		record.eth             = r.get(1) != 0;
@@ -5943,9 +5960,14 @@ bool          LoadStore(const std::wstring& path) {
 		record.itemLevel       = r.get(4);
 		record.stateFlags      = r.get(4);
 		const auto size        = r.get(4);
-		if (!r.ok || r.at + size > data.size()) break;
+		if (!r.ok || r.at + size > data.size()) return r.ok = false;
 		record.bytes.assign(data.begin() + static_cast<std::ptrdiff_t>(r.at), data.begin() + static_cast<std::ptrdiff_t>(r.at + size));
 		r.at += size;
+		return true;
+	};
+	for (std::uint32_t n = r.get(4); r.ok && n--;) {
+		Record record;
+		if (!take(record)) break;
 		// Version 1 kept a value that changes on each load: the real one is in the bytes.
 		if (version == 1) record.fingerprint = FingerprintInBytes(record.bytes, record.itemLevel, record.quality);
 		Records[record.fingerprint] = std::move(record);
@@ -5956,6 +5978,15 @@ bool          LoadStore(const std::wstring& path) {
 	for (std::uint32_t n = r.get(4); r.ok && n--;)
 		if (auto id = r.text(); id.rfind("c|", 0) == 0) CheckedIds.insert(id.substr(2)); // a ticked checkbox entry
 		else FoundIds.insert(std::move(id));
+	if (r.ok && r.at + 8 <= data.size() && !data.compare(r.at, 4, "OUT1")) {
+		r.at += 4;
+		for (std::uint32_t n = r.get(4); r.ok && n--;) {
+			TakenOutRecord out;
+			out.owner = r.text();
+			if (!r.ok || !take(out.record)) break;
+			TakenOut[out.record.fingerprint] = std::move(out);
+		}
+	}
 	if (!r.ok) {
 		// Kept aside before the next save writes over it.
 		(void)CopyFileW(path.c_str(), (path + L".damaged").c_str(), FALSE);
@@ -5969,6 +6000,19 @@ bool          LoadStore(const std::wstring& path) {
 }
 
 // ---- the character's mode ----
+// The client player's name as the game keeps it (UTF-8), empty when unknown.
+std::string CharacterName() {
+	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
+	void*      unit = reinterpret_cast<PlayerUnitFn>(base + Sound::PlayerUnit)(reinterpret_cast<LocalIndexFn>(base + Sound::LocalIndex)());
+	char       name[17] {};
+	SIZE_T     copied = 0;
+	void*      data   = nullptr;
+	if (!unit || !ReadProcessMemory(GetCurrentProcess(), static_cast<const char*>(unit) + 0x10, &data, sizeof(data), &copied) || !data
+	    || !ReadProcessMemory(GetCurrentProcess(), data, name, 16, &copied))
+		return {};
+	return name;
+}
+
 // The client player's name (PlayerData at unit+0x10 starts with it), then the
 // newest <name>.d2s in the save folder or a mod's: byte 0x24 bit 0x04 is
 // hardcore.
@@ -6034,8 +6078,11 @@ void OpenStoreFor(D2RL::PlayerHandle player) {
 	if (!StoreReady) return;
 	const bool         hardcore = Hardcore();
 	const std::wstring folder   = StoreFolder();
+	const std::string  name     = CharacterName();
 	std::lock_guard    guard(Lock);
-	StoreOwner = player;
+	StoreOwner      = player;
+	StoreCharacter  = name;
+	TakenOutChecked = false;
 	if (folder.empty()) {
 		StorePath.clear();
 		Problem(true, "grailon: no Saved Games folder: the grail cannot store items");
@@ -6282,6 +6329,12 @@ bool RecordItem(const Items::ItemInfo& item, int u, bool eth, bool perfect) {
 			Say(true, "grailon: %s could not be stored: read %u, %zu bytes, fingerprint %08X", CodeText(item.code).c_str(), static_cast<unsigned>(read), snapshot.bytes.size(), snapshot.fingerprint);
 		return false; // without its identity it could come back twice
 	}
+	if (Records.count(snapshot.fingerprint)) {
+		static int told = 0;
+		if (told++ < 8)
+			Say(true, "grailon: %s has the same identity as an item already in the grail (copied with an item editor?): it cannot be stored", CodeText(item.code).c_str());
+		return false; // it would take the other item's place
+	}
 	const auto base = BaseFor.find(item.runtimeId);
 	Record     record { .id = Uniques[u].id, .eth = eth, .perfect = perfect, .base = base != BaseFor.end() && base->second == u, .fingerprint = snapshot.fingerprint, .code = item.code,
 		            .quality = static_cast<std::uint32_t>(item.quality), .itemLevel = item.itemLevel, .stateFlags = item.stateFlags, .qualityRecordId = item.qualityRecordId,
@@ -6481,6 +6534,56 @@ void __cdecl FreeGhosts(const D2RL::PluginContext*, void*) noexcept {
 // view opens again. Grail items nobody recorded are recorded first; anything
 // else goes to the inventory.
 Record* RecordAt(int u, bool eth);
+
+// Lock held. Whether an item with a record's identity is that record's item:
+// copies made with an item editor share their identity (an ethereal copy of a
+// normal one, say) and must not be taken for it.
+bool SameItem(const Record& record, const Items::ItemInfo& item) {
+	return record.code == item.code && record.eth == IsEth(item) && record.quality == static_cast<std::uint32_t>(item.quality) && record.qualityRecordId == item.qualityRecordId;
+}
+
+// Game thread, once per character. Records this character took out in a game
+// that never ended (the game closed unexpectedly before saving it): an item
+// the character does not have now was lost with the game, so its record comes
+// back into the grail.
+void RestoreTakenOut(const D2RL::PluginContext* context, D2RL::PlayerHandle player) {
+	std::vector<std::uint32_t> mine;
+	{
+		std::lock_guard guard(Lock);
+		if (TakenOutChecked || StorePath.empty() || StoreOwner != player) return;
+		TakenOutChecked = true;
+		for (const auto& [fingerprint, out] : TakenOut)
+			if (out.owner == StoreCharacter) mine.push_back(fingerprint);
+	}
+	if (mine.empty()) return;
+	std::vector<Items::ItemInfo> items;
+	using C = Items::ItemContainer;
+	const D2RL::Inventory::ItemFilter everywhere { .structSize = D2RL::Inventory::ItemFilterSize,
+		                                           .containerMask = Items::ContainerBit(C::Equipment) | Items::ContainerBit(C::Cursor) | Items::ContainerBit(C::Belt)
+		                                                          | Items::ContainerBit(C::Inventory) | Items::ContainerBit(C::Cube) | Items::ContainerBit(C::PersonalStash)
+		                                                          | Items::ContainerBit(C::SharedStash) };
+	(void)Inventory->forEachInventoryItem(context, player, &everywhere, CollectRaw, &items);
+	std::set<std::uint32_t> held;
+	for (const auto& item : items)
+		if (item.container != C::CustomPage)
+			if (const auto print = FingerprintOf(item)) held.insert(print);
+	std::lock_guard guard(Lock);
+	int back = 0;
+	for (const auto fingerprint : mine) {
+		const auto out = TakenOut.find(fingerprint);
+		if (out == TakenOut.end()) continue;
+		if (!held.count(fingerprint) && !Records.count(fingerprint)) {
+			Records[fingerprint] = out->second.record;
+			Tombstones.erase(fingerprint);
+			++back;
+		}
+		TakenOut.erase(out);
+	}
+	if (back) Say(false, "grailon: %d item(s) taken out of the grail before the game closed unexpectedly were never saved: they are back in the grail", back);
+	RebuildStored();
+	SaveStore();
+}
+
 std::atomic<bool> PageClearing {};
 std::atomic<D2RL::PlayerHandle> ClearedFor {};
 void __cdecl ClearPage(const D2RL::PluginContext* context, void*) noexcept {
@@ -6495,6 +6598,7 @@ void __cdecl ClearPage(const D2RL::PluginContext* context, void*) noexcept {
 		return;
 	}
 	ClearedFor = player;
+	RestoreTakenOut(context, player);
 	std::vector<Items::ItemInfo>      items;
 	const D2RL::Inventory::ItemFilter filter { .structSize = D2RL::Inventory::ItemFilterSize, .containerMask = Items::ContainerBit(Items::ItemContainer::CustomPage) };
 	(void)Inventory->forEachInventoryItem(context, player, &filter, Collect, &items);
@@ -6506,8 +6610,12 @@ void __cdecl ClearPage(const D2RL::PluginContext* context, void*) noexcept {
 			++kept;
 			continue;
 		}
-		const auto print = FingerprintOf(item);
-		bool       copy  = print && (Records.count(print) || Tombstones.count(print)); // the file has it (or it left the grail elsewhere)
+		const auto print  = FingerprintOf(item);
+		const auto record = print ? Records.find(print) : Records.end();
+		// The file has it (the page as the character came in, or put there by
+		// the grail), or it left the grail elsewhere since.
+		bool copy = (record != Records.end() && SameItem(record->second, item) && (!StaleChecked || Materialized.count(item.runtimeId)))
+		         || (print && !StaleChecked && Tombstones.count(print));
 		if (!copy) {
 			const int u = GrailIndex(item);
 			if (u >= 0 && HasTile(u, IsEth(item)) && !RecordAt(u, IsEth(item)) && RecordItem(item, u, IsEth(item), false)) copy = dirty = true;
@@ -6571,6 +6679,7 @@ void TakeOut(std::uint32_t fingerprint) {
 	// A simple item's stand-in is every copy's: no tombstone, or the next copy put in would go.
 	const auto record = Records.find(fingerprint);
 	const bool simple = record != Records.end() && record->second.id.rfind("m:", 0) == 0 && fingerprint == SimplePrint(record->second.code);
+	if (record != Records.end() && !simple) TakenOut[fingerprint] = { record->second, StoreCharacter };
 	Records.erase(fingerprint);
 	if (!simple) Tombstones.insert(fingerprint);
 	std::erase_if(Materialized, [&](const auto& item) { return item.second == fingerprint; });
@@ -6626,7 +6735,6 @@ void SayOnce(bool& told, const char* format, unsigned value) {
 	told = true;
 }
 
-bool StaleChecked {}; // the page this character came in with was checked against the records; guarded by Lock
 
 bool FreeCell(D2RL::PlayerHandle player, std::uint32_t code, int& freeX, int& freeY);
 bool PageMove(D2RL::Inventory::LocalPlayerPageMoveKind kind, int x, int y);
@@ -6636,6 +6744,9 @@ std::atomic<bool> ForgetWanted {}; // grailon forget, done by the next arrange
 void __cdecl Arrange(const D2RL::PluginContext* context, void* userData) noexcept {
 	auto* job = static_cast<ArrangeJob*>(userData);
 	Trace(job->open ? "arrange for view" : "arrange", job->tries);
+	// First of all (before anything leaves the grail): what a crashed game took
+	// out comes back, so its copy on the page is the record's again.
+	RestoreTakenOut(context, job->player);
 	// A Ctrl+clicked item whose twin is stored but not on the page (its tile is
 	// cut or elsewhere): the twin is made where the clicked item is, and leaves
 	// the grail, so the clicked one can take its tile.
@@ -6674,8 +6785,12 @@ void __cdecl Arrange(const D2RL::PluginContext* context, void* userData) noexcep
 		.containerMask = Items::ContainerBit(Items::ItemContainer::CustomPage) | Items::ContainerBit(Items::ItemContainer::PersonalStash)
 		               | Items::ContainerBit(Items::ItemContainer::Inventory) | Items::ContainerBit(Items::ItemContainer::Cube),
 	};
-	(void)Inventory->forEachInventoryItem(context, job->player, &filter, Collect, &items);
 	bool storage = false;
+	{
+		std::lock_guard guard(Lock);
+		storage = StoreReady && !StorePath.empty() && StoreOwner == job->player;
+	}
+	(void)Inventory->forEachInventoryItem(context, job->player, &filter, Collect, &items);
 	{
 		std::lock_guard guard(Lock);
 		std::erase_if(items, [](const Items::ItemInfo& item) { return Busy.count(item.runtimeId) != 0; });
@@ -6697,7 +6812,8 @@ void __cdecl Arrange(const D2RL::PluginContext* context, void* userData) noexcep
 			bool copy = false;
 			{
 				std::lock_guard guard(Lock);
-				copy = Records.count(FingerprintOf(item)) != 0;
+				const auto record = Records.find(FingerprintOf(item));
+				copy              = record != Records.end() && SameItem(record->second, item);
 			}
 			if (!copy) continue;
 			++found;
@@ -6813,10 +6929,22 @@ void __cdecl Arrange(const D2RL::PluginContext* context, void* userData) noexcep
 				continue;
 			}
 			const auto record = step.fingerprint ? Records.find(step.fingerprint) : Records.end();
+			// An item with a record's identity that is not the record's own (the
+			// page as the character came in, or put there by the grail): a copy
+			// made with an item editor, or a second one. It goes to the
+			// inventory; nothing is destroyed.
+			if (record != Records.end()
+			    && (!SameItem(record->second, *item) || !(stale || Materialized.count(item->runtimeId)) || seen.count(step.fingerprint))) {
+				static int toldTwin = 0;
+				if (toldTwin++ < 8) Say(true, "grailon: %s has the same identity as an item already in the grail (copied with an item editor?): it goes to the inventory", CodeText(item->code).c_str());
+				step.action = Action::Out;
+				steps.push_back(step);
+				continue;
+			}
 			if (record != Records.end()) {
-				// A record's item: in its tile when shown, else away; a second copy goes.
-				if (!seen.insert(step.fingerprint).second) step.action = Action::Destroy;
-				else {
+				// A record's item: in its tile when shown, else away.
+				seen.insert(step.fingerprint);
+				{
 					Materialized[item->runtimeId] = step.fingerprint;
 					const auto entry              = EntryById.find(record->second.id);
 					if (entry != EntryById.end() && !settings && place(entry->second, record->second.eth, CodeText(item->code), tile, x, y) && !taken[tile]) {
@@ -7463,6 +7591,7 @@ void __cdecl RunCursorJob(const D2RL::PluginContext* context, void* userData) no
 		std::lock_guard guard(Lock);
 		if (status == Items::Result::Success && made) {
 			Tombstones.insert(job->twin->fingerprint);
+			TakenOut[job->twin->fingerprint] = { *job->twin, StoreCharacter };
 			if (job->cursor && GetInfo(context, made, &item) == Items::Result::Success) {
 				Busy.insert(item.runtimeId);
 				job->made = item.runtimeId, job->x = item.x, job->y = item.y;
@@ -7676,7 +7805,7 @@ Snapshot SnapshotOf(const Items::ItemInfo& item, const PageHost::RequestAnswer& 
 
 // Lock held. A record from saved bytes (RecordItem's, without the game thread).
 bool RecordFromSnapshot(const Items::ItemInfo& item, int u, bool eth, Snapshot snapshot) {
-	if (!snapshot.ok || !snapshot.fingerprint) return false;
+	if (!snapshot.ok || !snapshot.fingerprint || Records.count(snapshot.fingerprint)) return false;
 	Record record { .id = Uniques[u].id, .eth = eth, .perfect = PerfectNow(u, item.runtimeId, eth), .fingerprint = snapshot.fingerprint, .code = item.code,
 		            .quality = static_cast<std::uint32_t>(item.quality), .itemLevel = item.itemLevel, .stateFlags = item.stateFlags, .qualityRecordId = item.qualityRecordId,
 		            .bytes = std::move(snapshot.bytes) };
@@ -10474,7 +10603,12 @@ void __cdecl UiTick(const D2RL::PluginContext* context, void*) noexcept {
 	// page is checked against the records once.
 	if (static D2RL::PlayerHandle seen {}; player != seen) {
 		std::lock_guard guard(Lock);
-		if (seen && StoreOwner == seen) SaveStore();
+		if (seen && StoreOwner == seen) {
+			// Left the game: the game saved the character, so what it took out is
+			// in its save now.
+			std::erase_if(TakenOut, [](const auto& out) { return out.second.owner == StoreCharacter; });
+			SaveStore();
+		}
 		seen = player;
 		Ghosts.clear(), GhostWanted.clear(); // that game's: freed with it
 		ServerGame = nullptr;

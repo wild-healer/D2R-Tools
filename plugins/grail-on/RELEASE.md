@@ -1,3 +1,14 @@
+# Grail On! 1.1.2: patch notes
+
+```
+**Grail On! 1.1.2**
+
+**Fixed**
+
+* An item that shares its identity with a stored item (a copy made with an item editor, such as an ethereal copy of a normal one) is no longer destroyed: it goes to the inventory and cannot be stored.
+* Items taken out of the grail just before the game closed unexpectedly come back into the grail instead of being lost.
+```
+
 # Grail On! 1.1.1: patch notes
 
 ```
