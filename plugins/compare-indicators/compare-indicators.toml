@@ -1,23 +1,21 @@
 # Compare Indicators
 #
-# While the game compares a hovered unique, set item or runeword with another
-# copy of the same item (the comparison tooltip beside it: Shift, or a plugin
-# that always compares), each of its lines that can roll ends with an
-# indicator against the copy's roll: (perfect +x), (perfect), (better +x),
-# (same), (worse -x), or a red (lost perfect -x) when the copy had the best
-# roll. The copy is whatever item the comparison shows, the worn one or one a
-# plugin puts there (Grail On!'s grail copy). Rolls come from the game's own
-# tables (modded tables included). Unidentified and worn items get none.
+# While the game compares a hovered item with another one (the comparison
+# tooltip beside it: Shift, or a plugin that always compares), its lines get
+# indicators. Against another copy of the same unique, set item or runeword,
+# each line that can roll gets (perfect +x), (perfect), (better +x), (same),
+# (worse -x), or a red (lost perfect -x) when the copy had the best roll. The
+# copy is whatever item the comparison shows, the worn one or one a plugin
+# puts there (Grail On!'s grail copy). Rolls come from the game's own tables
+# (modded tables included). Unidentified and worn items get none.
 # Runes, gems and jewels in sockets count. Weapons compare with your weapon,
 # shields with your shield (two-handed items and dual wielding: both hands).
-#
-# D2RLoader copies this file to d2rloader/config/compare-indicators.toml on
-# first launch; edit that copy. Changes apply the next time the game starts.
+# Every setting can also be changed in game with I Hate TOMLs.
 
 [compare-indicators]
 enabled = true
 
-# Which items get indicators.
+# Which items get roll indicators against another copy of themselves.
 uniques = true
 sets = true
 runewords = true

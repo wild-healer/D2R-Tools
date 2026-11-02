@@ -1,4 +1,36 @@
-# Compare Indicators 1.0.1: release texts
+# Compare Indicators 1.0.2: release texts
+
+## Patch notes
+
+```
+**Compare Indicators 1.0.2**
+
+**New**
+
+* Every setting can be changed in game with I Hate TOMLs and applies at once, enabled included.
+* The download is now named compare-indicators.zip, without a version.
+```
+
+## GitHub release
+
+- Tag: `compare-indicators-v1.0.2`
+- Title: `Compare Indicators 1.0.2`
+- Asset: `compare-indicators.zip`
+
+Body:
+
+```markdown
+**Compare Indicators** 1.0.2
+
+### New
+- Every setting can be changed in game with I Hate TOMLs and applies at once, enabled included.
+- The download is now named `compare-indicators.zip`, without a version.
+
+### Install
+Load `compare-indicators.zip` in D2RMM, or copy `d2rl-compare-indicators.dll` to `<game>/d2rloader/plugins/`. Settings are unchanged.
+```
+
+# Compare Indicators 1.0.1
 
 ## Patch notes
 

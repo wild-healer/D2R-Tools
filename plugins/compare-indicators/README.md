@@ -7,17 +7,18 @@ D2RLoader plugin that adds indicators to an item's tooltip lines while the game 
 - **Sockets**: runes, gems and jewels socketed in either item count in the values. Perfect is still judged on the item's own roll, so a same-item compare also marks the stats that differ only because of what is socketed.
 - **Weapons and shields**: only the item the hovered one would replace gets compared: a weapon against your weapon, a shield or off-hand against your shield. A two-handed item (hovered or worn) counts against both hands, and so does a one-handed weapon when the class can dual wield.
 - **Any comparison**: the compared item is whatever the comparison window shows, the worn one or one another plugin puts there instead, such as Grail On!'s grail copy.
+- **I Hate TOMLs**: every setting can be changed in game and applies at once.
 - Nothing shows without a comparison. Unidentified items and worn items get no indicators on their own tooltip. Indicators are added to the finished tooltip text, so Item Roll Ranges keeps them.
 
 Hooks the game's tooltip and comparison text builders; it checks that code when it loads and stays inactive on other builds. Tested on Steam 3.3.94995 (3.3.93787 has the same code). Requires D2RLoader 1.3.1 or later.
 
 ## Install
 
-Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/compare-indicators). Load `compare-indicators-<version>.zip` (the DLL alone; its default settings are built in) in D2RMM, or copy `d2rl-compare-indicators.dll` to `<game>/d2rloader/plugins/`. Remove the DLL to uninstall.
+Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/compare-indicators). Load `compare-indicators.zip` (the DLL alone; its default settings are built in) in D2RMM, or copy `d2rl-compare-indicators.dll` to `<game>/d2rloader/plugins/`. Remove the DLL to uninstall.
 
 ## Settings
 
-`d2rloader/config/compare-indicators.toml`, written on first launch:
+`d2rloader/config/compare-indicators.toml`, written on first launch, or the plugin's page in I Hate TOMLs:
 
 | Key | Default | Meaning |
 | --- | --- | --- |

@@ -42,6 +42,7 @@
 //     Socketed lines are written outside the loop and found in the text by
 //     their words; the defense line by its label.
 
+#include "i_hate_tomls_client.h"
 #include <D2RLPlugin/api.h>
 #include <windows.h>
 
@@ -69,7 +70,7 @@ namespace Items  = D2RL::Items;
 namespace Tables = D2RL::DataTables;
 
 constexpr const char* PluginId      = "compare-indicators";
-constexpr const char* PluginVersion = "1.0.1";
+constexpr const char* PluginVersion = "1.0.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1275,7 +1276,7 @@ GameString* HookCompared(GameString* out, int bodyLocation) noexcept {
 	// and against any item with the option.
 	Marking lost { .mode = LostStats };
 	void*   hovered = Current.item;
-	if (Ready && !Marks && hovered && Identified(hovered) && !Worn(hovered))
+	if (Ready && Config.enabled && !Marks && hovered && Identified(hovered) && !Worn(hovered))
 		if (void* worn = ComparedItem(bodyLocation); worn && worn != hovered && Identified(worn) && Replaces(hovered, worn) && (Config.anyItems || SameItemPair(hovered, worn))) {
 			lost.item = lost.copy = worn;
 			lost.mine             = ValuesOf(worn);
@@ -1366,7 +1367,7 @@ void* CopyFor(const Round& round, void* item, const Ident& ident) {
 
 GameString* HookTooltip(GameString* out, void* unit, void* other, void* item, std::uint64_t a5, std::uint64_t a6, std::uint64_t a7, std::uint64_t a8, void* a9) noexcept {
 	if (Ready && item && CompareDepth > 0 && !BuiltInCompare) BuiltInCompare = item;
-	if (!Ready || Marks || !item) return Tooltip(out, unit, other, item, a5, a6, a7, a8, a9);
+	if (!Ready || !Config.enabled || Marks || !item) return Tooltip(out, unit, other, item, a5, a6, a7, a8, a9);
 	// Another item's text while a tooltip is shown: what it is compared with.
 	if (CompareDepth > 0 || (Current.item && item != Current.item)) {
 		if (CompareDepth > 0 && !BuiltInCompare) BuiltInCompare = item;
@@ -1487,6 +1488,59 @@ std::string Unquote(std::string value) {
 	return value;
 }
 
+const std::pair<const char*, bool Settings::*> Keys[] { { "enabled", &Settings::enabled }, { "uniques", &Settings::uniques }, { "sets", &Settings::sets },
+	                                                  { "runewords", &Settings::runewords }, { "any_items", &Settings::anyItems } };
+
+bool Apply(const std::string& key, const std::string& value, std::string& error) {
+	if (value != "true" && value != "false") return error = "not true or false", false;
+	for (const auto& [name, field] : Keys)
+		if (key == name) return Config.*field = value == "true", true;
+	return error = "unknown setting", false;
+}
+
+std::string ValueOf(const std::string& key) {
+	for (const auto& [name, field] : Keys)
+		if (key == name) return Config.*field ? "true" : "false";
+	return {};
+}
+
+// The config file, as the embedded default writes it, with the current values.
+std::string Render() {
+	return R"(# Compare Indicators
+#
+# While the game compares a hovered item with another one (the comparison
+# tooltip beside it: Shift, or a plugin that always compares), its lines get
+# indicators. Against another copy of the same unique, set item or runeword,
+# each line that can roll gets (perfect +x), (perfect), (better +x), (same),
+# (worse -x), or a red (lost perfect -x) when the copy had the best roll. The
+# copy is whatever item the comparison shows, the worn one or one a plugin
+# puts there (Grail On!'s grail copy). Rolls come from the game's own tables
+# (modded tables included). Unidentified and worn items get none.
+# Runes, gems and jewels in sockets count. Weapons compare with your weapon,
+# shields with your shield (two-handed items and dual wielding: both hands).
+# Every setting can also be changed in game with I Hate TOMLs.
+
+[compare-indicators]
+enabled = )" + ValueOf("enabled") + R"(
+
+# Which items get roll indicators against another copy of themselves.
+uniques = )" + ValueOf("uniques") + R"(
+sets = )" + ValueOf("sets") + R"(
+runewords = )" + ValueOf("runewords") + R"(
+
+# Indicators against any compared item, whatever its rarity (when it isn't
+# another copy of the same unique, set item or runeword, which keeps the roll
+# indicators above). The hovered item's stats get (better +x), (same),
+# (worse -x), or a green (new) when the compared item doesn't have them; the
+# compared item's own stats that the hovered one doesn't have get a red (lost).
+any_items = )" + ValueOf("any_items") + "\n";
+}
+
+void SaveConfig() {
+	const std::string toml = Render();
+	if (!Context->WriteConfig(toml.c_str())) Say(true, "config: could not write the config file");
+}
+
 void LoadConfig() {
 	(void)Context->EnsureConfig();
 	std::uint32_t     required = 0;
@@ -1500,10 +1554,7 @@ void LoadConfig() {
 		if (!Context->ReadConfig(buffer.data(), static_cast<std::uint32_t>(buffer.size()), &required)) return;
 	}
 	const std::string_view text(buffer.data(), std::strlen(buffer.data()));
-	const std::pair<const char*, bool Settings::*> keys[] { { "enabled", &Settings::enabled },   { "uniques", &Settings::uniques },
-		                                                    { "sets", &Settings::sets },         { "runewords", &Settings::runewords }, { "any_items", &Settings::anyItems },
-		                                                    };
-	std::size_t lineStart = 0;
+	std::size_t            lineStart = 0;
 	while (lineStart < text.size()) {
 		auto lineEnd = text.find('\n', lineStart);
 		if (lineEnd == std::string_view::npos) lineEnd = text.size();
@@ -1513,11 +1564,63 @@ void LoadConfig() {
 		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
 		const std::string key   = Trim(std::string_view(line).substr(0, equals));
 		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
-		bool              known = false;
-		for (const auto& [name, field] : keys)
-			if (key == name) Config.*field = value != "false", known = true;
-		if (!known) Say(true, "config: unknown key %s", key.c_str());
+		std::string       error;
+		if (!Apply(key, value, error)) Say(true, "config: %s = %s ignored (%s)", key.c_str(), value.c_str(), error.c_str());
 	}
+}
+
+// ---- I Hate TOMLs ----
+
+constexpr const char* Schema = R"(title = "Compare Indicators"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Show indicators"
+note = "On the hovered item's lines while the game compares it with another item."
+[[setting]]
+type = "header"
+label = "Rolls against another copy of the same item"
+[[setting]]
+key = "uniques"
+type = "bool"
+label = "Uniques"
+[[setting]]
+key = "sets"
+type = "bool"
+label = "Set items"
+[[setting]]
+key = "runewords"
+type = "bool"
+label = "Runewords"
+[[setting]]
+type = "header"
+label = "Other items"
+[[setting]]
+key = "any_items"
+type = "bool"
+label = "Compare with any item"
+note = "Better, worse, same and new on the hovered item, lost on the compared one, whatever its rarity."
+)";
+
+PluginMenu::Connection Menu;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	std::string reason;
+	if (!Apply(key, Unquote(Trim(value)), reason)) {
+		std::snprintf(error, size, "%s", reason.c_str());
+		return false;
+	}
+	SaveConfig();
+	return true;
 }
 
 bool Matches(std::uint64_t rva, const std::uint8_t* bytes, std::size_t size) {
@@ -1580,10 +1683,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
 	LoadConfig();
-	if (!Config.enabled) {
-		Say(false, "Compare Indicators %s: disabled in config", PluginVersion);
-		return true;
-	}
+	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
 	TextApi      = Query<D2RL::LocalizationService>();
 	InventoryApi = Query<D2RL::InventoryService>();
 	Threads      = Query<D2RL::ThreadService>();
@@ -1641,6 +1741,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	Menu.Stop();
 	Running = false;
 	if (Ticker.joinable()) Ticker.join();
 }
