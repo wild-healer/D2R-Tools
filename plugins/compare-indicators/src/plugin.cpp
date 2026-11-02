@@ -69,7 +69,7 @@ namespace Items  = D2RL::Items;
 namespace Tables = D2RL::DataTables;
 
 constexpr const char* PluginId      = "compare-indicators";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -840,7 +840,12 @@ std::string SameItemIndicator(const Marking& mark, int stat, int layer, bool hav
 	return StatIndicator(OtherItem, stat, haveMine, mine, haveTheirs, theirs);
 }
 
+// Skill charges (204): their value is the charges left, which says nothing
+// about the item.
+constexpr int ChargesStat = 204;
+
 std::string LineIndicator(const Marking& mark, int stat, int layer) {
+	if (stat == ChargesStat) return {};
 	int        mine = 0, theirs = 0;
 	const bool haveMine = mark.mine.Shown(stat, layer, mine), haveTheirs = mark.theirs.Shown(stat, layer, theirs);
 	if (mark.mode != SameItem) return StatIndicator(mark.mode, stat, haveMine, mine, haveTheirs, theirs);

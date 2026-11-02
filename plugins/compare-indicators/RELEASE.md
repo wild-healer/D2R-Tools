@@ -1,4 +1,34 @@
-# Compare Indicators 1.0.0: release texts
+# Compare Indicators 1.0.1: release texts
+
+## Patch notes
+
+```
+**Compare Indicators 1.0.1**
+
+**Fixed**
+
+* Skill charges no longer get an indicator: they were compared on the charges left.
+```
+
+## GitHub release
+
+- Tag: `compare-indicators-v1.0.1`
+- Title: `Compare Indicators 1.0.1`
+- Asset: `compare-indicators-1.0.1.zip`
+
+Body:
+
+```markdown
+**Compare Indicators** 1.0.1
+
+### Fixed
+- Skill charges no longer get an indicator: they were compared on the charges left.
+
+### Install
+Load `compare-indicators-1.0.1.zip` in D2RMM, or copy `d2rl-compare-indicators.dll` to `<game>/d2rloader/plugins/`. Settings are unchanged.
+```
+
+# Compare Indicators 1.0.0
 
 ## Patch notes
 
