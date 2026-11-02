@@ -1,0 +1,8 @@
+[i-hate-tomls-demo]
+button = [0, 0]
+color = "gold"
+count = 3
+enabled = true
+position = "before"
+scale = 1.0
+text = "Eth"
