@@ -1,6 +1,20 @@
-# Wild Healer's Charm Inventory 1.0.3: release texts
+# Wild Healer's Charm Inventory 1.1.0: release texts
 
 ## Patch notes
+
+```
+**Wild Healer's Charm Inventory 1.1.0**
+
+**New**
+
+* columns and rows settings: set the charm inventory's size, from 1x1 up to 10x12 (default 10x4).
+
+**Fixed**
+
+* Charms in the normal inventory no longer give their bonuses when Charm Dedup is also loaded.
+```
+
+## Patch notes 1.0.3
 
 ```
 **Wild Healer's Charm Inventory 1.0.3**
@@ -38,17 +52,17 @@
 
 ## GitHub release
 
-- Tag: `wild-healers-charm-inventory-v1.0.3`
-- Title: `Wild Healer's Charm Inventory 1.0.3`
-- Asset: `wild-healers-charm-inventory-1.0.3.zip`
+- Tag: `wild-healers-charm-inventory-v1.1.0`
+- Title: `Wild Healer's Charm Inventory 1.1.0`
+- Asset: `wild-healers-charm-inventory-1.1.0.zip`
 
 Body:
 
 ```markdown
-**Wild Healer's Charm Inventory** 1.0.3: a 10x4 charm inventory on Player Page Host's player page.
+**Wild Healer's Charm Inventory** 1.1.0: a charm inventory (10x4 by default) on Player Page Host's player page.
 
 ### Features
-- 10x4 cells, the size of the inventory's grid. Only charms go in, one of each unique charm (a second copy can only be swapped with the first), and only these charms give their bonuses: charms in the normal inventory don't.
+- 10x4 cells by default, the size of the inventory's grid, or any size up to 10x12 with the `columns` and `rows` settings. Only charms go in, one of each unique charm (a second copy can only be swapped with the first), and only these charms give their bonuses: charms in the normal inventory don't (Charm Dedup works alongside).
 - A game-style left panel: "Charms" title, plain stone and the grid.
 - Opens from the charm button on the inventory's left edge (under Grail On!'s grail button), from the "Open/close charms" action of the Controls menu (no key by default), or with the `charms` console command.
 - Ctrl+click moves charms between the inventory and the open panel.
@@ -59,7 +73,7 @@ Body:
 - Player Page Host (`aaa-player-page-host`).
 
 ### Install
-Load `wild-healers-charm-inventory-1.0.3.zip` in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/wild-healers-charm-inventory.toml`, written on first launch.
+Load `wild-healers-charm-inventory-1.1.0.zip` in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/wild-healers-charm-inventory.toml`, written on first launch.
 ```
 
 ## D2RLoader Hub
@@ -68,6 +82,6 @@ Name: `Wild Healer's Charm Inventory`
 
 Summary:
 
-> A 10x4 charm inventory in a game-style panel, on Player Page Host's player page, opened from a button beside the inventory or a key.
+> A charm inventory (10x4 by default, up to 10x12) in a game-style panel, on Player Page Host's player page, opened from a button beside the inventory or a key.
 
 Description: the GitHub release body above.

@@ -1,10 +1,10 @@
 # Wild Healer's Charm Inventory
 
-D2RLoader plugin that gives you a 10x4 charm inventory, the size of the inventory's grid, on the custom player page that [Player Page Host](../aaa-player-page-host) shares between plugins.
+D2RLoader plugin that gives you a charm inventory (10x4 by default, the size of the inventory's grid; up to 10x12) on the custom player page that [Player Page Host](../aaa-player-page-host) shares between plugins.
 
-- **Charms only**: small, large and grand charms go in, anything else is refused. The charms in it give their bonuses; charms in the normal inventory don't (your own character only: other players in a TCP/IP game you host keep the game's rule).
+- **Charms only**: small, large and grand charms go in, anything else is refused. The charms in it give their bonuses; charms in the normal inventory don't, Charm Dedup loaded or not (your own character only: other players in a TCP/IP game you host keep the game's rule).
 - **One of each unique charm**: a second Annihilus, Torch, Gheed's or Sunder charm of the same kind is refused, dropped or Ctrl+clicked. Dropping it onto the first one swaps them.
-- **Panel**: a game-style left panel with a "Charms" title, plain stone inside and the 10x4 grid of cells.
+- **Panel**: a game-style left panel with a "Charms" title, plain stone inside and the grid of cells, centred.
 - **Opening it**: the charm button on the inventory's left edge, under Grail On!'s grail button; the "Open/close charms" action of the game's Controls menu (no key by default); or the `charms` console command.
 - **Fixed position**: the panel sits where the game's left panels sit, written out rather than taken from `$LeftPanelAnchor`, so mods that move that anchor don't carry it off screen.
 - Ctrl+click moves charms between the inventory and the open charm panel (the host does it).
@@ -22,6 +22,8 @@ Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/wild-heal
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Turns the plugin off without removing it. |
+| `columns` | `10` | Width of the charm inventory in cells, 1 to 10. |
+| `rows` | `4` | Height of the charm inventory in cells, 1 to 12. Take the charms out of the cells you remove before making it smaller. |
 
 ## Console
 

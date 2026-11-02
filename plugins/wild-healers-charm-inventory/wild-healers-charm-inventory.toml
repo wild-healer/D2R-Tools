@@ -1,8 +1,14 @@
 # Wild Healer's Charm Inventory
 #
-# A 10x4 charm inventory on Player Page Host's page, opened from the charm
+# A charm inventory on Player Page Host's page, opened from the charm
 # button on the inventory's left edge (or the console command "charms", or a key set in the game's Controls menu).
 # Only charms go in it, and the charms in it give their bonuses.
 
 [wild-healers-charm-inventory]
 enabled = true
+
+# Size of the charm inventory in cells. columns 1 to 10, rows 1 to 12.
+# Restart the game after a change. Take the charms out of the cells you remove
+# before making it smaller.
+columns = 10
+rows = 4

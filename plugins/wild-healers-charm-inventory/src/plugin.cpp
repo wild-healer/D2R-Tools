@@ -19,6 +19,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -33,7 +34,7 @@ namespace Comm   = D2RL::PluginCommunication;
 namespace Events = D2RL::SharedEvents;
 
 constexpr const char* PluginId      = "wild-healers-charm-inventory";
-constexpr const char* PluginVersion = "1.0.3";
+constexpr const char* PluginVersion = "1.1.0";
 constexpr const char* CommandPrefix = "wild-healers-charm-inventory/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -56,7 +57,10 @@ const D2RL::InventoryService*           Inventory {};
 const D2RL::ItemService*                ItemApi {};
 Comm::ServiceLease<PageHost::Service>   Host;
 PageHost::AreaHandle                    Area {};
-constexpr int                           Columns = 10, Rows = 4, Cell = 98;
+constexpr int                           Cell = 98;
+// Size from the config (columns 1-10 fit inside the frame, rows 1-12).
+constexpr int                           MaxColumns = 10, MaxRows = 12;
+int                                     Columns = 10, Rows = 4;
 
 void Log(bool error, const char* format, ...) noexcept {
 	char    line[512] {};
@@ -233,7 +237,8 @@ void AddButton() {
 // carry the panel off screen.
 // Inside the frame's gold line: x 59..1103, y 178..1451; the cells centred there.
 constexpr int PanelWidth = 1162, PanelHeight = 1507, PanelY = -651;
-constexpr int GridX = (PanelWidth - Columns * Cell) / 2, GridY = 178 + (1451 - 178 - Rows * Cell) / 2;
+int GridX = 0, GridY = 0;
+void PlaceGrid() noexcept { GridX = (PanelWidth - Columns * Cell) / 2, GridY = 178 + (1451 - 178 - Rows * Cell) / 2; }
 
 // The frame: the border pieces around dark stone with the grain of the
 // game's panels (fine noise over a coarser 3x3 one).
@@ -320,6 +325,7 @@ bool IsLocalPlayer(void* unit) noexcept {
 	std::memcpy(&type, unit, sizeof(type));
 	if (type != 0) return false;
 	std::memcpy(&id, static_cast<const std::uint8_t*>(unit) + UnitId, sizeof(id));
+	if (!PlayerUnit) return true; // no local player lookup on this build: every player
 	const auto* local = static_cast<const std::uint8_t*>(PlayerUnit(LocalIndex()));
 	if (!local) return false;
 	std::uint32_t localId = 0;
@@ -335,40 +341,109 @@ std::int32_t HookCharm(void* item, void* unit) noexcept {
 
 bool SwapSlot(std::uint64_t* slot, std::uint64_t from, std::uint64_t to) noexcept {
 	DWORD keep = 0;
-	if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &keep)) return false;
+	if (!VirtualProtect(slot, sizeof(*slot), PAGE_EXECUTE_READWRITE, &keep)) return false; // may sit in another plugin's code page
 	const bool swapped = InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(slot), static_cast<LONG64>(to), static_cast<LONG64>(from)) == static_cast<LONG64>(from);
 	VirtualProtect(slot, sizeof(*slot), keep, &keep);
 	return swapped;
 }
 
 // Checks the game code it relies on first; on another build nothing is wrapped.
-void WrapCharmSlot() noexcept {
-	Base = static_cast<std::uintptr_t>(Context->exeBase);
-	const auto* thunk = reinterpret_cast<const std::uint8_t*>(Base + CharmThunkRva);
-	const auto* index = reinterpret_cast<const std::uint8_t*>(Base + LocalIndexRva);
-	std::int32_t rel  = 0;
-	if (Base) std::memcpy(&rel, thunk + 2, sizeof(rel));
-	if (!Base || thunk[0] != 0xFF || thunk[1] != 0x25 || CharmThunkRva + 6 + rel != CharmSlotRva || std::memcmp(reinterpret_cast<const void*>(Base + PlayerUnitRva), PlayerUnitBytes, sizeof(PlayerUnitBytes)) != 0
-	    || index[0] != 0x8B || index[1] != 0x05 || index[6] != 0xC3) {
-		Log(true, "this game build's charm check isn't the expected one: inventory charms keep their bonuses");
+// Names the module an address is in, for the log.
+void ModuleOf(const void* address, char* name, DWORD size) noexcept {
+	HMODULE module = nullptr;
+	name[0]        = 0;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCWSTR>(address), &module) || !module) {
+		std::snprintf(name, size, "no module");
 		return;
 	}
-	LocalIndex          = reinterpret_cast<LocalIndexFn>(Base + LocalIndexRva);
-	PlayerUnit          = reinterpret_cast<PlayerUnitFn>(Base + PlayerUnitRva);
-	auto* const   slot    = reinterpret_cast<std::uint64_t*>(Base + CharmSlotRva);
-	const auto    current = *slot;
-	NextCharm             = reinterpret_cast<CharmFn>(current);
-	if (!current || !SwapSlot(slot, current, reinterpret_cast<std::uint64_t>(&HookCharm))) {
+	char path[MAX_PATH] {};
+	if (!GetModuleFileNameA(module, path, MAX_PATH)) {
+		std::snprintf(name, size, "unnamed module");
+		return;
+	}
+	const char* file = std::strrchr(path, '\\');
+	std::snprintf(name, size, "%s+0x%llX", file ? file + 1 : path, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(address) - reinterpret_cast<std::uintptr_t>(module)));
+}
+
+// Where the hook sits: the thunk's slot, or, when another plugin (Charm Dedup)
+// took the thunk itself (jmp rel32 to a stub "jmp [rip+0]; abs64" that skips
+// the slot), that stub's address word. In the stub case the slot (Player Page
+// Host's area rule) is asked first for page charms, then the stub's hook.
+std::uint64_t* Wrapped {};
+CharmFn        SlotCharm {};
+
+std::int32_t HookCharmAfterThunk(void* item, void* unit) noexcept {
+	const auto* data = item ? *reinterpret_cast<std::uint8_t* const*>(static_cast<const std::uint8_t*>(item) + UnitData) : nullptr;
+	if (data && data[DataPage] != CustomPage && IsLocalPlayer(unit)) return 0;
+	if (data && data[DataPage] == CustomPage && SlotCharm && !SlotCharm(item, unit)) return 0;
+	return NextCharm(item, unit);
+}
+
+void WrapCharmSlot() noexcept {
+	Base = static_cast<std::uintptr_t>(Context->exeBase);
+	if (!Base) return;
+	const auto*  thunk = reinterpret_cast<const std::uint8_t*>(Base + CharmThunkRva);
+	const auto*  index = reinterpret_cast<const std::uint8_t*>(Base + LocalIndexRva);
+	auto* const  slot  = reinterpret_cast<std::uint64_t*>(Base + CharmSlotRva);
+	std::int32_t rel   = 0;
+	std::memcpy(&rel, thunk + 2, sizeof(rel));
+	std::uint64_t* word = nullptr;
+	void*          hook = nullptr;
+	if (thunk[0] == 0xFF && thunk[1] == 0x25 && CharmThunkRva + 6 + rel == CharmSlotRva) {
+		word = slot;
+		hook = reinterpret_cast<void*>(&HookCharm);
+	} else if (thunk[0] == 0xE9) {
+		std::int32_t to = 0;
+		std::memcpy(&to, thunk + 1, sizeof(to));
+		const auto*                    stub   = thunk + 5 + to;
+		constexpr std::uint8_t         jump[] { 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 };
+		MEMORY_BASIC_INFORMATION       memory {};
+		if (VirtualQuery(stub, &memory, sizeof(memory)) && memory.State == MEM_COMMIT && !std::memcmp(stub, jump, sizeof(jump))) {
+			word      = reinterpret_cast<std::uint64_t*>(const_cast<std::uint8_t*>(stub) + 6);
+			hook      = reinterpret_cast<void*>(&HookCharmAfterThunk);
+			SlotCharm = reinterpret_cast<CharmFn>(*slot);
+			char owner[MAX_PATH + 32] {};
+			ModuleOf(reinterpret_cast<const void*>(*word), owner, sizeof(owner));
+			Log(false, "the charm check thunk was taken by another plugin (%s): wrapping its jump", owner);
+		}
+	}
+	if (!word) {
+		char bytes[3 * 16 + 1] {};
+		for (int i = 0; i < 16; ++i) std::snprintf(bytes + 3 * i, 4, "%02X ", thunk[i]);
+		Log(true, "this game build's charm check isn't the expected one (thunk %s): inventory charms keep their bonuses", bytes);
+		return;
+	}
+	// The local player lookup only limits the rule to this player (in a TCP/IP
+	// game this player hosts); without it the rule covers every player.
+	const auto* unit = reinterpret_cast<const std::uint8_t*>(Base + PlayerUnitRva);
+	if (!std::memcmp(unit, PlayerUnitBytes, sizeof(PlayerUnitBytes)) && index[0] == 0x8B && index[1] == 0x05 && index[6] == 0xC3) {
+		LocalIndex = reinterpret_cast<LocalIndexFn>(Base + LocalIndexRva);
+		PlayerUnit = reinterpret_cast<PlayerUnitFn>(Base + PlayerUnitRva);
+	} else {
+		char bytes[2][3 * 16 + 1] {};
+		for (int i = 0; i < 16; ++i) std::snprintf(bytes[0] + 3 * i, 4, "%02X ", unit[i]), std::snprintf(bytes[1] + 3 * i, 4, "%02X ", index[i]);
+		Log(false, "the local player lookup differs on this build (player unit: %s/ local index: %s): the rule covers every player in the game", bytes[0], bytes[1]);
+	}
+	const auto current = *word;
+	NextCharm          = reinterpret_cast<CharmFn>(current);
+	if (!current || !SwapSlot(word, current, reinterpret_cast<std::uint64_t>(hook))) {
 		NextCharm = nullptr;
 		Log(true, "the charm check could not be wrapped: inventory charms keep their bonuses");
 		return;
 	}
-	Log(false, "charm check wrapped: inventory charms give no bonus");
+	Wrapped = word;
+	char next[MAX_PATH + 32] {};
+	ModuleOf(reinterpret_cast<const void*>(current), next, sizeof(next));
+	Log(false, "charm check wrapped (previous target %s): inventory charms give no bonus", next);
 }
 
 void UnwrapCharmSlot() noexcept {
-	// Only when nothing wrapped it after this plugin (else that wrapper keeps calling HookCharm, which stays in place).
-	if (NextCharm && SwapSlot(reinterpret_cast<std::uint64_t*>(Base + CharmSlotRva), reinterpret_cast<std::uint64_t>(&HookCharm), reinterpret_cast<std::uint64_t>(NextCharm))) NextCharm = nullptr;
+	// Only when nothing wrapped it after this plugin (else that wrapper keeps calling the hook, which stays in place).
+	if (!NextCharm || !Wrapped) return;
+	MEMORY_BASIC_INFORMATION memory {};
+	if (!VirtualQuery(Wrapped, &memory, sizeof(memory)) || memory.State != MEM_COMMIT) return; // the other plugin freed its stub
+	const auto hook = Wrapped == reinterpret_cast<std::uint64_t*>(Base + CharmSlotRva) ? reinterpret_cast<std::uint64_t>(&HookCharm) : reinterpret_cast<std::uint64_t>(&HookCharmAfterThunk);
+	if (SwapSlot(Wrapped, hook, reinterpret_cast<std::uint64_t>(NextCharm))) NextCharm = nullptr;
 }
 
 // ---- one of each unique charm ----
@@ -546,7 +621,7 @@ bool Join() {
 	if (Area) return true;
 	if (!CommApi || PageHost::Acquire(Context, CommApi, &Host) != Comm::Result::Success) return false;
 	PageHost::AreaInfo          info { .structSize = sizeof(info) };
-	const PageHost::AreaRequest request { .structSize = sizeof(request), .flags = PageHost::AreaCharms, .name = "charms", .label = "Charms", .width = Columns, .height = Rows };
+	const PageHost::AreaRequest request { .structSize = sizeof(request), .flags = PageHost::AreaCharms, .name = "charms", .label = "Charms", .width = static_cast<std::uint32_t>(Columns), .height = static_cast<std::uint32_t>(Rows) };
 	if (const auto reserved = Host->reserveArea(Context, &request, &info); reserved != PageHost::Result::Success) {
 		Log(true, "the host refused a %dx%d area (result %u)", Columns, Rows, static_cast<unsigned>(reserved));
 		return false;
@@ -567,9 +642,10 @@ void __cdecl AfterAllLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::D
 	if (done) return;
 	done = true;
 	if (!Join()) Log(true, "Player Page Host not found: install aaa-player-page-host");
-	WrapCharmSlot();
 	PageHost::AreaInfo info { .structSize = sizeof(info) };
-	if (Area && Host->getAreaInfo(Area, &info) == PageHost::Result::Success)
+	const bool         gotInfo = Area && Host->getAreaInfo(Area, &info) == PageHost::Result::Success;
+	WrapCharmSlot();
+	if (gotInfo)
 		Log(false, "area at %d,%d of the page (-1: not placed yet), charms active %u", info.x, info.y, info.charmsActive);
 }
 
@@ -621,6 +697,33 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderGetPluginInfo() noexcept -> const D2RL::PluginI
 	return &Info;
 }
 
+// Reads "key = number" from the config text; false when absent or not a number.
+bool ReadInt(const char* config, const char* key, int& value) noexcept {
+	const std::size_t length = std::strlen(key);
+	for (const char* line = config; line && *line; line = std::strchr(line, '\n') ? std::strchr(line, '\n') + 1 : nullptr) {
+		while (*line == ' ' || *line == '\t') ++line;
+		if (std::strncmp(line, key, length) || (line[length] != ' ' && line[length] != '\t' && line[length] != '=')) continue;
+		const char* at = line + length;
+		while (*at == ' ' || *at == '\t') ++at;
+		if (*at++ != '=') continue;
+		char* end = nullptr;
+		const long number = std::strtol(at, &end, 10);
+		if (end == at) return false;
+		value = static_cast<int>(number);
+		return true;
+	}
+	return false;
+}
+
+void ReadSize(const char* config) noexcept {
+	int columns = Columns, rows = Rows;
+	(void)ReadInt(config, "columns", columns);
+	(void)ReadInt(config, "rows", rows);
+	const int fitColumns = std::clamp(columns, 1, MaxColumns), fitRows = std::clamp(rows, 1, MaxRows);
+	if (fitColumns != columns || fitRows != rows) Log(true, "size %dx%d doesn't fit the panel (columns 1-%d, rows 1-%d): using %dx%d", columns, rows, MaxColumns, MaxRows, fitColumns, fitRows);
+	Columns = fitColumns, Rows = fitRows;
+}
+
 D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) noexcept -> bool {
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
@@ -632,6 +735,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		return true;
 	}
 	Log(false, "%s %s loading", Info.name, PluginVersion);
+	ReadSize(config);
+	PlaceGrid();
 	if (context->QueryService(&CommApi) != D2RL::ServiceQueryResult::Success) CommApi = nullptr;
 	if (context->QueryService(&ResourceApi) != D2RL::ServiceQueryResult::Success) ResourceApi = nullptr;
 	if (context->QueryService(&PanelApi) != D2RL::ServiceQueryResult::Success) PanelApi = nullptr;
