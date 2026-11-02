@@ -9,6 +9,9 @@ trident, wizard-staff, broadsword, thrown-daggers, crystal-wand, rune-stone,
 gem-pendant, ring, cut-diamond, swap-bag, rank-1, rank-2, rank-3, histogram,
 crossed-swords, chest-armor, linked-rings, rune-sword, cog, holy-grail, woman-elf-face,
 ninja-head, barbarian, bear-head, dread-skull, black-knight-helm, witch-face,
-warlock-hood.
+warlock-hood, scroll-unfurled, eyeball, open-treasure-chest, checklist, target-arrows,
+flag-objective, trophy-cup, death-skull, horned-skull, dragon-head, crown, key,
+treasure-map, hourglass, castle, gold-stack, upgrade, spell-book, anvil,
+star-medal, swords-emblem.
 
 Recoloured and resized for the plugin (tools/gen_icons.py).

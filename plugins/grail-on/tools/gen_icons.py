@@ -25,7 +25,15 @@ ICONS = {
     "tier0": "rank-1", "tier1": "rank-2", "tier2": "rank-3",
     # menus
     "stats": "histogram", "grail": "holy-grail", "weapons": "crossed-swords", "armor": "chest-armor", "sets": "linked-rings", "runewords": "rune-sword", "config": "cog",
+    # settings pages
+    "setgen": "scroll-unfurled", "setdisp": "eyeball", "setloot": "open-treasure-chest", "setmisc": "checklist",
+    # the Objectives menu
+    "objectives": "target-arrows",
 }
+# The objectives' tile icons (two cells: 196 px, ObjIconMasks), in their order.
+OBJ_ICONS = ["flag-objective", "trophy-cup", "death-skull", "horned-skull", "dragon-head", "crown", "key", "treasure-map",
+             "hourglass", "castle", "gold-stack", "upgrade", "spell-book", "anvil", "star-medal", "swords-emblem"]
+OBJ_SIZE = 196
 SIZE = 98
 
 data = json.load(open(sys.argv[1]))
@@ -46,6 +54,19 @@ for key, icon in ICONS.items():
     names.append((key, ident))
 out.append("constexpr IconMask IconMasks[] {")
 out += [f'\t{{ "{k}", {i} }},' for k, i in names]
+out.append("};")
+out.append(f"constexpr int ObjIconSize = {OBJ_SIZE};")
+for k, icon in enumerate(OBJ_ICONS):
+    body = data["icons"][icon]["body"].replace("currentColor", "#fff")
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{OBJ_SIZE}" height="{OBJ_SIZE}">{body}</svg>'
+    png = cairosvg.svg2png(bytestring=svg.encode(), output_width=OBJ_SIZE, output_height=OBJ_SIZE)
+    alpha = Image.open(io.BytesIO(png)).convert("RGBA").getchannel("A").tobytes()
+    out.append(f"constexpr unsigned char ObjIcon_{k}[] {{")
+    for i in range(0, len(alpha), 32):
+        out.append("\t" + ",".join(str(b) for b in alpha[i:i + 32]) + ",")
+    out.append("};")
+out.append("constexpr const unsigned char* ObjIconMasks[] {")
+out += [f"\tObjIcon_{k}," for k in range(len(OBJ_ICONS))]
 out.append("};")
 open(sys.argv[2], "w").write("\n".join(out) + "\n")
 print(len(names), "icons")

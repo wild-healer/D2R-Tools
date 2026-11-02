@@ -1,3 +1,42 @@
+# Grail On! 1.1.0: patch notes
+
+```
+**Grail On! 1.1.0**
+
+**New**
+
+* The grail speaks every game language, using the game's own texts first so mods that add translations fit in.
+* language setting: the same as the game, or any of the game's languages.
+* button_x and button_y settings: move the grail button in the inventory, 1 step per click, 10 with Shift and 100 with Ctrl.
+* Misc tracking settings: each misc item type can be off, Checkbox (a click ticks its tiles) or Items (its items are stored), with a category each in a new Misc menu.
+* Misc has its own stats page and counts in the overview.
+* The misc tracking settings show some of each type's items on hover.
+* Misc types the grail already tracks (amulets, rings, charms, jewels) and items nobody collects (potions, quivers, keys, scrolls, tomes, quest items, body parts) are not offered.
+* Custom objectives: add your own in the settings, then tick them in a new Objectives menu; each has an icon picked from a list, can be switched off and moved up or down.
+* Objectives have their own stats page and count in the overview.
+* objectives setting: hides the Objectives menu and keeps the list; the menu only shows when there is an objective.
+* Two objectives are there to start with: Find the easter egg in Grail On! and Find a 3/20/20 small charm.
+* A search bar under the window finds items by name; items that do not match are dimmed, and Enter or the arrows on the line under it go to the next match.
+* search_screen_x, search_screen_y and search_length settings: place the search bar on the screen (compact mode does not move it) and change its length.
+* Middle click an item to show it in Grail On!, even with the grail closed; with the grail closed its tooltip says so.
+* middle_click setting: gives middle clicks back to the game.
+* Joined TCP/IP games: items go in and out of the grail through the hosting player's Player Page Host (1.0.2 or later); there is no comparison with stored items that are not on screen.
+* Runeword categories a mod adds to the game's tables get their own category.
+* The settings are split into General, Display, Loot, Misc tracking and Custom objectives pages, picked with icons in the category column.
+* Perfect frame, Menu direction, Layout and Scrolling choices replace the old check boxes.
+* The grail takes only 3x5 cells of the custom page; every tile shows its stored copy as a picture.
+
+**Fixed**
+
+* The game no longer crashes after scrolling the grail for a while.
+* Mod item names with colour codes no longer show stray characters.
+* Characters with non-Latin names (such as Chinese) now use their own grail, hardcore included.
+* Game texts with gendered or plural forms no longer show their [ms] and [fp] tags.
+* Misc categories are named after their items in every language, such as gems.
+* Gems, runes and other simple items stay in their tile instead of going back to the inventory.
+* A player who joined a TCP/IP game now sees their stored items in the grail.
+```
+
 # Grail On! 1.0.4: patch notes
 
 ```
