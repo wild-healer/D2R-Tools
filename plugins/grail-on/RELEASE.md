@@ -1,3 +1,19 @@
+# Grail On! 1.1.3: patch notes
+
+```
+**Grail On! 1.1.3**
+
+**New**
+
+* I Hate TOMLs lists Grail On! with an Open button that opens the grail on its settings.
+
+**Fixed**
+
+* The game no longer crashes when the grail's scroll bar is dragged quickly.
+* A ring or amulet just put in the grail shows its own picture at once instead of only after changing tabs.
+* Stored items that no grail tile holds any more (a mod removed their entry, or an older version named it otherwise) come back to the inventory, else the personal stash, when the character comes in.
+```
+
 # Grail On! 1.1.2: patch notes
 
 ```

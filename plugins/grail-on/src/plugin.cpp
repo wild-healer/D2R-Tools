@@ -69,6 +69,7 @@
 
 #include <D2RLPlugin/api.h>
 #include "page_host_api.h"
+#include "i_hate_tomls_client.h"
 #include <windows.h>
 #include <shlobj.h>
 #ifdef _WIN32
@@ -100,7 +101,7 @@
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.1.2";
+constexpr const char* PluginVersion = "1.1.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -4422,12 +4423,16 @@ std::string ViewKey() {
 	for (const auto& tile : Shown) key += Present.count(tile.unique) ? Perfect.count({ tile.unique, tile.eth }) ? '2' : '1' : '0';
 	key += ':';
 	// The cut slots and pictures, which hold no real item: drawn stored or not.
-	for (const auto& tile : Peeking) key += std::to_string(tile.unique) + (Stored.count({ tile.unique, tile.eth }) ? Perfect.count({ tile.unique, tile.eth }) ? 'S' : 's' : '0');
+	// A ring's or amulet's picture too: a dropped one is shown stored before its
+	// record exists (PredictDrop), with its base's picture until then.
+	for (const auto& tile : Peeking)
+		key += std::to_string(tile.unique) + (Stored.count({ tile.unique, tile.eth }) ? (Perfect.count({ tile.unique, tile.eth }) ? "S" : "s") + StoredArt(tile.unique, tile.eth, "") : "0");
 	key += ':';
 	for (const auto& [set, row] : ShownHeaders) key += SetKnown(set) ? '1' : '0';
 	key += ':';
 	for (const auto& row : PlacedRows)
-		for (const auto& tile : row.tiles) key += BaseTiles.count({ tile.unique, tile.eth }) ? 'b' : Stored.count({ tile.unique, tile.eth }) ? 's' : Present.count(tile.unique) ? 'p' : '0';
+		for (const auto& tile : row.tiles)
+			key += BaseTiles.count({ tile.unique, tile.eth }) ? std::string("b") : Stored.count({ tile.unique, tile.eth }) ? "s" + StoredArt(tile.unique, tile.eth, "") : Present.count(tile.unique) ? "p" : "0";
 	// The rings show the counts: every menu's, and the stats pages' or the menu's categories'.
 	const auto add = [&](const KindCount& count) { key += ":" + std::to_string(count.perfect) + "/" + std::to_string(count.stored) + "/" + std::to_string(count.bases) + "/" + std::to_string(count.missing); };
 	for (int m = 0; m < static_cast<int>(std::size(Menus)); ++m) add(CountMenu(m));
@@ -5216,6 +5221,7 @@ struct ViewPanel {
 	std::string                         key;    // what it shows, empty before the first use
 	unsigned long long                  used {}; // when it was last shown
 	ULONGLONG                           closedAt {}; // when it was last closed (GetTickCount64)
+	ULONGLONG                           preparedAt {}; // when its layout was last loaded (GetTickCount64)
 };
 ViewPanel                       Views[ViewCount];
 int                             ShownView = -1, PreparedView = -1;
@@ -5437,6 +5443,10 @@ void ShowView(const Drop& drop = {}) {
 					const auto& view = Views[i];
 					if (i == ShownView || i == PreparedView || view.panel == D2RL::Panels::InvalidHandle || LateClose.count(i) || IsOpen(view.panel)) continue;
 					if (!allowRecent && view.opened && now - view.closedAt < 1500) continue;
+					// Nor one whose layout was loaded just now and never shown (a view
+					// made while the scroll bar is dragged, overtaken by the next):
+					// unloading it again at once crashed the game's layout loader.
+					if (!allowRecent && view.preparedAt && now - view.preparedAt < 1500) continue;
 					if (index < 0 || view.used < Views[index].used) index = i;
 				}
 				if (index >= 0) break;
@@ -5448,7 +5458,8 @@ void ShowView(const Drop& drop = {}) {
 				return;
 			}
 			if (Views[index].opened) Say(false, "grailon: view panel %d recycled (unused for %llu views)", index, UseClock - Views[index].used);
-			layout           = ViewLayout(Views[index].id);
+			layout                  = ViewLayout(Views[index].id);
+			Views[index].preparedAt = now;
 			Views[index].key = key;
 		}
 	}
@@ -5788,6 +5799,7 @@ struct TakenOutRecord {
 std::map<std::uint32_t, TakenOutRecord> TakenOut;
 std::string                           StoreCharacter; // the open storage's character (UTF-8 name)
 bool                                  TakenOutChecked {}; // this character's leftovers from a crash were looked at
+bool                                  OrphansChecked {};  // stored items no tile claims were given back for this character
 bool StaleChecked {}; // the page this character came in with was checked against the records; guarded by Lock
 bool                                  StoreReady {}; // the native calls are there
 D2RL::PlayerHandle                    StoreOwner {}; // the character it was opened for
@@ -6083,6 +6095,7 @@ void OpenStoreFor(D2RL::PlayerHandle player) {
 	StoreOwner      = player;
 	StoreCharacter  = name;
 	TakenOutChecked = false;
+	OrphansChecked  = false;
 	if (folder.empty()) {
 		StorePath.clear();
 		Problem(true, "grailon: no Saved Games folder: the grail cannot store items");
@@ -6584,6 +6597,54 @@ void RestoreTakenOut(const D2RL::PluginContext* context, D2RL::PlayerHandle play
 	SaveStore();
 }
 
+// Game thread, once per character once the lists are built. A stored item
+// whose entry no tile claims any more (a mod removed it, or a newer version
+// named it otherwise and nothing leads its old name to a tile) would stay in
+// the file unseen: it comes back to the inventory, else the personal stash.
+// Misc items are left alone: their tiles follow the misc tracking settings.
+Items::Result Materialize(D2RL::PlayerHandle player, const Record& record, const Items::ItemDestination& destination, D2RL::ItemHandle* made);
+void TakeOut(std::uint32_t fingerprint);
+bool DestroyItem(D2RL::PlayerHandle player, D2RL::ItemHandle item);
+void GiveBackOrphans(D2RL::PlayerHandle player) {
+	std::vector<Record> orphans;
+	{
+		std::lock_guard guard(Lock);
+		if (OrphansChecked || !ListsReady || StorePath.empty() || StoreOwner != player || Uniques.empty()) return;
+		OrphansChecked = true;
+		for (const auto& [fingerprint, record] : Records) {
+			if (record.id.rfind("m:", 0) == 0 || record.id.rfind("o:", 0) == 0) continue;
+			const auto entry = EntryById.find(record.id);
+			if (entry == EntryById.end() || !HasTile(entry->second, record.eth)) orphans.push_back(record);
+		}
+	}
+	int back = 0, kept = 0;
+	for (const auto& record : orphans) {
+		auto status = Items::Result::InvalidArgument;
+		for (const auto where : { Items::ItemContainer::Inventory, Items::ItemContainer::PersonalStash }) {
+			if (status == Items::Result::Success) break;
+			D2RL::ItemHandle made {};
+			PluginMoving = true;
+			status       = Materialize(player, record, { .structSize = Items::ItemDestinationRequiredSize, .container = where, .placement = Items::Placement::Automatic }, &made);
+			PluginMoving = false;
+			Items::ItemInfo info { .structSize = Items::ItemInfoSize };
+			if (status == Items::Result::Success && made && (GetInfo(Context, made, &info) != Items::Result::Success || info.container != where)) {
+				(void)DestroyItem(player, made); // not where asked: the record keeps it
+				status = Items::Result::InvalidArgument;
+			}
+		}
+		std::lock_guard guard(Lock);
+		if (status == Items::Result::Success) TakeOut(record.fingerprint), ++back;
+		else ++kept;
+	}
+	if (back || kept) {
+		std::lock_guard guard(Lock);
+		RebuildStored();
+		SaveStore();
+	}
+	if (back) Say(true, "grailon: %d stored item(s) no grail tile holds any more are back in your inventory or personal stash", back);
+	if (kept) Say(true, "grailon: %d stored item(s) no grail tile holds found no room in the inventory or personal stash; they stay in the grail file and are tried again the next time this character comes in", kept);
+}
+
 std::atomic<bool> PageClearing {};
 std::atomic<D2RL::PlayerHandle> ClearedFor {};
 void __cdecl ClearPage(const D2RL::PluginContext* context, void*) noexcept {
@@ -6747,6 +6808,7 @@ void __cdecl Arrange(const D2RL::PluginContext* context, void* userData) noexcep
 	// First of all (before anything leaves the grail): what a crashed game took
 	// out comes back, so its copy on the page is the record's again.
 	RestoreTakenOut(context, job->player);
+	GiveBackOrphans(job->player);
 	// A Ctrl+clicked item whose twin is stored but not on the page (its tile is
 	// cut or elsewhere): the twin is made where the clicked item is, and leaves
 	// the grail, so the clicked one can take its tile.
@@ -9827,6 +9889,16 @@ void RunCommand(const std::string& command) {
 		CloseView();
 		return;
 	}
+	if (command == "settings") { // I Hate TOMLs' Open button: the grail on its settings
+		{
+			std::lock_guard guard(Lock);
+			BarMax          = 0;
+			CurrentCategory = SettingsView;
+			Scroll          = 0;
+		}
+		ShowView();
+		return;
+	}
 	if (command == "scrolltest") {
 		ToggleScrollTest();
 		return;
@@ -11284,6 +11356,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderGetPluginInfo() noexcept -> const D2RL::PluginI
 	return &Info;
 }
 
+// I Hate TOMLs lists Grail On! with an Open button that opens its settings.
+PluginMenu::Connection SettingsMenu;
+void __cdecl OpenFromSettingsMenu(void*) noexcept { Queue("settings"); }
+
 D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) noexcept -> bool {
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context     = context;
@@ -11327,6 +11403,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	}
 	auto command = D2RL::MakeConsoleCommand("grailon", OnCommand, "Grail On!: open or close the grail. grailon forget: found entries no longer stored go back to never found. grailon rolls: stored copies' rolls against the best.");
 	if (auto* api = context->GetApi(); !api->registerConsoleCommand || !api->registerConsoleCommand(context, &command)) Say(true, "grail-on: could not register the grailon command");
+	(void)SettingsMenu.StartInterface(context, OpenFromSettingsMenu, nullptr);
 	Running = true;
 	Ticker  = std::thread([] {
         for (unsigned tick = 0; Running; ++tick) {
@@ -11341,6 +11418,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	SettingsMenu.Stop();
 	ObjStopThread();
 	Running = false;
 	if (Ticker.joinable()) Ticker.join();

@@ -16,8 +16,7 @@ x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s \
   -o "$out/d2rl-grail-on.dll"
 cp "$out/d2rl-grail-on.dll" "$here/"
 # D2RLoader package: only the DLL (icon credits are embedded as a resource). No toml: the settings page writes its own file in Saved Games.
-version=$(sed -n 's/.*PluginVersion = "\(.*\)";/\1/p' "$here/src/plugin.cpp")
-zip=grail-on-$version.zip
+zip=grail-on.zip # no version in the name
 rm -f "$here"/grail-on*.zip
 rm -f "$here/ICONS-CREDITS.txt"
 (cd "$here" && zip -q -X "$zip" d2rl-grail-on.dll)

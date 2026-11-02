@@ -29,7 +29,7 @@ In a TCP/IP game you joined, only the hosting game can change items: Grail On! a
 
 ## Install
 
-Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/grail-on). Load `grail-on-<version>.zip` (the DLL alone) in D2RMM, or copy `d2rl-grail-on.dll` to `<game>/d2rloader/plugins/`. Remove the DLL to uninstall.
+Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/grail-on). Load `grail-on.zip` (the DLL alone) in D2RMM, or copy `d2rl-grail-on.dll` to `<game>/d2rloader/plugins/`. Remove the DLL to uninstall.
 
 ## Files
 
