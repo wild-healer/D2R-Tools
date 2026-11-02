@@ -217,9 +217,18 @@ std::string CodeText(std::uint32_t code) {
 	return text;
 }
 
+// Reads the game's own memory after checking it is committed and readable
+// (ReadProcessMemory made one antivirus heuristic call the DLL an injector).
 bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
-	SIZE_T copied = 0;
-	return address != 0 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), output, size, &copied) && copied == size;
+	if (address == 0) return false;
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+	if (address + size > end) return false;
+	std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	return true;
 }
 
 bool CodeMatches(std::uint64_t rva, const Code& bytes) noexcept {
