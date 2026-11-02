@@ -5,7 +5,7 @@
 
 **Fixed**
 
-* Browsers and antivirus scanners no longer flag the download: the stash art is built into the plugin's code instead of being unpacked with Windows' image tools.
+* Some browsers and antivirus scanners flagged the download as a virus: the stash art is now built into the plugin's code instead of being unpacked with Windows' image tools, and the plugin no longer reads memory the way they distrust.
 ```
 
 # Grail On! 1.1.3: patch notes
