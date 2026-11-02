@@ -1,0 +1,23 @@
+# Inventory Fill
+#
+# Shows your inventory as a small grid on the skill bar, over the demon that
+# holds the mana orb, while the inventory panel is closed: the items' own
+# pictures in their spots and the free cells, so you see at a glance how much
+# room is left. Every setting can also be changed in game with I Hate TOMLs.
+
+[inventory-fill]
+enabled = true
+
+# "sprites": the real item pictures, drawn small in their inventory spots.
+# "cells": taken cells filled, free cells empty, without pictures.
+display = "sprites"
+
+# Darkness of the box behind the grid: 25, 50 or 75 (percent).
+background = 50
+
+# Size of the grid: 1 = 22 skill bar units per cell.
+scale = 1.00
+
+# Center of the grid, in the skill bar's own units (2952 wide; the demon's
+# body is around 2710, 290).
+position = [2710, 290]
