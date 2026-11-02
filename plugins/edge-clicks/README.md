@@ -7,7 +7,8 @@ the game already handles are left alone.
 
 - Install: get Edge Clicks from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/edge-clicks) and load it with D2RMM, or copy `d2rl-edge-clicks.dll`
   to `<game>/d2rloader/plugins/`.
-- Config (`d2rloader/config/edge-clicks.toml`): `enabled`, `log_moves`.
+- Config (`d2rloader/config/edge-clicks.toml`, written on first launch): `enabled`,
+  `log_moves`. Both can be changed in game with I Hate TOMLs and apply at once.
 - Log: `d2rloader/logs/edge-clicks.log` lists each corrected click (at most one
   line every 250 ms).
 - Single player, or a TCP/IP game you host.

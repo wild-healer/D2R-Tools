@@ -30,6 +30,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cstdarg>
 #include <cstdint>
@@ -41,10 +42,12 @@
 #include <string_view>
 #include <vector>
 
+#include "i_hate_tomls_client.h"
+
 namespace {
 
 constexpr const char* PluginId      = "edge-clicks";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -57,9 +60,10 @@ const D2RL::PluginInfo Info {
 	.flags       = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
 };
 
+// Read by the hooks on the game's threads, changed live from I Hate TOMLs.
 struct Settings {
-	bool enabled  = true;
-	bool logMoves = true;
+	std::atomic<bool> enabled { true };
+	std::atomic<bool> logMoves { true };
 } Config;
 
 // ---- native layout (Steam 3.3.93787 / 94995) ----
@@ -122,9 +126,18 @@ void Log(bool warn, const char* format, ...) noexcept {
 	warn ? Context->LogWarn(line) : Context->LogInfo(line);
 }
 
+// Reads the game's own memory after checking it is committed and readable
+// (ReadProcessMemory made one antivirus heuristic call a DLL an injector).
 bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
-	SIZE_T copied = 0;
-	return address != 0 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), output, size, &copied) && copied == size;
+	if (address == 0) return false;
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+	if (address + size > end) return false;
+	std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	return true;
 }
 
 bool CodeMatches(std::uint64_t rva, const Code& bytes) noexcept {
@@ -430,7 +443,7 @@ bool HookScreenToWorld(int* x, int* y) noexcept {
 	}
 	bool mouse = false;
 	for (const std::uint64_t rva : MouseCallers) mouse = mouse || caller == Base + rva;
-	if (!mouse || !PlayerPosition(px, py)) return hit;
+	if (!mouse || !Config.enabled || !PlayerPosition(px, py)) return hit;
 	double gx[3], gy[3];
 	if (!Fit(gx, gy)) {
 		LogMove("click on the void at screen (%d, %d): not enough ground seen yet to place it (%d samples)", sx, sy, SampleTotal);
@@ -443,7 +456,7 @@ bool HookScreenToWorld(int* x, int* y) noexcept {
 }
 
 int HookFindPath(std::uint8_t* path, void* unit, int a3, int a4) noexcept {
-	return path && IsPlayerWalk(path, unit) ? FixPath(path, unit, a3, a4) : FindPath(path, unit, a3, a4);
+	return path && Config.enabled && IsPlayerWalk(path, unit) ? FixPath(path, unit, a3, a4) : FindPath(path, unit, a3, a4);
 }
 
 bool Locate() noexcept {
@@ -480,6 +493,61 @@ std::string Unquote(std::string value) {
 	return value;
 }
 
+// Applies one setting from its TOML text (strings unquoted); false + reason when refused.
+bool Apply(const std::string& key, const std::string& value, std::string& error) {
+	const auto flag = [&](std::atomic<bool>& target) {
+		if (value != "true" && value != "false") return error = "true or false", false;
+		target = value == "true";
+		return true;
+	};
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "log_moves") return flag(Config.logMoves);
+	return error = "unknown setting", false;
+}
+
+std::string ValueOf(const std::string& key) {
+	const auto flag = [](bool on) { return std::string(on ? "true" : "false"); };
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "log_moves") return flag(Config.logMoves);
+	return {};
+}
+
+std::string Render() {
+	return R"(# Edge Clicks
+#
+# Clicking on the black void past the edge of the map, or past a wall, normally
+# does nothing. With this plugin your character walks as far toward the click as
+# the ground allows, sliding along the wall or going around it.
+# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
+
+[edge-clicks]
+enabled = )" + ValueOf("enabled") + R"(
+
+# Write each corrected click to the plugin log (d2rloader/logs/edge-clicks.log).
+log_moves = )" + ValueOf("log_moves") + "\n";
+}
+
+void SaveConfig() {
+	const std::string toml = Render();
+	if (!Context->WriteConfig(toml.c_str())) Log(true, "config: could not write the config file");
+}
+
+void ApplyText(std::string_view text) {
+	std::size_t lineStart = 0;
+	while (lineStart < text.size()) {
+		auto lineEnd = text.find('\n', lineStart);
+		if (lineEnd == std::string_view::npos) lineEnd = text.size();
+		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
+		lineStart              = lineEnd + 1;
+		const auto equals      = line.find('=');
+		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
+		const std::string key   = Trim(std::string_view(line).substr(0, equals));
+		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
+		std::string       error;
+		if (!Apply(key, value, error)) Log(true, "config: %s = %s ignored (%s)", key.c_str(), value.c_str(), error.c_str());
+	}
+}
+
 void LoadConfig() {
 	(void)Context->EnsureConfig();
 	std::uint32_t     required = 0;
@@ -492,21 +560,43 @@ void LoadConfig() {
 		buffer.resize(required);
 		if (!Context->ReadConfig(buffer.data(), static_cast<std::uint32_t>(buffer.size()), &required)) return;
 	}
-	const std::string_view text(buffer.data(), std::strlen(buffer.data()));
-	std::size_t            lineStart = 0;
-	while (lineStart < text.size()) {
-		auto lineEnd = text.find('\n', lineStart);
-		if (lineEnd == std::string_view::npos) lineEnd = text.size();
-		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
-		lineStart              = lineEnd + 1;
-		const auto equals      = line.find('=');
-		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
-		const std::string key   = Trim(std::string_view(line).substr(0, equals));
-		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
-		if (key == "enabled") Config.enabled = value != "false";
-		else if (key == "log_moves") Config.logMoves = value != "false";
-		else Log(true, "config: unknown key %s", key.c_str());
+	ApplyText(std::string_view(buffer.data(), std::strlen(buffer.data())));
+}
+
+// ---- I Hate TOMLs ----
+
+constexpr const char* Schema = R"toml(title = "Edge Clicks"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Walk toward clicks on the void"
+note = "Also past walls: as far as the ground allows."
+[[setting]]
+key = "log_moves"
+type = "bool"
+label = "Log corrected clicks"
+note = "In d2rloader/logs/edge-clicks.log."
+)toml";
+
+PluginMenu::Connection Menu;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	std::string reason;
+	if (!Apply(key, Unquote(Trim(value)), reason)) {
+		std::snprintf(error, size, "%s", reason.c_str());
+		return false;
 	}
+	SaveConfig();
+	return true;
 }
 
 } // namespace
@@ -519,10 +609,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
 	LoadConfig();
-	if (!Config.enabled) {
-		Log(false, "Edge Clicks %s: disabled in config", PluginVersion);
-		return true;
-	}
+	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
+	// Hooked even when turned off: it can be turned on while playing.
 	Base = context->exeBase;
 	if (!Base || !Locate()) {
 		Log(true, "Edge Clicks %s: inactive, this game build isn't supported (Steam 3.3.93787 / 3.3.94995 are)", PluginVersion);
@@ -542,8 +630,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	} else {
 		Log(true, "game code differs at D2R+0x%llX: clicks on the black void stay ignored", static_cast<unsigned long long>(ScreenToWorldRva));
 	}
-	Log(false, "Edge Clicks %s: active, clicks past the map edge walk toward the click", PluginVersion);
+	Log(false, "Edge Clicks %s: %s, clicks past the map edge walk toward the click", PluginVersion, Config.enabled ? "active" : "loaded but turned off");
 	return true;
 }
 
-D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {}
+D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	Menu.Stop();
+}
