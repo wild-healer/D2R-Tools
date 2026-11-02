@@ -4,16 +4,28 @@ D2RLoader plugin: when you pick up, buy, gamble or get a quest reward and your
 inventory has no room for it, it goes into the Horadric Cube instead. The cube must be in your inventory (not the
 stash). If the cube is full too, your character says "no room" as usual.
 
-- Install: get Cube Overflow from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/cube-overflow) and add it through D2RMM like the other plugins.
-- Config (`d2rloader/config/cube-overflow.toml`): `enabled`, `cursor_pickups`
-  (also send to the cube a pickup the game would put on the cursor because the
-  inventory is full), `purchases_and_rewards` (store purchases, gambling and quest
-  rewards overflow too).
-- Log: `mods/D2RMM/d2rloader/logs/cube-overflow.log` lists every item sent to the cube.
-- Works in single player and in games you host (for every player there), not in
-  games you join: the pickup is decided by the host.
+- **I Hate TOMLs**: every setting can be changed in game and applies at once.
 
-How it works (Steam 3.3.93787 / 94995 RVAs):
+## Install
+
+Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/cube-overflow). Load `cube-overflow.zip` (the DLL alone; its default settings are built in) in D2RMM, or copy `d2rl-cube-overflow.dll` to `<game>/d2rloader/plugins/`. Remove the DLL to uninstall.
+
+Works in single player and in games you host: pickups and quest rewards for every player there, purchases and gambling for you only. It does nothing in games you join, where the host decides. The log, `d2rloader/logs/cube-overflow.log`, lists every item sent to the cube.
+
+## Settings
+
+`d2rloader/config/cube-overflow.toml`, written on first launch, or the plugin's page in I Hate TOMLs:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Turns the overflow on or off. |
+| `cursor_pickups` | `true` | Also sends to the cube a pickup the game would put on the cursor because the inventory is full. |
+| `purchases_and_rewards` | `true` | Store purchases, gambling and quest rewards overflow too. |
+
+## How it works
+
+Steam 3.3.93787 / 94995 RVAs:
+
 - Pickups: hooks the server pickup D2R+0x471950
   `(player, itemGuid, toInventory, maxDistance, checkCollision, toCube)`. With
   `toCube` the game itself puts the item on a free spot of page 3 (the cube); its own

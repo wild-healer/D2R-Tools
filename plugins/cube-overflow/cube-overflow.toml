@@ -2,9 +2,8 @@
 #
 # When something you get has no room in your inventory, it goes into the
 # Horadric Cube instead (the cube must be in your inventory). If the cube is
-# full too, the game does what it always does.
-# D2RLoader copies this file to d2rloader/config/cube-overflow.toml on first
-# launch; edit that copy. Changes apply the next time the game starts.
+# full too, the game does what it always does. Every setting can also be
+# changed in game with I Hate TOMLs, and applies at once.
 
 [cube-overflow]
 enabled = true
