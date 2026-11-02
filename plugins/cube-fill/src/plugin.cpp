@@ -18,9 +18,14 @@
 // you host): the byte offsets of invwidth/invheight in its compiled rows are
 // found once from items of known size. Otherwise the stock sizes built into
 // the plugin are used.
+// Settings come from the TOML at start and from I Hate TOMLs while playing
+// (applied at once, then the whole file is written back); the badge's look
+// (show, corner, font_size) is baked into the layouts and needs a restart.
 
 #include <D2RLPlugin/api.h>
 #include <windows.h>
+
+#include "i_hate_tomls_client.h"
 
 #include <array>
 #include <atomic>
@@ -37,7 +42,7 @@
 namespace {
 
 constexpr const char* PluginId      = "cube-fill";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -81,18 +86,26 @@ std::string SpotName(int spot) {
 }
 constexpr const char* StockPanels[] { "PlayerInventoryExpansionLayout", "PlayerInventoryOriginalLayout" };
 
+// Read while drawing and polling, so I Hate TOMLs' changes show at once
+// (showFree, fontSize and corner are baked into the layouts at start).
 struct Settings {
-	bool        enabled   = true;
-	bool        showFree  = false; // false: "used/12", true: free cells
-	bool        showEmpty = false;
-	bool        showFull  = true;
-	int         fontSize  = 30;
-	std::string corner    = "bottom-right";
-	bool        badge     = false; // "7/12" text
-	bool        grid      = false; // mini cube map with each item's shape
-	bool        sprites   = true;  // mini cube map drawn with the items' own pictures (game hook)
-	int         spriteBackground = 1; // FillRect mode of the map's dark back: 0 = 25 %, 1 = 50 %, 2 = 75 %
+	std::atomic<bool> enabled { true };
+	bool              showFree  = false; // false: "used/12", true: free cells
+	std::atomic<bool> showEmpty { false };
+	std::atomic<bool> showFull { true };
+	int               fontSize  = 30;
+	std::string       corner    = "bottom-right";
+	std::atomic<bool> badge { false };   // "7/12" text
+	std::atomic<bool> grid { false };    // mini cube map with each item's shape
+	std::atomic<bool> sprites { true };  // mini cube map drawn with the items' own pictures (game hook)
+	std::atomic<int>  spriteBackground { 1 }; // FillRect mode of the map's dark back: 0 = 25 %, 1 = 50 %, 2 = 75 %
 } Config;
+bool PicturesOk {}; // the grid draw hook is in place
+
+// The badge also stands in for the pictures when the game hook is missing.
+bool BadgeOn() noexcept {
+	return Config.badge || (Config.sprites && !PicturesOk);
+}
 
 // Mini cube map pieces, each one widget shown or hidden: cell tiles, the
 // joints between two cells of one item (across, down) and the middle of four.
@@ -271,15 +284,18 @@ std::string BuildLayout(int spot) {
 	const int         width = Config.fontSize * 3, height = Config.fontSize + 10;
 	int               x = 0, y = 0;
 	const std::string rect = Corner(spot, x, y, width, height);
-	std::string       children;
-	if (Config.grid) children += MapLayout(spot);
-	if (Config.badge) children += R"(, {"type": "RectangleWidget", "name": "Back", "fields": {"rect": )" + rect + R"(, "color": [0.0, 0.0, 0.0, 0.72]}})";
-	for (int used = 0; Config.badge && used <= CubeCells; ++used) {
+	std::string       badge = R"(, {"type": "RectangleWidget", "name": "Back", "fields": {"rect": )" + rect + R"(, "color": [0.0, 0.0, 0.0, 0.72]}})";
+	for (int used = 0; used <= CubeCells; ++used) {
 		const char* color = used == CubeCells ? R"({"r": 255, "g": 90, "b": 80, "a": 255})" : R"({"r": 240, "g": 240, "b": 240, "a": 255})";
-		children += R"(, {"type": "TextBoxWidget", "name": "N)" + std::to_string(used) + R"(", "fields": {"rect": )" + rect + R"(, "text": ")" + StateText(used) +
+		badge += R"(, {"type": "TextBoxWidget", "name": "N)" + std::to_string(used) + R"(", "fields": {"rect": )" + rect + R"(, "text": ")" + StateText(used) +
 		            R"(", "style": {"fontColor": )" + color + R"(, "pointSize": )" + std::to_string(Config.fontSize) + R"(, "alignment": {"h": "center", "v": "center"}}}})";
 	}
-	return R"({"type": "Widget", "name": ")" + SpotName(spot) + R"(", "fields": {"visible": false}, "children": [)" + children.substr(2) + "]}";
+	// Map and badge each in a group of their own, so either can be hidden whole
+	// when the display setting changes while playing.
+	const std::string map = MapLayout(spot);
+	return R"({"type": "Widget", "name": ")" + SpotName(spot) + R"(", "fields": {"visible": false}, "children": [)" +
+	       R"({"type": "Widget", "name": "Map", "children": [)" + map.substr(2) + "]}, " + R"({"type": "Widget", "name": "Badge", "children": [)" + badge.substr(2) +
+	       "]}]}";
 }
 
 // ---- showing ----
@@ -289,14 +305,17 @@ struct View {
 	int           spot = -1; // -1: nothing
 	int           used = 0;
 	std::uint64_t pieces {}; // mini map pieces shown, bit per piece
+	bool          badge {};
+	bool          grid {};
 
 	bool operator==(const View&) const = default;
 };
 
 std::array<Widgets::WidgetHandle, Spots>                    Groups {};
+std::array<Widgets::WidgetHandle, Spots>                    MapGroups {}, BadgeGroups {};
 std::array<std::array<Widgets::WidgetHandle, CubeCells + 1>, Spots> Texts {};
 std::array<std::array<Widgets::WidgetHandle, Pieces>, Spots>        MapPieces {};
-std::array<bool, Spots> SpotReady {};
+std::array<bool, Spots> SpotReady {}, BadgeReady {}, MapReady {};
 int                     HandleCount {};
 bool                    BudgetLogged {};
 View          Applied {};
@@ -341,21 +360,25 @@ bool FindGroups() {
 	return true;
 }
 
-// The texts and map pieces of one cube spot, looked up the first time the
-// cube sits there.
-bool FindSpot(int spot) {
-	if (SpotReady[spot]) return true;
-	const int needed = (Config.badge ? CubeCells + 1 : 0) + (Config.grid ? Pieces : 0);
+// The map and badge groups of one cube spot, then the texts and map pieces
+// of the parts shown, looked up the first time the cube sits there.
+bool FindSpot(int spot, bool badge, bool grid) {
+	const int needed = (SpotReady[spot] ? 0 : 2) + (badge && !BadgeReady[spot] ? CubeCells + 1 : 0) + (grid && !MapReady[spot] ? Pieces : 0);
+	if (!needed) return true;
 	if (HandleCount + needed > HandleBudget) {
 		if (!BudgetLogged) Log(true, "cube moved to too many spots this session: no more widget handles for spot %d,%d (restart the game)", spot % SpotsX, spot / SpotsX);
 		BudgetLogged = true;
 		return false;
 	}
-	for (int used = 0; Config.badge && used <= CubeCells; ++used)
-		if (!Find(Groups[spot], "N" + std::to_string(used), Texts[spot][used])) return false;
-	for (int piece = 0; Config.grid && piece < Pieces; ++piece)
-		if (!Find(Groups[spot], "T" + std::to_string(piece), MapPieces[spot][piece])) return false;
-	return SpotReady[spot] = true;
+	if (!Find(Groups[spot], "Map", MapGroups[spot]) || !Find(Groups[spot], "Badge", BadgeGroups[spot])) return false;
+	SpotReady[spot] = true;
+	for (int used = 0; badge && !BadgeReady[spot] && used <= CubeCells; ++used)
+		if (!Find(BadgeGroups[spot], "N" + std::to_string(used), Texts[spot][used])) return false;
+	BadgeReady[spot] = BadgeReady[spot] || badge;
+	for (int piece = 0; grid && !MapReady[spot] && piece < Pieces; ++piece)
+		if (!Find(MapGroups[spot], "T" + std::to_string(piece), MapPieces[spot][piece])) return false;
+	MapReady[spot] = MapReady[spot] || grid;
+	return true;
 }
 
 bool Visible(Widgets::WidgetHandle handle, bool visible) {
@@ -369,9 +392,11 @@ bool Apply(const View& view) {
 	bool ok = true;
 	for (int spot = 0; spot < Spots; ++spot) ok = Visible(Groups[spot], spot == view.spot) && ok;
 	if (view.spot >= 0) {
-		if (!FindSpot(view.spot)) return false;
-		for (int used = 0; Config.badge && used <= CubeCells; ++used) ok = Visible(Texts[view.spot][used], used == view.used) && ok;
-		for (int piece = 0; Config.grid && piece < Pieces; ++piece) ok = Visible(MapPieces[view.spot][piece], (view.pieces >> piece) & 1) && ok;
+		if (!FindSpot(view.spot, view.badge, view.grid)) return false;
+		ok = Visible(MapGroups[view.spot], view.grid) && ok;
+		ok = Visible(BadgeGroups[view.spot], view.badge) && ok;
+		for (int used = 0; view.badge && used <= CubeCells; ++used) ok = Visible(Texts[view.spot][used], used == view.used) && ok;
+		for (int piece = 0; view.grid && piece < Pieces; ++piece) ok = Visible(MapPieces[view.spot][piece], (view.pieces >> piece) & 1) && ok;
 	}
 	return ok;
 }
@@ -396,6 +421,8 @@ D2RL::Inventory::IterationAction __cdecl Collect(const D2RL::PluginContext*, con
 }
 
 View ReadCube() {
+	const bool badge = BadgeOn(), grid = Config.grid;
+	if (!Config.enabled || (!badge && !grid)) return {};
 	D2RL::PlayerHandle player {};
 	if (Inventory->getLocalPlayer(Context, &player) != D2RL::Inventory::Result::Success) return {};
 	Scan                              scan;
@@ -426,7 +453,7 @@ View ReadCube() {
 			LookupQueued.store(false);
 		}
 	}
-	View view { .spot = scan.cube.y * SpotsX + scan.cube.x };
+	View view { .spot = scan.cube.y * SpotsX + scan.cube.x, .badge = badge, .grid = grid };
 	const auto at   = [&](int x, int y) { return owner[y * CubeWidth + x]; };
 	int        bit  = 0;
 	const auto mark = [&](bool on) { view.pieces |= static_cast<std::uint64_t>(on) << bit++; };
@@ -585,6 +612,7 @@ std::uint32_t CodeOf(void* item) noexcept {
 }
 
 void DrawCubePictures(void* grid) noexcept {
+	if (!Config.enabled || !Config.sprites) return;
 	if (*(static_cast<std::uint8_t*>(grid) + 0x630) != 0) return; // not the inventory page
 	void* owner = At<GridOwnerFn>(0x2A7810)(grid);
 	void* local = At<PlayerUnitFn>(0x09A480)(At<LocalIndexFn>(0x08B2D0)());
@@ -676,6 +704,120 @@ std::string Unquote(std::string value) {
 	return value;
 }
 
+constexpr int BackgroundPercent[3] { 25, 50, 75 };
+
+std::string DisplayName() {
+	if (Config.sprites) return Config.badge ? "sprites-badge" : "sprites";
+	if (Config.grid) return Config.badge ? "both" : "grid";
+	return "badge";
+}
+
+// Applies one setting from its TOML text (strings unquoted); false + reason when refused.
+bool Apply(const std::string& key, const std::string& value, std::string& error) {
+	const auto flag = [&](std::atomic<bool>& target) {
+		if (value != "true" && value != "false") return error = "true or false", false;
+		target = value == "true";
+		return true;
+	};
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "show_empty") return flag(Config.showEmpty);
+	if (key == "show_full") return flag(Config.showFull);
+	if (key == "show") {
+		if (value != "used" && value != "free") return error = "\"used\" or \"free\"", false;
+		Config.showFree = value == "free";
+	} else if (key == "font_size") {
+		const int size = std::atoi(value.c_str());
+		if (size < 12 || size > 60) return error = "12 to 60", false;
+		Config.fontSize = size;
+	} else if (key == "corner") {
+		if (value != "bottom-right" && value != "bottom-left" && value != "top-right" && value != "top-left") return error = "bottom-right, bottom-left, top-right or top-left", false;
+		Config.corner = value;
+	} else if (key == "picture_background") {
+		const int percent        = std::atoi(value.c_str());
+		Config.spriteBackground = percent <= 25 ? 0 : percent >= 75 ? 2 : 1;
+	} else if (key == "display") {
+		if (value != "badge" && value != "grid" && value != "both" && value != "sprites" && value != "sprites-badge")
+			return error = "badge, grid, both, sprites or sprites-badge", false;
+		Config.badge   = value == "badge" || value == "both" || value == "sprites-badge";
+		Config.grid    = value == "grid" || value == "both";
+		Config.sprites = value == "sprites" || value == "sprites-badge";
+	} else return error = "unknown setting", false;
+	return true;
+}
+
+std::string ValueOf(const std::string& key) {
+	const auto flag = [](bool on) { return std::string(on ? "true" : "false"); };
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "show_empty") return flag(Config.showEmpty);
+	if (key == "show_full") return flag(Config.showFull);
+	if (key == "show") return Config.showFree ? "\"free\"" : "\"used\"";
+	if (key == "font_size") return std::to_string(Config.fontSize);
+	if (key == "corner") return "\"" + Config.corner + "\"";
+	if (key == "picture_background") return std::to_string(BackgroundPercent[Config.spriteBackground]);
+	if (key == "display") return "\"" + DisplayName() + "\"";
+	return {};
+}
+
+std::string Render() {
+	return R"(# Cube Fill
+#
+# Shows what is in the Horadric Cube right on the cube in your inventory: the
+# items' own pictures in their cube spots, a mini map, or a "7/12" badge.
+# Every setting can also be changed in game with I Hate TOMLs.
+
+[cube-fill]
+enabled = )" + ValueOf("enabled") + R"(
+
+# "sprites": the real item pictures, drawn small over the cube icon in their
+# cube spots (hooks the game's inventory drawing, Steam 3.3.93787 or 3.3.94995;
+# on another build the badge shows instead).
+# "sprites-badge": the pictures plus the badge.
+# "badge": the "7/12" text. "grid": a mini 3x4 map of the cube over its icon,
+# taken cells filled and each item's cells joined, so you see the layout.
+# "both": the map with the badge in its corner.
+display = )" + ValueOf("display") + R"(
+
+# Darkness of the box behind the pictures: 25, 50 or 75 (percent).
+picture_background = )" + ValueOf("picture_background") + R"(
+
+# Show the cube's contents when it is empty ("0/12").
+show_empty = )" + ValueOf("show_empty") + R"(
+
+# Show the cube's contents when it is full (the badge in red).
+show_full = )" + ValueOf("show_full") + R"(
+
+# The next three apply after a restart.
+# Badge text. "used": cells used out of 12, like "7/12". "free": free cells left, like "5".
+show = )" + ValueOf("show") + R"(
+
+# Corner of the cube icon: "bottom-right", "bottom-left", "top-right" or "top-left".
+corner = )" + ValueOf("corner") + R"(
+
+# Badge text size, 12 to 60.
+font_size = )" + ValueOf("font_size") + "\n";
+}
+
+void SaveConfig() {
+	const std::string toml = Render();
+	if (!Context->WriteConfig(toml.c_str())) Log(true, "config: could not write the config file");
+}
+
+void ApplyText(std::string_view text) {
+	std::size_t lineStart = 0;
+	while (lineStart < text.size()) {
+		auto lineEnd = text.find('\n', lineStart);
+		if (lineEnd == std::string_view::npos) lineEnd = text.size();
+		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
+		lineStart              = lineEnd + 1;
+		const auto equals      = line.find('=');
+		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
+		const std::string key   = Trim(std::string_view(line).substr(0, equals));
+		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
+		std::string       error;
+		if (!Apply(key, value, error)) Log(true, "config: %s = %s ignored (%s)", key.c_str(), value.c_str(), error.c_str());
+	}
+}
+
 void LoadConfig() {
 	(void)Context->EnsureConfig();
 	std::uint32_t     required = 0;
@@ -688,43 +830,82 @@ void LoadConfig() {
 		buffer.resize(required);
 		if (!Context->ReadConfig(buffer.data(), static_cast<std::uint32_t>(buffer.size()), &required)) return;
 	}
-	const std::string_view text(buffer.data(), std::strlen(buffer.data()));
-	std::size_t            lineStart = 0;
-	while (lineStart < text.size()) {
-		auto lineEnd = text.find('\n', lineStart);
-		if (lineEnd == std::string_view::npos) lineEnd = text.size();
-		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
-		lineStart              = lineEnd + 1;
-		const auto equals      = line.find('=');
-		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
-		const std::string key   = Trim(std::string_view(line).substr(0, equals));
-		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
-		if (key == "enabled") Config.enabled = value != "false";
-		else if (key == "show") {
-			if (value == "used" || value == "free") Config.showFree = value == "free";
-			else Log(true, "config: unknown show \"%s\", using used", value.c_str());
-		} else if (key == "show_empty") Config.showEmpty = value == "true";
-		else if (key == "show_full") Config.showFull = value != "false";
-		else if (key == "font_size") {
-			const int size = std::atoi(value.c_str());
-			if (size >= 12 && size <= 60) Config.fontSize = size;
-			else Log(true, "config: font_size %s out of range (12 to 60), using %d", value.c_str(), Config.fontSize);
-		} else if (key == "corner") {
-			if (value == "bottom-right" || value == "bottom-left" || value == "top-right" || value == "top-left") Config.corner = value;
-			else Log(true, "config: unknown corner \"%s\", using %s", value.c_str(), Config.corner.c_str());
-		} else if (key == "picture_background") {
-			if (value == "25") Config.spriteBackground = 0;
-			else if (value == "50") Config.spriteBackground = 1;
-			else if (value == "75") Config.spriteBackground = 2;
-			else Log(true, "config: picture_background must be 25, 50 or 75, using 50");
-		} else if (key == "display") {
-			if (value == "badge" || value == "grid" || value == "both" || value == "sprites" || value == "sprites-badge") {
-				Config.badge   = value == "badge" || value == "both" || value == "sprites-badge";
-				Config.grid    = value == "grid" || value == "both";
-				Config.sprites = value == "sprites" || value == "sprites-badge";
-			} else Log(true, "config: unknown display \"%s\", using sprites", value.c_str());
-		} else Log(true, "config: unknown key %s", key.c_str());
+	ApplyText(std::string_view(buffer.data(), std::strlen(buffer.data())));
+}
+
+// ---- I Hate TOMLs ----
+
+constexpr const char* Schema = R"toml(title = "Cube Fill"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Show the cube's contents"
+note = "On the cube in your inventory."
+[[setting]]
+key = "display"
+type = "enum"
+label = "Display"
+values = ["sprites", "sprites-badge", "badge", "grid", "both"]
+labels = ["Item pictures", "Pictures and badge", "Badge", "Mini map", "Map and badge"]
+[[setting]]
+key = "picture_background"
+type = "enum"
+label = "Picture background"
+values = [25, 50, 75]
+labels = ["25 %", "50 %", "75 %"]
+[[setting]]
+key = "show_empty"
+type = "bool"
+label = "Show on an empty cube"
+[[setting]]
+key = "show_full"
+type = "bool"
+label = "Show on a full cube"
+[[setting]]
+key = "show"
+type = "enum"
+label = "Badge text"
+values = ["used", "free"]
+labels = ["Used cells (7/12)", "Free cells (5)"]
+restart = true
+[[setting]]
+key = "corner"
+type = "enum"
+label = "Badge corner"
+values = ["bottom-right", "bottom-left", "top-right", "top-left"]
+labels = ["Bottom right", "Bottom left", "Top right", "Top left"]
+restart = true
+[[setting]]
+key = "font_size"
+type = "int"
+label = "Badge text size"
+min = 12
+max = 60
+step = 1
+shift_step = 5
+ctrl_step = 10
+restart = true
+)toml";
+
+PluginMenu::Connection Menu;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	std::string reason;
+	if (!Apply(key, Unquote(Trim(value)), reason)) {
+		std::snprintf(error, size, "%s", reason.c_str());
+		return false;
 	}
+	SaveConfig();
+	return true;
 }
 
 template <typename Service>
@@ -747,23 +928,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
 	LoadConfig();
-	if (!Config.enabled) {
-		Log(false, "Cube Fill %s: disabled in config", PluginVersion);
-		return true;
-	}
+	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
 	Base = context->exeBase;
-	if (Config.sprites) {
-		if (HookGridDraw()) Log(false, "item pictures: drawn over the cube in the inventory");
-		else {
-			Log(true, "item pictures unavailable, showing the badge instead");
-			Config.sprites = false;
-			Config.badge   = true;
-		}
-		if (!Config.badge) {
-			Log(false, "Cube Fill %s: active, item pictures only", PluginVersion);
-			return true;
-		}
-	}
+	// Hooked whatever the display: it can be switched to pictures while playing.
+	PicturesOk = Base && HookGridDraw();
+	if (PicturesOk) Log(false, "item pictures: ready to draw over the cube in the inventory");
+	else Log(true, "item pictures unavailable: the badge shows in their place");
 	for (const auto& entry : StockSizes) StockByCode[Code(entry.code)] = { static_cast<std::uint8_t>(entry.w), static_cast<std::uint8_t>(entry.h) };
 
 	const auto* resources = Query<D2RL::ResourceService>("resource");
@@ -777,7 +947,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!resources || !D2RL::HasResourceServiceField(resources, D2RL::ResourceServiceRequiredSize) || !D2RL::HasPanelServiceField(panels, D2RL::PanelServiceRegisterChildLayoutFieldEnd) ||
 	    !events || !D2RL::HasInventoryServiceField(Inventory, D2RL::InventoryServiceRequiredSize) || !D2RL::HasThreadServiceField(Threads, D2RL::ThreadServiceRequiredSize) ||
 	    !D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceRequiredSize)) {
-		Log(true, "Cube Fill %s: inactive, this D2RLoader lacks a needed service", PluginVersion);
+		Log(true, "Cube Fill %s: badge and map off, this D2RLoader lacks a needed service", PluginVersion);
 		return true;
 	}
 
@@ -800,11 +970,11 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		};
 		D2RL::Panels::ChildLayoutHandle childHandle {};
 		if (resources->registerResource(context, &resource, &resourceHandle) != D2RL::Resources::Result::Success) {
-			Log(true, "Cube Fill %s: inactive, could not register the layout of cube spot %d", PluginVersion, spot);
+			Log(true, "Cube Fill %s: badge and map off, could not register the layout of cube spot %d", PluginVersion, spot);
 			return true;
 		}
 		if (const auto result = panels->registerChildLayout(context, &child, &childHandle); result != D2RL::Panels::Result::Success) {
-			Log(true, "Cube Fill %s: inactive, the inventory panel refused cube spot %d (result %u)", PluginVersion, spot, static_cast<unsigned>(result));
+			Log(true, "Cube Fill %s: badge and map off, the inventory panel refused cube spot %d (result %u)", PluginVersion, spot, static_cast<unsigned>(result));
 			return true;
 		}
 	}
@@ -819,12 +989,13 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 
 	Running.store(true);
 	Poller = CreateThread(nullptr, 0, Poll, nullptr, 0, nullptr);
-	Log(false, "Cube Fill %s: active, %s%s%s (%zu layout bytes in 27 files)", PluginVersion, Config.badge ? (Config.showFree ? "free cells badge" : "used cells badge") : "",
-	    Config.badge && (Config.grid || Config.sprites) ? " + " : "", Config.grid ? "mini cube map" : Config.sprites ? "item pictures" : "", layoutBytes);
+	Log(false, "Cube Fill %s: active%s, display %s, %s badge (%zu layout bytes in 27 files)", PluginVersion, Config.enabled ? "" : " (hidden: enabled = false)",
+	    DisplayName().c_str(), Config.showFree ? "free cells" : "used cells", layoutBytes);
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	Menu.Stop();
 	Running.store(false);
 	if (Poller) {
 		WaitForSingleObject(Poller, 1000);

@@ -15,9 +15,7 @@ x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s \
   -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion \
   -o "$out/d2rl-cube-fill.dll"
 cp "$out/d2rl-cube-fill.dll" "$here/"
-# D2RMM package: the DLL and its config at the zip root.
-version=$(sed -n 's/.*PluginVersion = "\(.*\)";/\1/p' "$here/src/plugin.cpp")
-zip=cube-fill-$version.zip
+# Package: the DLL alone (its config is built in; D2RLoader writes it on first launch).
 rm -f "$here"/cube-fill*.zip
-(cd "$here" && zip -q -X "$zip" d2rl-cube-fill.dll cube-fill.toml)
-echo "built $here/d2rl-cube-fill.dll and $here/$zip"
+(cd "$here" && zip -q -X cube-fill.zip d2rl-cube-fill.dll)
+echo "built $here/d2rl-cube-fill.dll and $here/cube-fill.zip"
