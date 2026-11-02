@@ -25,8 +25,8 @@
 // Hooks:
 //   - Pickup: before an inventory pickup, ask AutoDestination where it would
 //     go; when nowhere and the cube has a spot, pick it up with toCube (no
-//     failed first try, so no bounce). Cursor pickups (cursor_pickups) the
-//     same when the inventory has no spot.
+//     failed first try, so no bounce). Cursor pickups the same when the
+//     inventory has no spot.
 //   - AutoDestination (purchases_and_rewards): when it finds nothing, a cube
 //     spot.
 //   - FindSpot + Dest at the client purchase sites (purchases_and_rewards):
@@ -77,7 +77,6 @@ const D2RL::PluginInfo Info {
 // Read by the hooks on the game's threads, changed live by I Hate TOMLs.
 struct Settings {
 	std::atomic<bool> enabled             = true;
-	std::atomic<bool> cursorPickups       = true;
 	std::atomic<bool> purchasesAndRewards = true;
 } Config;
 
@@ -259,7 +258,7 @@ bool CubeCanTake(void* player, void* item) noexcept {
 }
 
 bool HookPickup(void* player, std::uint32_t guid, bool toInventory, std::uint32_t maxDistance, bool checkCollision, bool toCube) noexcept {
-	if (!Config.enabled || toCube || (!toInventory && !Config.cursorPickups)) return Pickup(player, guid, toInventory, maxDistance, checkCollision, toCube);
+	if (!Config.enabled || toCube) return Pickup(player, guid, toInventory, maxDistance, checkCollision, toCube);
 	void* const item = player ? FindItem(player, guid) : nullptr;
 	if (!item || ItemMode(item) != ItemModeGround || !CubeCanTake(player, item)) return Pickup(player, guid, toInventory, maxDistance, checkCollision, toCube);
 	if (toInventory) {
@@ -468,7 +467,7 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 	bool on = false;
 	if (!ParseBool(value, on)) return error = "true or false", false;
 	if (key == "enabled") Config.enabled = on;
-	else if (key == "cursor_pickups") Config.cursorPickups = on;
+	else if (key == "cursor_pickups") return true; // setting removed in 1.1.1: cursor pickups always overflow
 	else if (key == "purchases_and_rewards") Config.purchasesAndRewards = on;
 	else return error = "unknown setting", false;
 	return true;
@@ -476,7 +475,6 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 
 std::string ValueOf(const std::string& key) {
 	if (key == "enabled") return Config.enabled ? "true" : "false";
-	if (key == "cursor_pickups") return Config.cursorPickups ? "true" : "false";
 	if (key == "purchases_and_rewards") return Config.purchasesAndRewards ? "true" : "false";
 	return {};
 }
@@ -491,10 +489,6 @@ std::string Render() {
 
 [cube-overflow]
 enabled = )" + ValueOf("enabled") + R"(
-
-# Also catch pickups the game would put on the mouse cursor because the
-# inventory is full.
-cursor_pickups = )" + ValueOf("cursor_pickups") + R"(
 
 # Store purchases, gambling and quest rewards also go to the cube when the
 # inventory is full.
@@ -541,11 +535,6 @@ key = "enabled"
 type = "bool"
 label = "Overflow into the cube"
 note = "Items with no room in the inventory go into the Horadric Cube (it must be in the inventory)."
-[[setting]]
-key = "cursor_pickups"
-type = "bool"
-label = "Cursor pickups too"
-note = "Pickups the game would put on the cursor because the inventory is full."
 [[setting]]
 key = "purchases_and_rewards"
 type = "bool"
@@ -599,8 +588,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	PurchaseHooks = Hook(AutoDestRva, AutoDestBytes, &HookAutoDest, AutoDest) && Hook(FindSpotRva, FindSpotBytes, &HookFindSpot, FindSpot) &&
 	                Hook(DestRva, DestBytes, &HookDest, Dest) && Hook(QuestItemRva, QuestItemBytes, &HookQuestItem, QuestItem);
 	if (!PurchaseHooks) Log(true, "Cube Overflow %s: purchases and rewards won't use the cube, a hook could not be installed", PluginVersion);
-	Log(false, "Cube Overflow %s: active%s, pickups%s%s with a full inventory go to the cube", PluginVersion, Config.enabled ? "" : " (off: enabled = false)",
-	    Config.cursorPickups ? " (cursor pickups too)" : "", PurchasesOn() ? ", purchases, gambling and quest rewards" : "");
+	Log(false, "Cube Overflow %s: active%s, pickups%s with a full inventory go to the cube", PluginVersion, Config.enabled ? "" : " (off: enabled = false)",
+	    PurchasesOn() ? ", purchases, gambling and quest rewards" : "");
 	return true;
 }
 

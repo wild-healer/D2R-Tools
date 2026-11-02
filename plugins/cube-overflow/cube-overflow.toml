@@ -8,10 +8,6 @@
 [cube-overflow]
 enabled = true
 
-# Also catch pickups the game would put on the mouse cursor because the
-# inventory is full.
-cursor_pickups = true
-
 # Store purchases, gambling and quest rewards also go to the cube when the
 # inventory is full.
 purchases_and_rewards = true

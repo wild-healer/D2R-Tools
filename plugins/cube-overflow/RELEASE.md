@@ -9,6 +9,10 @@
 
 * I Hate TOMLs support: every setting can be changed in game and applies at once, without a restart.
 * The zip holds the DLL alone, named cube-overflow.zip. Its default settings are built in.
+
+**Removed**
+
+* cursor_pickups setting: pickups the game would put on the cursor with a full inventory always go into the Cube now.
 ```
 
 ## GitHub release
@@ -26,10 +30,13 @@ Body:
 - I Hate TOMLs support: every setting can be changed in game and applies at once, without a restart.
 - The zip holds the DLL alone, named `cube-overflow.zip`. Its default settings are built in.
 
+### Removed
+- `cursor_pickups` setting: pickups the game would put on the cursor with a full inventory always go into the Cube now.
+
 ### Features
 - Pick up an item that has no room in your inventory and it goes into the Horadric Cube instead, at a free spot the game picks itself.
 - Purchases, gambling and quest rewards with a full inventory go into the Cube too (`purchases_and_rewards`).
-- Cursor pickups too (`cursor_pickups`): items the game would put on your cursor because the inventory is full.
+- Items the game would put on your cursor because the inventory is full go into the Cube too.
 - Nothing changes when there's room: stacking, potions to the belt and gold work as usual and come first.
 
 ### Requirements
