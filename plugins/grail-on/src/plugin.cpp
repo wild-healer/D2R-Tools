@@ -100,7 +100,7 @@
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.1.0";
+constexpr const char* PluginVersion = "1.1.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -3457,6 +3457,7 @@ std::string RunewordArt(const Tile& tile, const std::string& n, int left, int to
 // by MenuRoom like every rect, so that is taken off here. A stored item is
 // parked off the page: its art stands in for it, on its quality background.
 bool Dimmed(int u, bool eth);
+std::string StoredArt(int u, bool eth, const std::string& art);
 // A tile the search leaves out: a dark veil over its slot and art.
 std::string DimVeil(const Tile& tile, const std::string& name, int left, int top) {
 	return Image(name, left, top, "d2rloader\\grail-on\\dim" + std::to_string(std::clamp(tile.width, 1, 4)) + "x" + std::to_string(std::clamp(tile.height, 1, 4)));
@@ -3476,7 +3477,10 @@ std::string FakeTile(const Tile& tile, int top, const std::string& n, bool label
 		out += RunewordArt(tile, "FArt" + n, left, top, stored, stored ? "" : GrayFields());
 	} else if (stored && !entry.misc && QualityBackgrounds())
 		out += Image("FBack" + n, itemLeft, top, std::string("d2rloader\\item-quality-backgrounds\\") + (entry.set ? "set\\" : "unique\\") + size, ", \"transparency\": 0.65");
-	if (const auto& art = drawn ? entry.art : entry.ghost; !entry.runeword && !art.empty()) out += Image("FArt" + n, itemLeft, top, art, stored ? ColorFields(entry, art) + (tile.eth ? EthLook : "") : GrayFields());
+	if (const auto& shown = drawn ? entry.art : entry.ghost; !entry.runeword && !shown.empty()) {
+		const std::string art = stored ? StoredArt(tile.unique, tile.eth, shown) : shown; // a ring's or amulet's own picture
+		out += Image("FArt" + n, itemLeft, top, art, stored ? ColorFields(entry, art) + (tile.eth ? EthLook : "") : GrayFields());
+	}
 	const bool dim = Dimmed(tile.unique, tile.eth);
 	if (dim) out += DimVeil(tile, "FDim" + n, itemLeft, top);
 	if (label) {
@@ -6072,6 +6076,38 @@ std::uint32_t FingerprintInBytes(const std::vector<std::uint8_t>& bytes, std::ui
 		return get(at - 32, 32);
 	}
 	return 0;
+}
+
+// The picture a ring or amulet was given (the game picks one of its base's
+// for each item): saved right after the item level and quality, a bit "has
+// one" then 3 bits. -1 when none.
+int PictureInBytes(const std::vector<std::uint8_t>& bytes, std::uint32_t itemLevel, std::uint32_t quality) {
+	const auto bit = [&](std::size_t i) { return (bytes[i >> 3] >> (i & 7)) & 1u; };
+	const auto get = [&](std::size_t at, int n) {
+		std::uint32_t v = 0;
+		for (int k = 0; k < n; ++k) v |= bit(at + k) << k;
+		return v;
+	};
+	const std::size_t total = bytes.size() * 8;
+	for (std::size_t at = 64 + 32; at + 15 <= total && at < 64 + 32 + 160; ++at) {
+		if (get(at, 7) != (itemLevel & 0x7F) || get(at + 7, 4) != (quality & 0xF)) continue;
+		return get(at + 11, 1) ? static_cast<int>(get(at + 12, 3)) : -1;
+	}
+	return -1;
+}
+
+Record* RecordAt(int u, bool eth);
+// Lock held. A stored ring's or amulet's tile: the picture its item has
+// (ring1..5, amulet1..3 next to the base's own), not the base's.
+std::string StoredArt(int u, bool eth, const std::string& art) {
+	const auto& entry = Uniques[u];
+	if (entry.code != "rin" && entry.code != "amu") return art;
+	const Record* record = RecordAt(u, eth);
+	if (!record) return art;
+	const int picture = PictureInBytes(record->bytes, record->itemLevel, record->quality);
+	const int count   = entry.code == "rin" ? 5 : 3;
+	if (picture < 0 || picture >= count || entry.ghost.empty()) return art;
+	return entry.ghost + std::to_string(picture + 1);
 }
 
 // A simple item's stand-in fingerprint, from its base's code.
@@ -11092,15 +11128,6 @@ void Register() {
 		}
 		Say(false, "grail-on: the middle click's tooltip line: action footer refused (%u), %s (%u)", static_cast<unsigned>(first),
 		    got == Events::Result::Success ? (tried.region == Events::ItemTooltipRegion::Description ? "under the description" : "in the footer") : "none", static_cast<unsigned>(got));
-	}
-	// Compared with the grail copy (no footer then): under the description.
-	if (got == Events::Result::Success && tried.region != Events::ItemTooltipRegion::Description) {
-		Events::ItemTooltipListener under = footer;
-		under.region   = Events::ItemTooltipRegion::Description;
-		under.fallback = Events::ItemTooltipFallback::Omit;
-		under.userData = reinterpret_cast<void*>(1);
-		Events::ListenerHandle underHandle = Events::InvalidHandle;
-		if (EventApi->registerItemTooltipListener(Context, &under, &underHandle) != Events::Result::Success) Say(false, "grail-on: the middle click's line under the description was refused");
 	}
 	if (ClickApi) {
 		namespace Clicks = D2RL::ItemInteractions;

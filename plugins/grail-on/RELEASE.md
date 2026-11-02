@@ -1,3 +1,13 @@
+# Grail On! 1.1.1: patch notes
+
+```
+**Grail On! 1.1.1**
+
+**Fixed**
+
+* Stored rings and amulets show their own picture in their tile again instead of the base's generic one.
+```
+
 # Grail On! 1.1.0: patch notes
 
 ```
