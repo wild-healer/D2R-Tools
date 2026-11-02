@@ -26,7 +26,9 @@
 //   - Charms: see "charms by area" (only areas with AreaCharms count).
 //   - Ctrl+click into the page: placed by the host in the area shown (see
 //     "Ctrl+click into the page").
-//   - Area places are saved in aaa-player-page-host-areas.txt beside the config.
+//   - Area places are saved in aaa-player-page-host-areas.txt, in
+//     Saved Games\Diablo II Resurrected\Player Page Host\<mod> (a mod manager
+//     rebuilds the mod's d2rloader folder, where they were up to 1.0.1).
 //   - Where items lie on the page is recorded per character (the host can't
 //     look into a character that isn't loaded) in aaa-player-page-host-items.txt:
 //     each item keeps the area it was put in. A new area prefers empty cells;
@@ -41,6 +43,7 @@
 #include "page_host_api.h"
 
 #include <windows.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <array>
@@ -50,6 +53,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -66,7 +70,7 @@ using PageHost::AreaHandle;
 using PageHost::Result;
 
 constexpr const char* PluginId      = "aaa-player-page-host";
-constexpr const char* PluginVersion = "1.0.1";
+constexpr const char* PluginVersion = "1.0.2";
 constexpr const char* LogicalPageId = "page"; // keep: saved items are keyed by it
 
 const D2RL::PluginInfo Info {
@@ -1059,10 +1063,10 @@ const D2RL::NetworkService*   NetApi {};
 const D2RL::DataTableService* TableApi {};
 Net::ChannelHandle            Channel = Net::InvalidChannelHandle;
 std::uint64_t                 Nonce {}; // this process: a hosting game's own player connects to itself
-constexpr std::uint64_t       NetToken    = 0x5048'4E45'5401'0001; // protocol 1
-constexpr std::uint32_t       NetProtocol = 1;
+constexpr std::uint64_t       NetToken    = 0x5048'4E45'5401'0001; // kept: 1.0.1 and later hosts link up
+constexpr std::uint32_t       NetProtocol = 2; // 2: item requests (MsgReqPart / MsgAnsPart)
 constexpr std::uint16_t       NetChannelId = 1;
-enum : std::uint16_t { MsgHello = 1, MsgState = 2, MsgCtrl = 3, MsgWelcome = 101, MsgCtrlDone = 102 };
+enum : std::uint16_t { MsgHello = 1, MsgState = 2, MsgCtrl = 3, MsgReqPart = 4, MsgWelcome = 101, MsgCtrlDone = 102, MsgAnsPart = 103 };
 enum : std::uint8_t { VerdictNone = 0, VerdictAllow = 1, VerdictReject = 2, VerdictUnknown = 3 };
 
 #pragma pack(push, 1)
@@ -1199,6 +1203,13 @@ NetRect RectOfSlot(int slot) {
 	const Area a = AreaOfSlot(slot);
 	return { static_cast<std::uint8_t>(a.x), static_cast<std::uint8_t>(a.y), static_cast<std::uint8_t>(a.width), static_cast<std::uint8_t>(a.height) };
 }
+
+// Item requests (below the service functions).
+void OnRequestPart(Net::PeerHandle peer, const void* data, std::uint32_t size) noexcept;
+void OnAnswerPart(const void* data, std::uint32_t size) noexcept;
+void RequestTick() noexcept;
+void EndRequests(const char* why) noexcept;
+void ForgetPeerRequests(Net::PeerHandle peer) noexcept;
 
 // ---- the hosting game's side ----
 
@@ -1379,6 +1390,7 @@ void __cdecl OnHostMessage(const D2RL::PluginContext*, Net::ChannelHandle, Net::
 		}
 		return;
 	}
+	if (id == MsgReqPart) return OnRequestPart(peer, data, size);
 	static std::atomic<int> told {};
 	if (told.fetch_add(1) < 5) Log(true, "multiplayer: unknown message %u (%u bytes) ignored", id, size);
 }
@@ -1388,6 +1400,7 @@ void __cdecl OnHostMessage(const D2RL::PluginContext*, Net::ChannelHandle, Net::
 enum class Link { Idle, Connecting, Connected, Refused };
 std::atomic<Link>          LinkState { Link::Idle };
 std::atomic<bool>          InGame {}, Remote {}, HostMissing {};
+std::atomic<std::uint32_t> HostProtocol {}; // the hosting game's host protocol, 0 before its welcome
 std::atomic<std::uint32_t> PlayerId {};
 std::uint64_t              LinkTriedAt {};
 int                        LinkTries {};
@@ -1428,6 +1441,7 @@ void __cdecl OnLinkState(const D2RL::PluginContext*, const Net::ConnectionEvent*
 			const auto      gone = std::remove_if(Peers.begin(), Peers.end(), [&](const Peer& p) { return p.handle == event->peer; });
 			for (auto p = gone; p != Peers.end(); ++p)
 				if (!p->self) Log(false, "multiplayer: player %u disconnected", p->playerId);
+			ForgetPeerRequests(event->peer);
 			Peers.erase(gone, Peers.end());
 			CountPeers();
 		}
@@ -1451,8 +1465,10 @@ void __cdecl OnLinkState(const D2RL::PluginContext*, const Net::ConnectionEvent*
 		break;
 	case Net::ConnectionState::Disconnected:
 		if (LinkState == Link::Connected) Log(false, "multiplayer: disconnected from the hosting game");
-		LinkState = Link::Idle;
-		Remote    = false;
+		LinkState    = Link::Idle;
+		Remote       = false;
+		HostProtocol = 0;
+		EndRequests("the connection to the hosting game ended");
 		break;
 	default: break;
 	}
@@ -1466,9 +1482,11 @@ void __cdecl OnClientMessage(const D2RL::PluginContext*, Net::ChannelHandle, std
 		const bool remote = welcome.nonce != Nonce;
 		if (remote != Remote.load() || remote) Log(false, "multiplayer: %s (Player Page Host %s, protocol %u)", remote ? "joined a TCP/IP game; the hosting game runs the host" : "this PC hosts the game",
 		                                          welcome.version, welcome.protocol);
-		Remote = remote;
+		Remote       = remote;
+		HostProtocol = std::max<std::uint32_t>(welcome.protocol, 1);
 		return;
 	}
+	if (id == MsgAnsPart) return OnAnswerPart(data, size);
 	if (id == MsgCtrlDone && size >= sizeof(CtrlDoneMsg)) {
 		CtrlDoneMsg done {};
 		std::memcpy(&done, data, sizeof(done));
@@ -1520,6 +1538,7 @@ void SendState() noexcept {
 
 // Ticker (UI thread): connects once in a game, says hello, keeps the state.
 void __cdecl NetTick(const D2RL::PluginContext*, void*) noexcept {
+	RequestTick();
 	if (!NetApi || Channel == Net::InvalidChannelHandle || !InGame) return;
 	const std::uint64_t now = GetTickCount64();
 	if (LinkState == Link::Idle || (LinkState == Link::Connecting && now - LinkTriedAt > 5000)) {
@@ -1572,10 +1591,12 @@ void __cdecl NetTick(const D2RL::PluginContext*, void*) noexcept {
 }
 
 void ResetLink(bool inGame, std::uint32_t player) {
+	EndRequests(inGame ? "a new game started" : "the game ended");
 	InGame      = inGame;
 	PlayerId    = player;
 	LinkState   = Link::Idle;
 	Remote      = false;
+	HostProtocol = 0;
 	HostMissing = false;
 	HostMissingSaid = false;
 	LinkTries   = 0;
@@ -1801,7 +1822,19 @@ struct Spot {
 	int x = -1, y = -1;
 };
 
-std::vector<Spot> TryPack(const std::vector<Lease*>& areas, const std::vector<std::size_t>& order, bool keepSaved, std::size_t& placed) {
+// Whether a saved place holds page items (of any character, as recorded).
+bool PlaceHoldsItems(const std::string& key) {
+	const Place* place = PlaceOf(key);
+	if (!place) return false;
+	const Rect wanted { place->x, place->y, place->width, place->height, {} };
+	for (const auto& [name, items] : PageItems)
+		for (const auto& r : items)
+			if (Overlaps(wanted, r)) return true;
+	return false;
+}
+
+// keep: per area, whether its saved place is kept (when its size is the same).
+std::vector<Spot> TryPack(const std::vector<Lease*>& areas, const std::vector<std::size_t>& order, const std::vector<bool>& keep, std::size_t& placed) {
 	std::array<std::array<bool, PageSize>, PageSize> taken {};
 	const auto free = [&](int x, int y, int w, int h) {
 		if (x < 0 || y < 0 || x + w > PageSize || y + h > PageSize) return false;
@@ -1816,21 +1849,34 @@ std::vector<Spot> TryPack(const std::vector<Lease*>& areas, const std::vector<st
 	};
 	std::vector<Spot> spots(areas.size());
 	placed = 0;
-	if (keepSaved)
-		for (const std::size_t i : order) {
-			const Place* saved = PlaceOf(areas[i]->key);
-			if (saved && saved->width == areas[i]->width && saved->height == areas[i]->height && free(saved->x, saved->y, saved->width, saved->height)) {
-				take(saved->x, saved->y, saved->width, saved->height);
-				spots[i] = { saved->x, saved->y };
-				++placed;
-			}
+	for (const std::size_t i : order) {
+		if (!keep[i]) continue;
+		const Place* saved = PlaceOf(areas[i]->key);
+		if (saved && saved->width == areas[i]->width && saved->height == areas[i]->height && free(saved->x, saved->y, saved->width, saved->height)) {
+			take(saved->x, saved->y, saved->width, saved->height);
+			spots[i] = { saved->x, saved->y };
+			++placed;
 		}
+	}
+	// New places: first where no recorded item lies, then anywhere free.
+	std::array<std::array<bool, PageSize>, PageSize> items {};
+	for (const auto& [name, rects] : PageItems)
+		for (const auto& r : rects)
+			for (int cy = std::max(r.y, 0); cy < std::min(r.y + r.height, PageSize); ++cy)
+				for (int cx = std::max(r.x, 0); cx < std::min(r.x + r.width, PageSize); ++cx) items[cy][cx] = true;
+	const auto clear = [&](int x, int y, int w, int h) {
+		for (int cy = y; cy < y + h; ++cy)
+			for (int cx = x; cx < x + w; ++cx)
+				if (items[cy][cx]) return false;
+		return true;
+	};
 	for (const std::size_t i : order) {
 		if (spots[i].x >= 0) continue;
 		const int w = areas[i]->width, h = areas[i]->height;
+		for (const bool avoidItems : { true, false })
 		for (int ty = 0; ty + h <= PageSize && spots[i].x < 0; ++ty)
 			for (int tx = 0; tx + w <= PageSize && spots[i].x < 0; ++tx)
-				if (free(tx, ty, w, h)) {
+				if (free(tx, ty, w, h) && (!avoidItems || clear(tx, ty, w, h))) {
 					take(tx, ty, w, h);
 					spots[i] = { tx, ty };
 					++placed;
@@ -1849,11 +1895,21 @@ void PackWaiting() {
 		const int sa = areas[a]->width * areas[a]->height, sb = areas[b]->width * areas[b]->height;
 		return sa != sb ? sa > sb : areas[a]->height > areas[b]->height;
 	});
-	std::size_t       kept = 0, fresh = 0;
-	std::vector<Spot> spots = TryPack(areas, order, true, kept);
+	// Every saved place kept; else only the places holding items kept (the
+	// others packed again); else everything packed again. The first that
+	// places the most areas wins.
+	std::vector<bool> all(areas.size(), true), holding(areas.size()), none(areas.size(), false);
+	for (std::size_t i = 0; i < areas.size(); ++i) holding[i] = PlaceHoldsItems(areas[i]->key);
+	std::size_t       kept = 0;
+	std::vector<Spot> spots = TryPack(areas, order, all, kept);
 	if (kept < areas.size()) {
-		std::vector<Spot> again = TryPack(areas, order, false, fresh);
-		if (fresh > kept) {
+		std::size_t       withItems = 0, fresh = 0;
+		std::vector<Spot> some = TryPack(areas, order, holding, withItems);
+		std::vector<Spot> again = TryPack(areas, order, none, fresh);
+		if (withItems > kept && withItems >= fresh) {
+			Log(true, "the saved places don't fit together with the new areas: areas holding items keep their places, the others are packed again");
+			spots = std::move(some);
+		} else if (fresh > kept) {
 			Log(true, "the saved places don't fit together with the new areas: every area is packed again (items left in old places go back to their characters at game load)");
 			spots = std::move(again);
 		}
@@ -2137,6 +2193,670 @@ auto __cdecl DestroyItem(AreaHandle handle, std::uint32_t runtimeId, D2RL::Items
 	return result == D2RL::Items::Result::Success ? Result::Success : Result::Failed;
 }
 
+// ---- item requests ----
+// Made, saved, moved and destroyed by the game that runs the items: this one
+// (single player, or it hosts), or the hosting game's host for a joined
+// player. Requests and answers cross the network in parts (a message carries
+// 224 bytes at most). Answers reach the client on the UI thread.
+//
+// Making from save bytes is Grail On!'s way (its probes proved uniques, sets,
+// runewords and socketed items rebuild byte for byte): D2RCore's pointer to
+// the game's CreateItem is swapped for one createItem call, so it places the
+// item the save loader decodes instead of making a new one.
+//   exe+0x3E2B6A0  thunk to the item save writer: int (Unit*, u8*, size, 1, 1, 0, &sourceInfo)
+//   exe+0x3E2B6AC  thunk to the item header reader: int (gameFlag, u8*, size, 1, header, version)
+//   exe+0x43D900   item save loader: Unit* (Game*, 0, u8*, size, 1, header, int* read, version)
+//   exe+0x1D16810  PlrSave.cpp source info; game+0x106 the header's game flag; version 0x69
+//   D2RCore+0x6FFC58 {pointer, rva 0x43CD50}, called at D2RCore+0x423492
+//   exe+0x48FE80 GetUnitById, exe+0x46EB00 socket an item (game, player, child, parent, 1),
+//   exe+0x48FAA0 free a loose item.
+
+namespace Store {
+constexpr std::uint64_t  SaveWriterRva = 0x3E2B6A0, HeaderReaderRva = 0x3E2B6AC, SaveLoaderRva = 0x43D900, SourceInfo = 0x1D16810, CreateItemRva = 0x43CD50;
+constexpr std::uint64_t  UnitByIdRva = 0x48FE80, SocketItemRva = 0x46EB00, FreeItemRva = 0x48FAA0;
+constexpr std::uintptr_t CoreSlot = 0x6FFC58, CoreCall = 0x423492, GameFlag = 0x106;
+constexpr int            Version = 0x69;
+constexpr std::size_t    BufferSize = 0x4000;
+constexpr std::uint8_t   CoreCallBytes[] { 0xFF, 0x15, 0xC0, 0xC7, 0x2D, 0x00 };
+constexpr std::uint8_t   SaveLoaderBytes[] { 0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x48, 0x89, 0x68, 0x18, 0x48, 0x89, 0x70, 0x20, 0x57 };
+constexpr std::uint8_t   CreateItemBytes[] { 0x40, 0x55, 0x53, 0x56, 0x41, 0x54, 0x41, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0xC9, 0x48, 0x81, 0xEC };
+constexpr std::uint8_t   UnitByIdBytes[] { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x41 };
+constexpr std::uint8_t   SocketItemBytes[] { 0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x70, 0x48, 0x8B, 0x05, 0xB6, 0xC7 };
+
+using SaveWriterFn   = int (*)(void* item, std::uint8_t* buffer, std::size_t capacity, int, int, int, void** sourceInfo) noexcept;
+using HeaderReaderFn = int (*)(int gameFlag, const std::uint8_t* buffer, std::size_t size, int, void* header, int version) noexcept;
+using SaveLoaderFn   = void* (*)(void* game, void* owner, const std::uint8_t* buffer, int size, int, void* header, int* read, int version) noexcept;
+using UnitByIdFn     = void* (*)(void* game, int type, std::uint32_t id) noexcept;
+using SocketItemFn   = int (*)(void* game, void* player, std::uint32_t childId, std::uint32_t parentId, int fromSave) noexcept;
+using FreeItemFn     = void (*)(void* game, void* item) noexcept;
+
+SaveWriterFn   SaveItem {};
+HeaderReaderFn ReadHeader {};
+SaveLoaderFn   LoadItem {};
+UnitByIdFn     UnitById {};
+SocketItemFn   SocketItem {};
+FreeItemFn     FreeItem {};
+std::uintptr_t CoreModule {};
+int            Fits = -1; // -1 not checked yet
+
+template <std::size_t N>
+bool BytesAt(std::uintptr_t address, const std::uint8_t (&bytes)[N]) {
+	std::uint8_t code[N] {};
+	SIZE_T       copied = 0;
+	return address && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), code, N, &copied) && copied == N && !std::memcmp(code, bytes, N);
+}
+
+// The natives are there (checked once).
+bool Ready() {
+	if (Fits >= 0) return Fits == 1;
+	const auto exe = static_cast<std::uintptr_t>(Context->exeBase);
+	CoreModule     = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(L"D2RCore.dll"));
+	std::uint64_t slotRva = 0;
+	SIZE_T        copied  = 0;
+	const bool    core    = CoreModule && BytesAt(CoreModule + CoreCall, CoreCallBytes)
+	                && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(CoreModule + CoreSlot + 8), &slotRva, 8, &copied) && slotRva == CreateItemRva;
+	const auto thunk = [&](std::uint64_t rva) {
+		std::uint8_t code[2] {};
+		SIZE_T       n = 0;
+		return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(exe + rva), code, 2, &n) && n == 2 && code[0] == 0xFF && code[1] == 0x25;
+	};
+	const bool game = thunk(SaveWriterRva) && thunk(HeaderReaderRva) && BytesAt(exe + SaveLoaderRva, SaveLoaderBytes) && BytesAt(exe + CreateItemRva, CreateItemBytes) && BytesAt(exe + UnitByIdRva, UnitByIdBytes)
+	                  && BytesAt(exe + SocketItemRva, SocketItemBytes);
+	Fits = core && game ? 1 : 0;
+	if (!Fits) {
+		Log(true, "requests: this game or D2RLoader build is not the one the save natives were found in (D2RCore %s, game %s): items can't be made from save bytes nor saved", core ? "fits" : "differs",
+		    game ? "fits" : "differs");
+		return false;
+	}
+	SaveItem   = reinterpret_cast<SaveWriterFn>(exe + SaveWriterRva);
+	ReadHeader = reinterpret_cast<HeaderReaderFn>(exe + HeaderReaderRva);
+	LoadItem   = reinterpret_cast<SaveLoaderFn>(exe + SaveLoaderRva);
+	UnitById   = reinterpret_cast<UnitByIdFn>(exe + UnitByIdRva);
+	SocketItem = reinterpret_cast<SocketItemFn>(exe + SocketItemRva);
+	FreeItem   = reinterpret_cast<FreeItemFn>(exe + FreeItemRva);
+	return true;
+}
+
+// The decoder D2RCore calls instead of the game's CreateItem for one createItem.
+struct Decoding {
+	const std::vector<std::uint8_t>* bytes {};
+	void*                            item {};
+	bool                             called {};
+	std::uint32_t                    playerId = 0xFFFFFFFF;
+} Decode;
+
+// Socketed items follow the parent in the bytes, as in a .d2s: they go into it
+// before D2RCore places it, so every client gets the whole item at once.
+void SocketChildren(void* game, std::size_t offset) {
+	const auto& bytes  = *Decode.bytes;
+	void*       player = Decode.playerId != 0xFFFFFFFF ? UnitById(game, 0, Decode.playerId) : nullptr;
+	const auto  parent = *reinterpret_cast<std::uint32_t*>(static_cast<char*>(Decode.item) + 8);
+	while (player && offset < bytes.size()) {
+		alignas(16) std::uint8_t header[0x100] {};
+		const auto               flag = *reinterpret_cast<std::uint8_t*>(static_cast<char*>(game) + GameFlag);
+		(void)ReadHeader(flag, bytes.data() + offset, bytes.size() - offset, 1, header, Version);
+		std::int32_t first = 0;
+		std::memcpy(&first, header, 4);
+		int   read  = 0;
+		void* child = first == -1 ? nullptr : LoadItem(game, nullptr, bytes.data() + offset, static_cast<int>(bytes.size() - offset), 1, header, &read, Version);
+		if (!child) break;
+		if (!SocketItem(game, player, *reinterpret_cast<std::uint32_t*>(static_cast<char*>(child) + 8), parent, 1)) FreeItem(game, child);
+		if (read <= 0) break;
+		offset += static_cast<std::size_t>(read);
+	}
+}
+
+void* DecodeInstead(void* game, void*, int) noexcept {
+	Decode.called = true;
+	if (!game || !Decode.bytes || Decode.bytes->empty()) return nullptr;
+	alignas(16) std::uint8_t header[0x100] {};
+	const auto               flag = *reinterpret_cast<std::uint8_t*>(static_cast<char*>(game) + GameFlag);
+	(void)ReadHeader(flag, Decode.bytes->data(), Decode.bytes->size(), 1, header, Version);
+	std::int32_t first = 0;
+	std::memcpy(&first, header, 4);
+	if (first == -1) return nullptr;
+	int read    = 0;
+	Decode.item = LoadItem(game, nullptr, Decode.bytes->data(), static_cast<int>(Decode.bytes->size()), 1, header, &read, Version);
+	if (Decode.item && read > 0) SocketChildren(game, static_cast<std::size_t>(read));
+	return Decode.item;
+}
+
+// Game thread: the item of `bytes`, made for `player` (unit id `playerId`)
+// where spec's destination says.
+D2RL::Items::Result MakeFromSave(D2RL::PlayerHandle player, std::uint32_t playerId, D2RL::Items::ItemCreateSpec spec, const std::vector<std::uint8_t>& bytes, D2RL::ItemHandle* made) {
+	auto* slot = reinterpret_cast<void**>(CoreModule + CoreSlot);
+	DWORD old  = 0;
+	if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return D2RL::Items::Result::Unavailable;
+	Decode               = { .bytes = &bytes, .playerId = playerId };
+	void* const original = *slot;
+	*slot                = reinterpret_cast<void*>(&DecodeInstead);
+	auto result          = ItemApi->createItem(Context, player, &spec, made);
+	if (result == D2RL::Items::Result::InvalidArgument && !Decode.called) {
+		// Only D2RLoader's checks see the spec (the decoded item replaces it):
+		// a plain item of the same base passes them.
+		spec.flags           = 0;
+		spec.quality         = D2RL::Items::Quality::Normal;
+		spec.qualityRecordId = D2RL::Items::RandomQualityRecord;
+		result               = ItemApi->createItem(Context, player, &spec, made);
+	}
+	const bool decoded = Decode.called && Decode.item;
+	*slot              = original;
+	VirtualProtect(slot, sizeof(void*), old, &old);
+	Decode = {};
+	if (result == D2RL::Items::Result::Success && !decoded) Log(true, "requests: an item was made but the save bytes didn't decode (%zu bytes)", bytes.size());
+	return result;
+}
+
+struct Snapshot {
+	std::vector<std::uint8_t> bytes;
+	bool                      ok {};
+};
+
+void __cdecl TakeSnapshot(const D2RL::PluginContext*, void* native, void* userData) noexcept {
+	auto* snapshot = static_cast<Snapshot*>(userData);
+	if (!native) return;
+	snapshot->bytes.assign(BufferSize, 0);
+	void*     source = reinterpret_cast<void*>(static_cast<std::uintptr_t>(Context->exeBase) + SourceInfo);
+	const int size   = SaveItem(native, snapshot->bytes.data(), snapshot->bytes.size(), 1, 1, 0, &source);
+	snapshot->bytes.resize(size > 0 ? static_cast<std::size_t>(size) : 0);
+	snapshot->ok = size > 0;
+}
+} // namespace Store
+
+namespace Req {
+enum : std::uint8_t { Create = 1, Save = 2, Move = 3, Destroy = 4 };
+constexpr std::uint32_t MaxBytes  = 0x8000;
+constexpr std::size_t   PartData  = 200;
+constexpr std::uint64_t TimeoutMs = 10000;
+const char*             KindName(std::uint8_t kind) {
+    return kind == Create ? "make from save" : kind == Save ? "save" : kind == Move ? "move" : kind == Destroy ? "destroy" : "?";
+}
+} // namespace Req
+
+#pragma pack(push, 1)
+struct PartHead {
+	std::uint32_t id;
+	std::uint16_t index, count, size;
+};
+struct ReqBody { // followed by byteCount bytes
+	std::uint8_t  kind;
+	NetRect       area; // the requester's area on the page
+	std::uint32_t runtimeId, socketed;
+	std::uint32_t flags, code, quality, qualityRecordId, itemLevel, stateFlags;
+	std::uint32_t container, placement, x, y, stashPage;
+	std::uint32_t byteCount;
+};
+struct AnsBody { // followed by byteCount bytes
+	std::uint8_t  kind;
+	std::uint32_t result, itemResult, runtimeId, byteCount;
+};
+#pragma pack(pop)
+static_assert(sizeof(PartHead) + Req::PartData <= Net::MaxPayloadSize);
+
+struct Assembly {
+	std::uint16_t                          count {};
+	std::vector<std::vector<std::uint8_t>> parts;
+	std::vector<bool>                      have;
+	std::size_t                            got {};
+	std::uint64_t                          at {};
+};
+
+// Splits `blob` into parts; `send(part)` sends one. False when one failed.
+template <typename Send>
+bool SendParts(std::uint32_t id, const std::vector<std::uint8_t>& blob, Send send) {
+	const std::size_t count = std::max<std::size_t>(1, (blob.size() + Req::PartData - 1) / Req::PartData);
+	std::uint8_t      message[sizeof(PartHead) + Req::PartData] {};
+	for (std::size_t i = 0; i < count; ++i) {
+		const std::size_t from = i * Req::PartData, n = std::min(Req::PartData, blob.size() - std::min(blob.size(), from));
+		const PartHead    head { id, static_cast<std::uint16_t>(i), static_cast<std::uint16_t>(count), static_cast<std::uint16_t>(n) };
+		std::memcpy(message, &head, sizeof(head));
+		if (n) std::memcpy(message + sizeof(head), blob.data() + from, n);
+		if (!send(message, static_cast<std::uint32_t>(sizeof(head) + n))) return false;
+	}
+	return true;
+}
+
+// Adds a part; true with `blob` filled when the last one came. `bad` when the
+// part makes no sense (the assembly is dropped).
+bool AddPart(std::map<std::uint64_t, Assembly>& open, std::uint64_t key, const void* data, std::uint32_t size, std::vector<std::uint8_t>& blob, bool& bad) {
+	bad = false;
+	PartHead head {};
+	if (size < sizeof(head)) return bad = true, false;
+	std::memcpy(&head, data, sizeof(head));
+	const std::size_t maxParts = (Req::MaxBytes + sizeof(ReqBody) + Req::PartData) / Req::PartData + 1;
+	if (head.count == 0 || head.count > maxParts || head.index >= head.count || head.size > Req::PartData || size < sizeof(head) + head.size) {
+		open.erase(key);
+		return bad = true, false;
+	}
+	Assembly& a = open[key];
+	if (a.count == 0) a.count = head.count, a.parts.resize(head.count), a.have.resize(head.count);
+	if (a.count != head.count) {
+		open.erase(key);
+		return bad = true, false;
+	}
+	a.at = GetTickCount64();
+	if (!a.have[head.index]) a.have[head.index] = true, ++a.got;
+	a.parts[head.index].assign(static_cast<const std::uint8_t*>(data) + sizeof(head), static_cast<const std::uint8_t*>(data) + sizeof(head) + head.size);
+	if (a.got < a.count) return false;
+	blob.clear();
+	for (const auto& part : a.parts) blob.insert(blob.end(), part.begin(), part.end());
+	open.erase(key);
+	return true;
+}
+
+// A request being done (game thread).
+struct Work {
+	bool                      remote {};
+	Net::PeerHandle           peer {};
+	std::uint32_t             id {};
+	PageHost::RequestDone     done {};
+	void*                     user {};
+	ReqBody                   body {};
+	std::vector<std::uint8_t> bytes;
+};
+
+// An answer for this game's client plugin, called on the UI thread.
+struct Answer {
+	PageHost::RequestDone     done {};
+	void*                     user {};
+	AnsBody                   body {};
+	std::vector<std::uint8_t> bytes;
+};
+
+struct Pending {
+	PageHost::RequestDone done {};
+	void*                 user {};
+	std::uint8_t          kind {};
+	std::uint32_t         runtimeId {};
+	std::uint64_t         sentAt {};
+};
+
+std::mutex                         ReqLock;
+std::map<std::uint32_t, Pending>   PendingRequests;            // the joined player's, by id
+std::map<std::uint64_t, Assembly>  RequestParts, AnswerParts;  // being received
+std::vector<Answer>                Answers;                    // to deliver on the UI thread
+std::atomic<bool>                  DeliveryQueued {};
+std::uint32_t                      RequestSeq {};
+
+void __cdecl DeliverAnswers(const D2RL::PluginContext*, void*) noexcept {
+	DeliveryQueued = false;
+	std::vector<Answer> ready;
+	{
+		std::lock_guard guard(ReqLock);
+		ready.swap(Answers);
+	}
+	for (const auto& answer : ready) {
+		const PageHost::RequestAnswer out { .structSize = sizeof(PageHost::RequestAnswer), .result = static_cast<Result>(answer.body.result), .itemResult = answer.body.itemResult,
+			                                .runtimeId = answer.body.runtimeId, .bytes = answer.bytes.empty() ? nullptr : answer.bytes.data(),
+			                                .byteCount = static_cast<std::uint32_t>(answer.bytes.size()) };
+		if (answer.done) answer.done(answer.user, &out);
+	}
+}
+
+void QueueAnswer(Answer answer) {
+	{
+		std::lock_guard guard(ReqLock);
+		Answers.push_back(std::move(answer));
+	}
+	if (ThreadApi && !DeliveryQueued.exchange(true))
+		if (ThreadApi->runOnUiThread(Context, DeliverAnswers, nullptr) != D2RL::Threads::Result::Success) DeliveryQueued = false; // the ticker delivers it
+}
+
+void EndRequests(const char* why) noexcept {
+	std::vector<Answer> ended;
+	{
+		std::lock_guard guard(ReqLock);
+		for (const auto& [id, pending] : PendingRequests)
+			ended.push_back({ pending.done, pending.user, { pending.kind, static_cast<std::uint32_t>(Result::TimedOut), 0, pending.runtimeId, 0 }, {} });
+		if (!PendingRequests.empty()) Log(true, "requests: %zu request(s) to the hosting game ended unanswered: %s", PendingRequests.size(), why);
+		PendingRequests.clear();
+		AnswerParts.clear();
+	}
+	for (auto& answer : ended) QueueAnswer(std::move(answer));
+}
+
+void ForgetPeerRequests(Net::PeerHandle peer) noexcept {
+	std::lock_guard guard(ReqLock);
+	std::erase_if(RequestParts, [&](const auto& open) { return open.first >> 32 == (peer & 0xFFFFFFFF); });
+}
+
+// UI thread, every 200 ms: timeouts, stale parts, answers not delivered yet.
+void RequestTick() noexcept {
+	const std::uint64_t now = GetTickCount64();
+	std::vector<Answer> late;
+	bool                waiting = false;
+	{
+		std::lock_guard guard(ReqLock);
+		for (auto it = PendingRequests.begin(); it != PendingRequests.end();) {
+			if (now - it->second.sentAt < Req::TimeoutMs) {
+				++it;
+				continue;
+			}
+			Log(true, "requests: %s of item %u: no answer from the hosting game in %llu s", Req::KindName(it->second.kind), it->second.runtimeId,
+			    static_cast<unsigned long long>(Req::TimeoutMs / 1000));
+			late.push_back({ it->second.done, it->second.user, { it->second.kind, static_cast<std::uint32_t>(Result::TimedOut), 0, it->second.runtimeId, 0 }, {} });
+			it = PendingRequests.erase(it);
+		}
+		std::erase_if(RequestParts, [&](const auto& open) { return now - open.second.at > Req::TimeoutMs; });
+		std::erase_if(AnswerParts, [&](const auto& open) { return now - open.second.at > Req::TimeoutMs; });
+		waiting = !Answers.empty();
+	}
+	for (auto& answer : late) QueueAnswer(std::move(answer));
+	if (waiting && !DeliveryQueued) DeliverAnswers(Context, nullptr);
+}
+
+// The player's item with that runtime id (anywhere it is).
+D2RL::ItemHandle ItemOf(D2RL::PlayerHandle player, std::uint32_t runtimeId) {
+	Find                              find { runtimeId, {} };
+	const D2RL::Inventory::ItemFilter everything { .structSize = sizeof(D2RL::Inventory::ItemFilter), .containerMask = ~0U };
+	(void)Inventory->forEachInventoryItem(Context, player, &everything, FindItem, &find);
+	return find.handle;
+}
+
+bool InRect(const NetRect& r, int x, int y) {
+	return r.w > 0 && x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h && r.x + r.w <= PageSize && r.y + r.h <= PageSize;
+}
+
+// The request's destination, page cells for CustomPage; false when refused.
+bool DestinationOf(const ReqBody& body, D2RL::Items::ItemDestination& d, Result& refused) {
+	using D2RL::Items::ItemContainer;
+	d                  = { .structSize = sizeof(D2RL::Items::ItemDestination) };
+	d.container        = static_cast<ItemContainer>(body.container);
+	d.placement        = static_cast<D2RL::Items::Placement>(body.placement);
+	d.x                = body.x;
+	d.y                = body.y;
+	d.sharedStashPage  = body.stashPage;
+	refused            = Result::InvalidArgument;
+	switch (d.container) {
+	case ItemContainer::CustomPage:
+		if (d.placement != D2RL::Items::Placement::Exact || body.x >= PageSize || body.y >= PageSize || !InRect(body.area, body.area.x + static_cast<int>(body.x), body.area.y + static_cast<int>(body.y)))
+			return refused = Result::OutsideArea, false;
+		d.customPageHandle = Page;
+		d.x += body.area.x;
+		d.y += body.area.y;
+		return Page != Inv::InvalidHandle || (refused = Result::NoPage, false);
+	case ItemContainer::Inventory:
+	case ItemContainer::PersonalStash:
+	case ItemContainer::Cursor:
+	case ItemContainer::SharedStash: return true;
+	default: return false;
+	}
+}
+
+// Game thread: does a request, for this game's player or a joined player.
+void __cdecl RunWork(const D2RL::PluginContext*, void* user) noexcept {
+	std::unique_ptr<Work> work(static_cast<Work*>(user));
+	const ReqBody&        b = work->body;
+	AnsBody               answer { b.kind, static_cast<std::uint32_t>(Result::Failed), 0, b.runtimeId, 0 };
+	std::vector<std::uint8_t> out;
+	D2RL::PlayerHandle    player {};
+	std::uint32_t         playerId = 0xFFFFFFFF;
+	const char*           who      = "this game's player";
+	char                  whoText[48] {};
+	if (work->remote) {
+		{
+			std::lock_guard guard(PeerLock);
+			if (const Peer* peer = PeerOf(work->peer)) playerId = peer->playerId;
+		}
+		std::snprintf(whoText, sizeof(whoText), "joined player %u", playerId);
+		who = whoText;
+		if (const auto found = NetApi->getPeerPlayer(Context, Channel, work->peer, &player); found != Net::Result::Success || !player) {
+			Log(true, "requests: %s for %s: their player not found (network result %u)", Req::KindName(b.kind), who, static_cast<unsigned>(found));
+			player = {};
+		}
+	} else {
+		playerId = PlayerId.load();
+		if (!LocalPlayer(player)) player = {};
+	}
+	const auto finish = [&](Result result, std::uint32_t itemResult = 0) {
+		answer.result     = static_cast<std::uint32_t>(result);
+		answer.itemResult = itemResult;
+		answer.byteCount  = static_cast<std::uint32_t>(out.size());
+		Log(result != Result::Success, "requests: %s of item %u for %s: %s (result %u, item result %u%s%zu bytes)", Req::KindName(b.kind), b.runtimeId, who,
+		    result == Result::Success ? "done" : "failed", static_cast<unsigned>(result), itemResult, answer.runtimeId != b.runtimeId ? ", new item, " : ", ",
+		    b.kind == Req::Save ? out.size() : work->bytes.size());
+		if (!work->remote) {
+			if (b.kind != Req::Save && result == Result::Success) ScanPage();
+			return QueueAnswer({ work->done, work->user, answer, std::move(out) });
+		}
+		std::vector<std::uint8_t> blob(sizeof(answer));
+		std::memcpy(blob.data(), &answer, sizeof(answer));
+		blob.insert(blob.end(), out.begin(), out.end());
+		const Net::PeerHandle peer = work->peer;
+		if (!SendParts(work->id, blob, [&](const void* part, std::uint32_t n) { return NetApi->sendToClient(Context, Channel, peer, MsgAnsPart, part, n) == Net::Result::Success; }))
+			Log(true, "requests: could not send the answer to %s", who);
+	};
+	if (!player || !ItemApi || !Inventory) return finish(Result::Failed);
+	switch (b.kind) {
+	case Req::Create: {
+		if (!Store::Ready()) return finish(Result::Unsupported);
+		if (work->bytes.size() < 8) return finish(Result::InvalidArgument);
+		D2RL::Items::ItemCreateSpec spec {};
+		spec.structSize      = sizeof(spec);
+		spec.flags           = b.flags & D2RL::Items::ItemCreateFlagBit(D2RL::Items::ItemCreateFlag::AllowDuplicateUnique);
+		spec.code            = b.code;
+		spec.quality         = static_cast<D2RL::Items::Quality>(b.quality);
+		spec.qualityRecordId = b.qualityRecordId;
+		spec.itemLevel       = b.itemLevel;
+		spec.seedMode        = D2RL::Items::SeedMode::Random;
+		spec.quantity        = D2RL::Items::DefaultValue;
+		spec.durability      = D2RL::Items::DefaultValue;
+		spec.stateFlags      = b.stateFlags & D2RL::Items::AllItemStates;
+		Result refused {};
+		if (!DestinationOf(b, spec.destination, refused)) return finish(refused);
+		D2RL::ItemHandle made {};
+		HostMoving        = true;
+		const auto result = Store::MakeFromSave(player, playerId, spec, work->bytes, &made);
+		HostMoving        = false;
+		if (result != D2RL::Items::Result::Success) return finish(Result::Failed, static_cast<std::uint32_t>(result));
+		D2RL::Items::ItemInfo info { .structSize = D2RL::Items::ItemInfoSize };
+		answer.runtimeId = made && ItemApi->getItemInfo(Context, made, &info) == D2RL::Items::Result::Success ? info.runtimeId : 0;
+		return finish(Result::Success);
+	}
+	case Req::Save: {
+		if (!Store::Ready()) return finish(Result::Unsupported);
+		const D2RL::ItemHandle item = ItemOf(player, b.runtimeId);
+		if (!item) return finish(Result::NotFound);
+		Store::Snapshot snapshot;
+		const auto      edited = ItemApi->editNativeItem(Context, item, Store::TakeSnapshot, &snapshot);
+		if (edited != D2RL::Items::Result::Success || !snapshot.ok) return finish(Result::Failed, static_cast<std::uint32_t>(edited));
+		out = std::move(snapshot.bytes);
+		return finish(Result::Success);
+	}
+	case Req::Move: {
+		const D2RL::ItemHandle item = ItemOf(player, b.runtimeId);
+		if (!item) return finish(Result::NotFound);
+		D2RL::Items::ExistingItemOperation operation { .structSize = sizeof(D2RL::Items::ExistingItemOperation), .kind = D2RL::Items::ExistingItemOperationKind::Move, .item = item };
+		Result refused {};
+		if (!DestinationOf(b, operation.move.destination, refused)) return finish(refused);
+		const D2RL::Items::ExistingItemTransaction transaction { .structSize = sizeof(D2RL::Items::ExistingItemTransaction), .player = player, .operationCount = 1, .operations = &operation };
+		D2RL::Items::ExistingItemTransactionResult result { .structSize = sizeof(D2RL::Items::ExistingItemTransactionResult) };
+		HostMoving       = true;
+		const auto moved = ItemApi->executeExistingItemTransaction(Context, &transaction, &result);
+		HostMoving       = false;
+		return finish(moved == D2RL::Items::Result::Success ? Result::Success : Result::Failed, static_cast<std::uint32_t>(moved));
+	}
+	case Req::Destroy: {
+		const D2RL::ItemHandle item = ItemOf(player, b.runtimeId);
+		if (!item) return finish(Result::NotFound);
+		D2RL::Items::ItemInfo info { .structSize = D2RL::Items::ItemInfoSize };
+		if (ItemApi->getItemInfo(Context, item, &info) != D2RL::Items::Result::Success) return finish(Result::Failed);
+		if (info.container != D2RL::Items::ItemContainer::CustomPage || !InRect(b.area, info.x, info.y)) return finish(Result::OutsideArea);
+		const auto destroyed = ItemApi->destroyItem(Context, player, item, static_cast<D2RL::Items::SocketedItemPolicy>(b.socketed));
+		return finish(destroyed == D2RL::Items::Result::Success ? Result::Success : Result::Failed, static_cast<std::uint32_t>(destroyed));
+	}
+	default: return finish(Result::InvalidArgument);
+	}
+}
+
+// The hosting game: a part of a joined player's request.
+void OnRequestPart(Net::PeerHandle peer, const void* data, std::uint32_t size) noexcept {
+	std::uint32_t playerId = 0;
+	bool          self = false, known = false;
+	{
+		std::lock_guard guard(PeerLock);
+		if (const Peer* p = PeerOf(peer)) known = true, playerId = p->playerId, self = p->self;
+	}
+	PartHead head {};
+	if (size >= sizeof(head)) std::memcpy(&head, data, sizeof(head));
+	const auto answerNow = [&](std::uint8_t kind, Result result) {
+		const AnsBody             answer { kind, static_cast<std::uint32_t>(result), 0, 0, 0 };
+		std::vector<std::uint8_t> blob(sizeof(answer));
+		std::memcpy(blob.data(), &answer, sizeof(answer));
+		(void)SendParts(head.id, blob, [&](const void* part, std::uint32_t n) { return NetApi->sendToClient(Context, Channel, peer, MsgAnsPart, part, n) == Net::Result::Success; });
+	};
+	if (!known) {
+		static std::atomic<int> told {};
+		if (told.fetch_add(1) < 5) Log(true, "requests: a request from a player who didn't say hello: refused");
+		return answerNow(0, Result::Failed);
+	}
+	std::vector<std::uint8_t> blob;
+	bool                      bad = false, whole = false;
+	{
+		std::lock_guard guard(ReqLock);
+		whole = AddPart(RequestParts, (static_cast<std::uint64_t>(peer & 0xFFFFFFFF) << 32) | head.id, data, size, blob, bad);
+	}
+	if (bad) {
+		Log(true, "requests: a malformed request part from player %u: dropped", playerId);
+		return answerNow(0, Result::InvalidArgument);
+	}
+	if (!whole) return;
+	ReqBody body {};
+	if (blob.size() < sizeof(body)) return answerNow(0, Result::InvalidArgument);
+	std::memcpy(&body, blob.data(), sizeof(body));
+	if (body.byteCount > Req::MaxBytes || blob.size() != sizeof(body) + body.byteCount) return answerNow(body.kind, Result::InvalidArgument);
+	if (Page == Inv::InvalidHandle || !ItemApi || !ThreadApi) {
+		Log(true, "requests: %s for player %u: this game has no page, item or thread service", Req::KindName(body.kind), playerId);
+		return answerNow(body.kind, Result::Failed);
+	}
+	auto* work = new (std::nothrow) Work { .remote = true, .peer = peer, .id = head.id, .body = body };
+	if (work) work->bytes.assign(blob.begin() + sizeof(body), blob.end());
+	if (const auto queued = work ? ThreadApi->runOnGameThread(Context, RunWork, work) : D2RL::Threads::Result::Busy; queued != D2RL::Threads::Result::Success) {
+		delete work;
+		Log(true, "requests: %s for player %u could not be queued (thread result %u)", Req::KindName(body.kind), playerId, static_cast<unsigned>(queued));
+		answerNow(body.kind, Result::Failed);
+	}
+	(void)self;
+}
+
+// The joined player: a part of the hosting game's answer.
+void OnAnswerPart(const void* data, std::uint32_t size) noexcept {
+	PartHead head {};
+	if (size >= sizeof(head)) std::memcpy(&head, data, sizeof(head));
+	std::vector<std::uint8_t> blob;
+	bool                      bad = false, whole = false;
+	Pending                   pending {};
+	{
+		std::lock_guard guard(ReqLock);
+		if (!PendingRequests.count(head.id)) return; // timed out or ended
+		whole = AddPart(AnswerParts, head.id, data, size, blob, bad);
+		if (!bad && !whole) return;
+		pending = PendingRequests[head.id];
+		PendingRequests.erase(head.id);
+	}
+	AnsBody body { pending.kind, static_cast<std::uint32_t>(Result::Failed), 0, pending.runtimeId, 0 };
+	if (bad || blob.size() < sizeof(AnsBody)) Log(true, "requests: a malformed answer from the hosting game (%s of item %u)", Req::KindName(pending.kind), pending.runtimeId);
+	else std::memcpy(&body, blob.data(), sizeof(body));
+	std::vector<std::uint8_t> bytes;
+	if (!bad && blob.size() >= sizeof(AnsBody) + body.byteCount) bytes.assign(blob.begin() + sizeof(AnsBody), blob.begin() + sizeof(AnsBody) + body.byteCount);
+	Log(body.result != 0, "requests: %s of item %u by the hosting game: result %u, item result %u, item %u", Req::KindName(pending.kind), pending.runtimeId, body.result, body.itemResult, body.runtimeId);
+	QueueAnswer({ pending.done, pending.user, body, std::move(bytes) });
+}
+
+auto __cdecl ItemsWhere() noexcept -> PageHost::ItemsWhere {
+	if (!NetApi || Channel == Net::InvalidChannelHandle) return PageHost::ItemsWhere::Local; // no network here: nothing can be joined through the host
+	if (HostMissing) return PageHost::ItemsWhere::RemoteNoHost;
+	if (!InGame || HostProtocol == 0) return PageHost::ItemsWhere::Unknown;
+	if (!Remote) return PageHost::ItemsWhere::Local;
+	return HostProtocol >= 2 ? PageHost::ItemsWhere::Remote : PageHost::ItemsWhere::RemoteNoHost;
+}
+
+// The area's rectangle; false when unknown or not placed.
+bool AreaRect(AreaHandle handle, NetRect& rect) {
+	std::lock_guard guard(Lock);
+	const Lease*    lease = LeaseOf(handle);
+	if (!lease || !lease->placed || lease->slot < 0 || lease->slot >= SlotCount) return false;
+	rect = RectOfSlot(lease->slot);
+	return rect.w > 0;
+}
+
+Result SendRequest(AreaHandle handle, ReqBody body, const std::uint8_t* bytes, std::uint32_t byteCount, PageHost::RequestDone done, void* user) {
+	if (!done || (byteCount && !bytes) || byteCount > Req::MaxBytes) return Result::InvalidArgument;
+	{
+		std::lock_guard guard(Lock);
+		if (!LeaseOf(handle)) return Result::NotFound;
+	}
+	if (!AreaRect(handle, body.area)) return Result::Busy;
+	body.byteCount = byteCount;
+	switch (ItemsWhere()) {
+	case PageHost::ItemsWhere::Unknown: return Result::Busy;
+	case PageHost::ItemsWhere::RemoteNoHost: return Result::Unsupported;
+	case PageHost::ItemsWhere::Local: {
+		if (!ItemApi || !Inventory || (!ThreadApi && (Context->QueryService(&ThreadApi) != D2RL::ServiceQueryResult::Success || !ThreadApi))) return Result::Failed;
+		auto* work = new (std::nothrow) Work { .done = done, .user = user, .body = body };
+		if (!work) return Result::Failed;
+		if (byteCount) work->bytes.assign(bytes, bytes + byteCount);
+		if (const auto queued = ThreadApi->runOnGameThread(Context, RunWork, work); queued != D2RL::Threads::Result::Success) {
+			delete work;
+			Log(true, "requests: %s of item %u could not be queued (thread result %u)", Req::KindName(body.kind), body.runtimeId, static_cast<unsigned>(queued));
+			return Result::Failed;
+		}
+		return Result::Success;
+	}
+	case PageHost::ItemsWhere::Remote: break;
+	}
+	std::vector<std::uint8_t> blob(sizeof(body) + byteCount);
+	std::memcpy(blob.data(), &body, sizeof(body));
+	if (byteCount) std::memcpy(blob.data() + sizeof(body), bytes, byteCount);
+	std::uint32_t id = 0;
+	{
+		std::lock_guard guard(ReqLock);
+		if (PendingRequests.size() >= 512) return Result::Busy;
+		id = ++RequestSeq;
+		if (id == 0) id = ++RequestSeq;
+		PendingRequests[id] = { done, user, body.kind, body.runtimeId, GetTickCount64() };
+	}
+	if (!SendParts(id, blob, [&](const void* part, std::uint32_t n) { return NetApi->sendToHost(Context, Channel, MsgReqPart, part, n) == Net::Result::Success; })) {
+		std::lock_guard guard(ReqLock);
+		PendingRequests.erase(id);
+		Log(true, "requests: %s of item %u: could not send it to the hosting game", Req::KindName(body.kind), body.runtimeId);
+		return Result::Failed;
+	}
+	return Result::Success;
+}
+
+ReqBody DestinationBody(std::uint8_t kind, std::uint32_t runtimeId, const D2RL::Items::ItemDestination& d) {
+	return { .kind = kind, .runtimeId = runtimeId, .container = static_cast<std::uint32_t>(d.container), .placement = static_cast<std::uint32_t>(d.placement), .x = d.x, .y = d.y,
+		     .stashPage = d.structSize > offsetof(D2RL::Items::ItemDestination, sharedStashPage) ? d.sharedStashPage : 0 };
+}
+
+auto __cdecl RequestCreateFromSave(AreaHandle handle, const D2RL::Items::ItemCreateSpec* spec, const std::uint8_t* bytes, std::uint32_t byteCount, PageHost::RequestDone done, void* user) noexcept
+    -> Result {
+	if (!spec || spec->structSize < offsetof(D2RL::Items::ItemCreateSpec, destination) + sizeof(D2RL::Items::ItemDestination) || !bytes || byteCount < 8) return Result::InvalidArgument;
+	ReqBody body       = DestinationBody(Req::Create, 0, spec->destination);
+	body.flags         = spec->flags;
+	body.code          = spec->code;
+	body.quality       = static_cast<std::uint32_t>(spec->quality);
+	body.qualityRecordId = spec->qualityRecordId;
+	body.itemLevel     = spec->itemLevel;
+	body.stateFlags    = spec->stateFlags;
+	return SendRequest(handle, body, bytes, byteCount, done, user);
+}
+
+auto __cdecl RequestSaveItem(AreaHandle handle, std::uint32_t runtimeId, PageHost::RequestDone done, void* user) noexcept -> Result {
+	return runtimeId ? SendRequest(handle, { .kind = Req::Save, .runtimeId = runtimeId }, nullptr, 0, done, user) : Result::InvalidArgument;
+}
+
+auto __cdecl RequestMoveItem(AreaHandle handle, std::uint32_t runtimeId, const D2RL::Items::ItemDestination* destination, PageHost::RequestDone done, void* user) noexcept -> Result {
+	if (!runtimeId || !destination || destination->structSize < offsetof(D2RL::Items::ItemDestination, sharedStashPage)) return Result::InvalidArgument;
+	return SendRequest(handle, DestinationBody(Req::Move, runtimeId, *destination), nullptr, 0, done, user);
+}
+
+auto __cdecl RequestDestroyItem(AreaHandle handle, std::uint32_t runtimeId, D2RL::Items::SocketedItemPolicy socketed, PageHost::RequestDone done, void* user) noexcept -> Result {
+	if (!runtimeId) return Result::InvalidArgument;
+	return SendRequest(handle, { .kind = Req::Destroy, .runtimeId = runtimeId, .socketed = static_cast<std::uint32_t>(socketed) }, nullptr, 0, done, user);
+}
+
 const PageHost::Service Service {
 	.serviceSize    = sizeof(PageHost::Service),
 	.serviceVersion = PageHost::ServiceVersion,
@@ -2152,6 +2872,11 @@ const PageHost::Service Service {
 	.createItem     = CreateItem,
 	.moveItems      = MoveItems,
 	.destroyItem    = DestroyItem,
+	.itemsWhere            = ItemsWhere,
+	.requestCreateFromSave = RequestCreateFromSave,
+	.requestSaveItem       = RequestSaveItem,
+	.requestMoveItem       = RequestMoveItem,
+	.requestDestroyItem    = RequestDestroyItem,
 };
 
 // ---- console ----
@@ -2311,6 +3036,39 @@ void RegisterPanels() {
 	}
 }
 
+// Where the host keeps its files: Saved Games\Diablo II Resurrected\Player Page Host\<mod>
+// (<mod> from ...\mods\<mod>\d2rloader\..., "base" without a mod), made when
+// missing. A mod manager rebuilds the mod's folder, so not there.
+std::wstring DataFolder(const std::wstring& config) {
+	std::wstring mod = L"base";
+	std::wstring lower = config;
+	for (auto& c : lower) c = static_cast<wchar_t>(towlower(c));
+	if (const auto at = lower.rfind(L"\\mods\\"); at != std::wstring::npos) {
+		const auto start = at + 6, end = config.find_first_of(L"\\/", start);
+		if (end != std::wstring::npos && end > start) mod = config.substr(start, end - start);
+	}
+	PWSTR       saved = nullptr;
+	std::wstring root;
+	static const GUID SavedGames { 0x4C5C32FF, 0xBB9D, 0x43B0, { 0xB5, 0xB4, 0x2D, 0x72, 0xE5, 0x4E, 0xAA, 0xA4 } }; // FOLDERID_SavedGames
+	if (SUCCEEDED(SHGetKnownFolderPath(SavedGames, 0, nullptr, &saved)) && saved) root = saved;
+	if (saved) CoTaskMemFree(saved);
+	if (root.empty()) {
+		wchar_t profile[MAX_PATH] {};
+		if (GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH)) root = std::wstring(profile) + L"\\Saved Games";
+	}
+	if (root.empty()) return {};
+	std::wstring path = root;
+	for (const std::wstring& part : { std::wstring(L"Diablo II Resurrected"), std::wstring(L"Player Page Host"), mod }) {
+		path += L"\\" + part;
+		(void)CreateDirectoryW(path.c_str(), nullptr);
+	}
+	if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+		Log(true, "could not make %ls: the area places stay beside the config", path.c_str());
+		return {};
+	}
+	return path + L"\\";
+}
+
 bool Load() {
 	Inventory   = Query<D2RL::InventoryService>("inventory");
 	PanelApi    = Query<D2RL::PanelService>("panel");
@@ -2329,13 +3087,30 @@ bool Load() {
 	if (!NativesOk) Log(true, "this game build isn't the one the area limits were made for (Steam 3.3.93787 / 94995): area panels will show the whole page");
 
 	if (Context->pluginConfigPath) {
-		PlacesPath       = Context->pluginConfigPath;
-		const auto slash = PlacesPath.find_last_of(L"\\/");
-		const std::wstring folder = slash == std::wstring::npos ? std::wstring() : PlacesPath.substr(0, slash + 1);
-		PlacesPath       = folder + L"aaa-player-page-host-areas.txt";
+		const std::wstring config = Context->pluginConfigPath;
+		const auto         slash  = config.find_last_of(L"\\/");
+		const std::wstring folder = slash == std::wstring::npos ? std::wstring() : config.substr(0, slash + 1);
 		OpenOwnLog(folder);
 		Log(false, "Player Page Host %s, process %lu", PluginVersion, GetCurrentProcessId());
-		ItemsPath        = folder + L"aaa-player-page-host-items.txt";
+		std::wstring data = DataFolder(config);
+		if (data.empty()) data = folder;
+		PlacesPath              = data + L"aaa-player-page-host-areas.txt";
+		ItemsPath               = data + L"aaa-player-page-host-items.txt";
+		// Up to 1.0.1 the files were beside the config: moved once.
+		for (const auto& [old, now] : { std::pair { folder + L"aaa-player-page-host-areas.txt", PlacesPath }, std::pair { folder + L"aaa-player-page-host-items.txt", ItemsPath } })
+			if (old != now && GetFileAttributesW(old.c_str()) != INVALID_FILE_ATTRIBUTES) {
+				if (GetFileAttributesW(now.c_str()) == INVALID_FILE_ATTRIBUTES && CopyFileW(old.c_str(), now.c_str(), TRUE)) {
+					(void)DeleteFileW(old.c_str());
+					Log(false, "moved %ls to %ls", old.c_str(), now.c_str());
+				} else if (GetFileAttributesW(now.c_str()) != INVALID_FILE_ATTRIBUTES) {
+					(void)DeleteFileW(old.c_str()); // the one in Saved Games is the real one
+					Log(false, "%ls left from an older version: removed (%ls is used)", old.c_str(), now.c_str());
+				} else Log(true, "could not move %ls to %ls (error %lu): it is read from where it is", old.c_str(), now.c_str(), GetLastError());
+			}
+		for (std::wstring* path : { &PlacesPath, &ItemsPath })
+			if (GetFileAttributesW(path->c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW((folder + path->substr(path->find_last_of(L"\\") + 1)).c_str()) != INVALID_FILE_ATTRIBUTES)
+				*path = folder + path->substr(path->find_last_of(L"\\") + 1);
+		Log(false, "area places: %ls", PlacesPath.c_str());
 		LoadPlaces();
 		LoadItems();
 	}

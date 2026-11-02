@@ -193,7 +193,29 @@ Host->destroyItem(Area, runtimeId, D2RL::Items::SocketedItemPolicy::DestroyConte
 
 In a TCP/IP game only the hosting player's game may change items: on a player who joined another
 player's game, `createItem`, `moveItems`, `destroyItem` and `moveItem` fail (`itemResult` says why).
-Drops into your area work there, through your policy.
+Drops into your area work there, through your policy. For the rest, use the requests below.
+
+**Requests** (host 1.0.2 or later; check `PageHost::HasRequests(lease)` first). They are done by
+the game that runs the items: yours in single player or when you host, the hosting game's host
+when you joined someone else's game (the hosting player needs Player Page Host, not your plugin).
+Call them from the UI thread. Your callback runs once, later, on the UI thread.
+
+```cpp
+void __cdecl Made(void* user, const PageHost::RequestAnswer* answer) noexcept {
+	if (answer->result == PageHost::Result::Success) { /* answer->runtimeId is the new item */ }
+}
+Host->requestCreateFromSave(Area, &spec, bytes, byteCount, Made, nullptr); // save bytes -> item
+Host->requestSaveItem(Area, runtimeId, Saved, nullptr);     // item -> answer->bytes, byteCount
+Host->requestMoveItem(Area, runtimeId, &destination, Moved, nullptr); // page, inventory, stash, cursor
+Host->requestDestroyItem(Area, runtimeId, D2RL::Items::SocketedItemPolicy::DestroyContents, Gone, nullptr);
+```
+
+`itemsWhere()` tells where items are made: `Local`, `Remote` (joined, the hosting game does it),
+`RemoteNoHost` (joined a game whose hosting player has no host or an older one: requests answer
+`Unsupported`) or `Unknown` (the first seconds of a game: requests answer `Busy`, try again).
+On a joined player, an item made or moved shows a moment after the answer. A request with no answer
+in 10 s, or whose game ended, answers `TimedOut`. The hosting game makes items from the bytes a
+joined player sends, as from a save file.
 
 `itemResult` gets D2RLoader's `Items::Result` whenever the call reached D2RLoader. Moves to other
 containers (inventory, stash) in the same transaction are passed through unchanged.

@@ -1,5 +1,30 @@
 # Player Page Host: release texts
 
+## 1.0.2
+
+### Patch notes
+
+```
+**Player Page Host 1.0.2**
+
+**New**
+
+* Plugins can ask the host to make, save, move and destroy items. In a joined TCP/IP game the hosting player's host does it, so Grail On! storage works for joined players (the hosting player needs Player Page Host 1.0.2, not Grail On!).
+
+**Fixed**
+
+* Areas could move after mods were reinstalled with D2RMM, which deleted the host's files: they are now kept in Saved Games\Diablo II Resurrected\Player Page Host, and older files are moved there once.
+* When areas must be packed again, those holding items now keep their places whenever they can.
+```
+
+### GitHub release
+
+- Tag: `aaa-player-page-host-v1.0.2`
+- Title: `Player Page Host 1.0.2`
+- Asset: `aaa-player-page-host-1.0.2.zip`
+
+Body: the patch notes above, then the 1.0.0 body below from "### Requirements" on.
+
 ## 1.0.1
 
 ### Patch notes
