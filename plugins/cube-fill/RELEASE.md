@@ -9,6 +9,10 @@
 
 * Every setting can be changed in game with I Hate TOMLs. Display, picture background, show empty and show full apply at once; show, corner and font size apply after a restart.
 * The zip holds the DLL alone, named cube-fill.zip. The default settings are built in and written on first launch.
+
+**Fixed**
+
+* The game code check no longer uses ReadProcessMemory, which made one antivirus flag the DLL.
 ```
 
 ## GitHub release

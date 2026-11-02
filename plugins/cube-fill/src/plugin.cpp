@@ -591,12 +591,24 @@ Fn At(std::uint64_t rva) {
 }
 constexpr const char* SourceName = "cube-fill";
 
+// Reads the game's own memory after checking it is committed and readable
+// (ReadProcessMemory made one antivirus heuristic call a DLL an injector).
+bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
+	if (address == 0) return false;
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+	if (address + size > end) return false;
+	std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	return true;
+}
+
 bool NativesMatch() noexcept {
 	for (const auto& fn : Natives) {
 		std::uint8_t code[16] {};
-		SIZE_T       copied = 0;
-		if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(Base + fn.rva), code, sizeof(code), &copied) || copied != sizeof(code) ||
-		    std::memcmp(code, fn.bytes, sizeof(code)) != 0) {
+		if (!Read(Base + fn.rva, code, sizeof(code)) || std::memcmp(code, fn.bytes, sizeof(code)) != 0) {
 			Log(true, "item pictures: game code at D2R+0x%llX differs from 3.3.94995 (another plugin hooks it, or another game build); pictures off",
 			    static_cast<unsigned long long>(fn.rva));
 			return false;
