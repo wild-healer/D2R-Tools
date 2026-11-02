@@ -73,7 +73,6 @@
 #include <windows.h>
 #include <shlobj.h>
 #ifdef _WIN32
-#include <wincodec.h>
 #endif
 
 #include <algorithm>
@@ -97,11 +96,25 @@
 #include <thread>
 #include <tuple>
 #include <vector>
+#include "png_inflate.h"
+
+// The stash frame's PNGs, compiled into the DLL's read-only data (not
+// resources: see png_inflate.h).
+asm(".section .rdata,\"dr\"\n"
+    ".balign 16\n"
+    "grailon_panel_png: .incbin \"art/stash_tall.png\"\n"
+    "grailon_panel_png_end:\n"
+    ".balign 16\n"
+    "grailon_panel_lowend_png: .incbin \"art/stash_tall.lowend.png\"\n"
+    "grailon_panel_lowend_png_end:\n"
+    ".globl grailon_panel_png, grailon_panel_png_end, grailon_panel_lowend_png, grailon_panel_lowend_png_end\n"
+    ".text\n");
+extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], grailon_panel_lowend_png[], grailon_panel_lowend_png_end[];
 
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.1.3";
+constexpr const char* PluginVersion = "1.1.4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -5812,20 +5825,38 @@ SocketItemFn   SocketItem {};
 FreeItemFn     FreeItem {};
 std::uintptr_t CoreModule {};
 
+// Copies `size` bytes of this process at `address`, false when the memory is
+// not readable (VirtualQuery, not ReadProcessMemory: antivirus scanners count
+// that one against a DLL).
+bool ReadOwn(const void* address, void* out, std::size_t size) {
+	if (!address) return false;
+	const auto* from = static_cast<const unsigned char*>(address);
+	std::size_t done = 0;
+	while (done < size) {
+		MEMORY_BASIC_INFORMATION info {};
+		if (!VirtualQuery(from + done, &info, sizeof(info)) || info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD))
+		    || !(info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+			return false;
+		const auto*       regionEnd = static_cast<const unsigned char*>(info.BaseAddress) + info.RegionSize;
+		const std::size_t n         = std::min<std::size_t>(size - done, static_cast<std::size_t>(regionEnd - (from + done)));
+		std::memcpy(static_cast<unsigned char*>(out) + done, from + done, n);
+		done += n;
+	}
+	return true;
+}
+
 template <std::size_t N>
 bool BytesAt(std::uintptr_t address, const std::uint8_t (&bytes)[N]) {
 	std::uint8_t code[N] {};
-	SIZE_T       copied = 0;
-	return address && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), code, N, &copied) && copied == N && !std::memcmp(code, bytes, N);
+	return address && ReadOwn(reinterpret_cast<const void*>(address), code, N) && !std::memcmp(code, bytes, N);
 }
 
 bool LocateStore() {
 	const auto exe = static_cast<std::uintptr_t>(Context->exeBase);
 	CoreModule     = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(L"D2RCore.dll"));
 	std::uint64_t slotRva = 0;
-	SIZE_T        copied  = 0;
 	const bool    core    = CoreModule && BytesAt(CoreModule + Store::CoreCall, Store::CoreCallBytes)
-	                && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(CoreModule + Store::CoreSlot + 8), &slotRva, 8, &copied) && slotRva == Store::CreateItem;
+	                && ReadOwn(reinterpret_cast<const void*>(CoreModule + Store::CoreSlot + 8), &slotRva, 8) && slotRva == Store::CreateItem;
 	const auto thunk = [&](std::uint64_t rva) { const auto* code = reinterpret_cast<const std::uint8_t*>(exe + rva); return code[0] == 0xFF && code[1] == 0x25; };
 	const bool game  = thunk(Store::SaveWriter) && thunk(Store::HeaderReader) && BytesAt(exe + Store::SaveLoader, Store::SaveLoaderBytes) && BytesAt(exe + Store::CreateItem, Store::CreateItemBytes)
 	                && BytesAt(exe + Store::UnitById, Store::UnitByIdBytes) && BytesAt(exe + Store::SocketItem, Store::SocketItemBytes);
@@ -6017,10 +6048,9 @@ std::string CharacterName() {
 	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
 	void*      unit = reinterpret_cast<PlayerUnitFn>(base + Sound::PlayerUnit)(reinterpret_cast<LocalIndexFn>(base + Sound::LocalIndex)());
 	char       name[17] {};
-	SIZE_T     copied = 0;
 	void*      data   = nullptr;
-	if (!unit || !ReadProcessMemory(GetCurrentProcess(), static_cast<const char*>(unit) + 0x10, &data, sizeof(data), &copied) || !data
-	    || !ReadProcessMemory(GetCurrentProcess(), data, name, 16, &copied))
+	if (!unit || !ReadOwn(static_cast<const char*>(unit) + 0x10, &data, sizeof(data)) || !data
+	    || !ReadOwn(data, name, 16))
 		return {};
 	return name;
 }
@@ -6032,10 +6062,9 @@ bool Hardcore() {
 	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
 	void*      unit = reinterpret_cast<PlayerUnitFn>(base + Sound::PlayerUnit)(reinterpret_cast<LocalIndexFn>(base + Sound::LocalIndex)());
 	char       name[17] {};
-	SIZE_T     copied = 0;
 	void*      data   = nullptr;
-	if (!unit || !ReadProcessMemory(GetCurrentProcess(), static_cast<const char*>(unit) + 0x10, &data, sizeof(data), &copied) || !data
-	    || !ReadProcessMemory(GetCurrentProcess(), data, name, 16, &copied))
+	if (!unit || !ReadOwn(static_cast<const char*>(unit) + 0x10, &data, sizeof(data)) || !data
+	    || !ReadOwn(data, name, 16))
 		return false;
 	for (const char c : std::string(name))
 		if (static_cast<unsigned char>(c) < 32) return false;
@@ -10873,50 +10902,19 @@ D2RL::ConsoleCommandResult __cdecl OnCommand(D2R::Game::Client*, const D2RL::Con
 }
 
 // ---- packaged art ----
-// Expanded Stash Plus's stash frame ships inside the plugin (PNG resources,
+// Expanded Stash Plus's stash frame ships inside the plugin (PNGs compiled in,
 // full and low-end size), decoded at load and registered as the panel sprite.
 
-constexpr int PanelArtId = 101, PanelArtLowEndId = 102;
-
-bool DecodePng(int id, Picture& out) {
-#ifdef _WIN32
-	HMODULE module {};
-	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&DecodePng), &module)) return false;
-	HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10)); // RT_RCDATA
-	if (!resource) return false;
-	auto*       bytes = static_cast<BYTE*>(LockResource(LoadResource(module, resource)));
-	const DWORD size  = SizeofResource(module, resource);
-	if (!bytes || !size) return false;
-	const HRESULT          com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-	IWICImagingFactory*    factory {};
-	IWICStream*            stream {};
-	IWICBitmapDecoder*     decoder {};
-	IWICBitmapFrameDecode* frame {};
-	IWICFormatConverter*   converter {};
-	UINT                   width = 0, height = 0;
-	bool                   done  = SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))
-	           && SUCCEEDED(factory->CreateStream(&stream)) && SUCCEEDED(stream->InitializeFromMemory(bytes, size))
-	           && SUCCEEDED(factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) && SUCCEEDED(decoder->GetFrame(0, &frame))
-	           && SUCCEEDED(factory->CreateFormatConverter(&converter))
-	           && SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))
-	           && SUCCEEDED(converter->GetSize(&width, &height));
-	if (done) {
-		out = { static_cast<int>(width), static_cast<int>(height), std::vector<unsigned char>(static_cast<std::size_t>(width) * height * 4) };
-		done = SUCCEEDED(converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(out.rgba.size()), out.rgba.data()));
-	}
-	for (IUnknown* object : std::initializer_list<IUnknown*> { converter, frame, decoder, stream, factory })
-		if (object) object->Release();
-	if (SUCCEEDED(com)) CoUninitialize();
-	return done;
-#else
-	(void)id, (void)out;
-	return false;
-#endif
+bool DecodePng(const unsigned char* begin, const unsigned char* end, Picture& out) {
+	int width = 0, height = 0;
+	if (!PngLite::Decode(begin, static_cast<std::size_t>(end - begin), width, height, out.rgba)) return false;
+	out.width = width, out.height = height;
+	return true;
 }
 
 bool RegisterPanelArt() {
 	Picture full, lowEnd;
-	if (!DecodePng(PanelArtId, full) || !DecodePng(PanelArtLowEndId, lowEnd)) return false;
+	if (!DecodePng(grailon_panel_png, grailon_panel_png_end, full) || !DecodePng(grailon_panel_lowend_png, grailon_panel_lowend_png_end, lowEnd)) return false;
 	const std::string path = "data/hd/global/ui/d2rloader/grail-on/panel";
 	return RegisterResource(path + ".sprite", SpriteFile({ full })) && RegisterResource(path + ".lowend.sprite", SpriteFile({ lowEnd }));
 }

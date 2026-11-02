@@ -12,7 +12,7 @@ out=$here/build
 mkdir -p "$out"
 x86_64-w64-mingw32-windres -I"$sdk/include" -I"$here" -I"$here/src" "$here/src/plugin.rc" -O coff -o "$out/plugin.res"
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s \
-  -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion -lshell32 -lole32 -luuid -lwindowscodecs \
+  -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion -lshell32 -lole32 -luuid -Wa,-I"$here/src" \
   -o "$out/d2rl-grail-on.dll"
 cp "$out/d2rl-grail-on.dll" "$here/"
 # D2RLoader package: only the DLL (icon credits are embedded as a resource). No toml: the settings page writes its own file in Saved Games.

@@ -26,8 +26,5 @@ BEGIN
   END
 END
 
-// Expanded Stash Plus's stash frame (PANEL/Stash/BasicStash_Expanded), full and low-end size.
-101 RCDATA "art/stash_tall.png"
-102 RCDATA "art/stash_tall.lowend.png"
 // Icon attribution (CC BY 3.0), kept inside the DLL so the package is the DLL alone.
 103 RCDATA "art/ICONS-CREDITS.txt"

@@ -1,3 +1,13 @@
+# Grail On! 1.1.4: patch notes
+
+```
+**Grail On! 1.1.4**
+
+**Fixed**
+
+* Browsers and antivirus scanners no longer flag the download: the stash art is built into the plugin's code instead of being unpacked with Windows' image tools.
+```
+
 # Grail On! 1.1.3: patch notes
 
 ```
