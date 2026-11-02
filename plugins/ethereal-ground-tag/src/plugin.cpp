@@ -36,6 +36,7 @@
 // Anything else leaves the plugin loaded but inactive.
 
 #include <D2RLPlugin/api.h>
+#include "i_hate_tomls_client.h"
 #include <windows.h>
 
 #include <algorithm>
@@ -45,6 +46,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -99,7 +101,7 @@ asm(".intel_syntax noprefix\n"
 namespace {
 
 constexpr const char* PluginId      = "ethereal-ground-tag";
-constexpr const char* PluginVersion = "1.0.3";
+constexpr const char* PluginVersion = "1.0.4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -150,12 +152,18 @@ struct Settings {
 	bool                     enabled = true;
 	std::string              text    = "Eth";
 	bool                     before  = true;
+	std::string              brackets = "brackets"; // brackets, parentheses or none
 	std::string              open    = "[";      // brackets around the tag, or empty
 	std::string              close   = "]";
+	std::string              bracketColorName = "white";
+	std::string              tagColorName     = "gold";
 	std::string              bracketColor = "0"; // color code character, or empty = same as item
 	std::string              tagColor     = "4";
-	std::vector<std::string> versions { "3.3" };
 } Config;
+
+// Settings change from I Hate TOMLs on the main thread while labels are tagged.
+std::mutex       ConfigLock;
+std::atomic_bool Enabled { true };
 
 std::string GameVersion;  // e.g. 3.3.93787
 std::string LocateMethod; // how the writer was found
@@ -173,9 +181,16 @@ void Log(bool warn, const char* format, ...) noexcept {
 
 // ---- guarded memory access ----
 
+// Copies size bytes at address after checking they are committed and readable
+// (ReadProcessMemory made one antivirus heuristic call the DLL an injector).
 bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
-	SIZE_T copied = 0;
-	return address != 0 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), output, size, &copied) && copied == size;
+	MEMORY_BASIC_INFORMATION info {};
+	if (!address || VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	if (address + size > reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize) return false;
+	std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	return true;
 }
 
 template <typename T>
@@ -259,6 +274,7 @@ Outcome TagText(void* unit, std::uintptr_t text, std::size_t capacity) noexcept;
 
 // path: 0 writer, 1 measure A, 2 measure B (ground-label records), 3 hover label (plain text).
 void Count(std::size_t path, void* unit, void* output, std::uint32_t bufferSize) noexcept {
+	if (!Enabled.load(std::memory_order_relaxed)) return;
 	Calls[path].fetch_add(1, std::memory_order_relaxed);
 	const Outcome outcome = path == 3 ? TagText(unit, reinterpret_cast<std::uintptr_t>(output), bufferSize) : TagIfEthereal(unit, output, bufferSize);
 	const std::uint32_t seen = Outcomes[outcome].fetch_add(1, std::memory_order_relaxed);
@@ -304,18 +320,23 @@ Outcome TagText(void* unit, std::uintptr_t text, std::size_t capacity) noexcept 
 	const auto* end = static_cast<const char*>(std::memchr(current.data(), '\0', capacity));
 	if (!end || end == current.data()) return NoText;
 	const std::string_view name(current.data(), static_cast<std::size_t>(end - current.data()));
+	Settings config;
+	{
+		std::lock_guard lock(ConfigLock);
+		config = Config;
+	}
 
 	// [bracket color]open [tag color]text [bracket color]close, then the item's color again.
 	// Without the item's color the name could not be colored back, so the tag stays plain.
 	const std::string item    = ItemColor(name, itemData);
-	const std::string bracket = item.empty() || Config.bracketColor.empty() ? item : ColorCode(Config.bracketColor[0]);
-	std::string tag = item.empty() || Config.tagColor.empty() ? item : ColorCode(Config.tagColor[0]);
-	tag.append(Config.text);
-	if (!Config.open.empty()) tag = bracket + Config.open + tag + bracket + Config.close;
+	const std::string bracket = item.empty() || config.bracketColor.empty() ? item : ColorCode(config.bracketColor[0]);
+	std::string tag = item.empty() || config.tagColor.empty() ? item : ColorCode(config.tagColor[0]);
+	tag.append(config.text);
+	if (!config.open.empty()) tag = bracket + config.open + tag + bracket + config.close;
 	if (name.find(tag) != std::string_view::npos) return AlreadyTagged;
 
 	std::string tagged;
-	if (Config.before) {
+	if (config.before) {
 		const std::size_t at = LeadingColorCodes(name);
 		tagged.append(name.substr(0, at)).append(tag).append(item).append(" ").append(name.substr(at));
 	} else {
@@ -719,13 +740,6 @@ std::string ReadGameVersion() noexcept {
 	return version;
 }
 
-std::string MajorMinor(std::string_view version) noexcept {
-	const auto first = version.find('.');
-	if (first == std::string_view::npos) return std::string(version);
-	const auto second = version.find('.', first + 1);
-	return std::string(version.substr(0, second));
-}
-
 // ---- config ----
 
 std::string Trim(std::string_view text) {
@@ -753,6 +767,105 @@ bool ParseString(std::string_view text, std::size_t& at, std::string& output) {
 	return false;
 }
 
+// Applies one setting from its TOML value ("Eth", true, ["3.3"]); false with a reason when refused.
+bool Apply(const std::string& key, const std::string& value, std::string& error) {
+	std::lock_guard lock(ConfigLock);
+	std::size_t     at = 0;
+	std::string     parsed;
+	if (key == "enabled") {
+		if (value.rfind("true", 0) != 0 && value.rfind("false", 0) != 0) return error = "not true or false", false;
+		Config.enabled = value.rfind("true", 0) == 0;
+		Enabled.store(Config.enabled, std::memory_order_relaxed);
+		return true;
+	}
+	if (key == "versions") return true; // removed in 1.0.4, ignored in older config files
+	if (!ParseString(value, at, parsed)) return error = "not a quoted string", false;
+	if (key == "text") {
+		if (parsed.empty() || parsed.size() >= 64) return error = "must be 1 to 63 characters", false;
+		Config.text = parsed;
+	} else if (key == "position") Config.before = parsed != "after" && parsed != "suffix";
+	else if (key == "brackets") {
+		if (parsed == "parentheses" || parsed == "parenthesis") Config.brackets = "parentheses", Config.open = "(", Config.close = ")";
+		else if (parsed == "none") Config.brackets = "none", Config.open.clear(), Config.close.clear();
+		else Config.brackets = "brackets", Config.open = "[", Config.close = "]";
+	} else if (key == "bracket_color" || key == "tag_color") {
+		std::string& color = key == "tag_color" ? Config.tagColor : Config.bracketColor;
+		std::string& name  = key == "tag_color" ? Config.tagColorName : Config.bracketColorName;
+		if (parsed == "item") color.clear();
+		else {
+			const auto found = std::find_if(Colors.begin(), Colors.end(), [&](const auto& entry) { return entry.first == parsed; });
+			if (found == Colors.end()) return error = "unknown color", false;
+			color = std::string(1, found->second);
+		}
+		name = parsed;
+	} else return error = "unknown setting", false;
+	return true;
+}
+
+std::string Quote(std::string_view text) {
+	std::string quoted = "\"";
+	for (const char c : text) {
+		if (c == '"' || c == '\\') quoted += '\\';
+		if (c == '\n') quoted += "\\n";
+		else if (c == '\t') quoted += "\\t";
+		else quoted += c;
+	}
+	return quoted + '"';
+}
+
+// The current value of a setting as a TOML value, or empty for an unknown key.
+std::string ValueOf(const std::string& key) {
+	std::lock_guard lock(ConfigLock);
+	if (key == "enabled") return Config.enabled ? "true" : "false";
+	if (key == "text") return Quote(Config.text);
+	if (key == "position") return Config.before ? "\"before\"" : "\"after\"";
+	if (key == "brackets") return Quote(Config.brackets);
+	if (key == "bracket_color") return Quote(Config.bracketColorName);
+	if (key == "tag_color") return Quote(Config.tagColorName);
+	return {};
+}
+
+// The config file, as the embedded default writes it, with the current values.
+std::string Render() {
+	return R"(# Ethereal Ground Tag
+#
+# Adds a tag to the name of ethereal items lying on the ground, e.g.
+# "[Eth] Colossus Voulge". D2RLoader writes this file to
+# d2rloader/config/ethereal-ground-tag.toml on first launch. Every setting can
+# also be changed in game with I Hate TOMLs, and applies at once.
+
+[ethereal-ground-tag]
+enabled = )" + ValueOf("enabled") + R"(
+
+# Text of the tag. A space is put between the tag and the name.
+text = )" + ValueOf("text") + R"(
+
+# "before" or "after" the name.
+position = )" + ValueOf("position") + R"(
+
+# Around the tag: "brackets" [Eth], "parentheses" (Eth) or "none".
+brackets = )" + ValueOf("brackets") + R"(
+
+# Colors of the brackets and of the tag text. "item" = same color as the
+# item's name. Available colors:
+#   white, white2, gray, gray2, gray3, black, black2,
+#   lightred, red, red2, darkred,
+#   orange, orange2, orange3, orange4,
+#   lightgold, lightgold2, gold, gold2, yellow, yellow2,
+#   green, green2, green3, green4, darkgreen, darkgreen2,
+#   turquoise, skyblue, lightblue, lightblue2, blue, blue2,
+#   lightpink, pink, purple
+# "gold" is the gold of unique item names, "gray" the gray of ethereal and
+# socketed item names.
+bracket_color = )" + ValueOf("bracket_color") + R"(
+tag_color = )" + ValueOf("tag_color") + "\n";
+}
+
+void SaveConfig() {
+	const std::string toml = Render();
+	if (!Context->WriteConfig(toml.c_str())) Log(true, "config: could not write the config file");
+}
+
 void LoadConfig() {
 	(void)Context->EnsureConfig();
 	std::uint32_t required = 0;
@@ -776,32 +889,70 @@ void LoadConfig() {
 		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
 		const std::string key   = Trim(std::string_view(line).substr(0, equals));
 		const std::string value = Trim(std::string_view(line).substr(equals + 1));
-		std::size_t at = 0;
-		std::string parsed;
-		if (key == "enabled") Config.enabled = value.rfind("false", 0) != 0;
-		else if (key == "text" && ParseString(value, at, parsed) && !parsed.empty() && parsed.size() < 64) Config.text = parsed;
-		else if (key == "position" && ParseString(value, at, parsed)) Config.before = parsed != "after" && parsed != "suffix";
-		else if (key == "brackets" && ParseString(value, at, parsed)) {
-			if (parsed == "parentheses" || parsed == "parenthesis") Config.open = "(", Config.close = ")";
-			else if (parsed == "none") Config.open.clear(), Config.close.clear();
-			else Config.open = "[", Config.close = "]";
-		} else if ((key == "bracket_color" || key == "tag_color") && ParseString(value, at, parsed)) {
-			std::string& color = key == "tag_color" ? Config.tagColor : Config.bracketColor;
-			if (parsed == "item") color.clear();
-			for (const auto& [colorName, code] : Colors)
-				if (parsed == colorName) color = std::string(1, code);
-		}
-		else if (key == "versions" && !value.empty() && value[0] == '[') {
-			std::vector<std::string> versions;
-			for (at = 1; at < value.size() && value[at] != ']';) {
-				if (value[at] == '"') {
-					if (!ParseString(value, at, parsed)) break;
-					versions.push_back(parsed);
-				} else ++at;
-			}
-			if (!versions.empty()) Config.versions = versions;
-		}
+		std::string       error;
+		if (!Apply(key, value, error)) Log(true, "config: %s = %s ignored (%s)", key.c_str(), value.c_str(), error.c_str());
 	}
+}
+
+// ---- I Hate TOMLs ----
+
+constexpr const char* ColorValues = R"(["item", "white", "white2", "gray", "gray2", "gray3", "black", "black2", "lightred", "red", "red2", "darkred", "orange", "orange2", "orange3", "orange4", "lightgold", "lightgold2", "gold", "gold2", "yellow", "yellow2", "green", "green2", "green3", "green4", "darkgreen", "darkgreen2", "turquoise", "skyblue", "lightblue", "lightblue2", "blue", "blue2", "lightpink", "pink", "purple"])";
+
+const std::string Schema = std::string(R"schema(title = "Ethereal Ground Tag"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Tag ethereal items"
+note = "On the names of ethereal items lying on the ground."
+[[setting]]
+key = "text"
+type = "string"
+label = "Tag text"
+note = "A space is put between the tag and the name."
+[[setting]]
+key = "position"
+type = "enum"
+label = "Position"
+values = ["before", "after"]
+labels = ["Before the name", "After the name"]
+[[setting]]
+key = "brackets"
+type = "enum"
+label = "Around the tag"
+values = ["brackets", "parentheses", "none"]
+labels = ["[Eth]", "(Eth)", "Nothing"]
+[[setting]]
+key = "bracket_color"
+type = "enum"
+label = "Bracket color"
+note = "item = the color of the item's name."
+values = )schema") + ColorValues + R"schema(
+[[setting]]
+key = "tag_color"
+type = "enum"
+label = "Tag color"
+note = "gold is the gold of unique names, gray the gray of ethereal ones."
+values = )schema" + ColorValues + "\n";
+
+PluginMenu::Connection Menu;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	std::string reason;
+	if (!Apply(key, Trim(value), reason)) {
+		std::snprintf(error, size, "%s", reason.c_str());
+		return false;
+	}
+	SaveConfig();
+	return true;
 }
 
 #ifdef ETH_TAG_DUMP
@@ -959,18 +1110,9 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 
 	LoadConfig();
 	GameVersion = ReadGameVersion();
-	const std::string majorMinor = MajorMinor(GameVersion);
-	Log(false, "Ethereal Ground Tag %s: game %s, text \"%s\" %s", PluginVersion, GameVersion.c_str(), Config.text.c_str(), Config.before ? "before the name" : "after the name");
-	if (!Config.enabled) {
-		Log(false, "disabled in config");
-		return true;
-	}
-	bool supported = false;
-	for (const auto& version : Config.versions) supported |= version == majorMinor;
-	if (!supported) {
-		Log(true, "inactive: game version %s is not in versions (edit the config to allow it)", majorMinor.c_str());
-		return true;
-	}
+	(void)Menu.Start(context, Schema.c_str(), MenuGet, MenuSet, nullptr);
+	Log(false, "Ethereal Ground Tag %s: game %s, text \"%s\" %s%s", PluginVersion, GameVersion.c_str(), Config.text.c_str(), Config.before ? "before the name" : "after the name",
+	    Config.enabled ? "" : ", turned off in its settings");
 	const bool ground = Base && LocateAndHook();
 	if (!ground && !HoverHooked) {
 		Log(true, "inactive: ground-label name writer not found or hook refused (%s)", LocateMethod.empty() ? "no match" : LocateMethod.c_str());
@@ -983,5 +1125,6 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	Menu.Stop();
 	Active.store(false, std::memory_order_release);
 }

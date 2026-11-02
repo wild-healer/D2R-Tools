@@ -1,8 +1,9 @@
 # Ethereal Ground Tag
 #
 # Adds a tag to the name of ethereal items lying on the ground, e.g.
-# "[Eth] Colossus Voulge". D2RLoader copies this file to
-# d2rloader/config/ethereal-ground-tag.toml on first launch; edit that copy.
+# "[Eth] Colossus Voulge". D2RLoader writes this file to
+# d2rloader/config/ethereal-ground-tag.toml on first launch. Every setting can
+# also be changed in game with I Hate TOMLs, and applies at once.
 
 [ethereal-ground-tag]
 enabled = true
@@ -29,7 +30,3 @@ brackets = "brackets"
 # socketed item names.
 bracket_color = "white"
 tag_color = "gold"
-
-# Game versions (major.minor) the plugin is allowed to hook. The build number
-# is ignored, so Steam and Battle.net builds of the same patch both work.
-versions = ["3.3"]

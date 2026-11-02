@@ -4,11 +4,11 @@ D2RLoader plugin that adds a tag such as `[Eth]` to the name of ethereal items l
 
 ## Install
 
-Get Ethereal Ground Tag from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/ethereal-ground-tag). Its zip holds the DLL and the default TOML at its root, ready to load in D2RMM.
+Get Ethereal Ground Tag from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/ethereal-ground-tag). Its zip, `ethereal-ground-tag.zip`, holds the DLL alone, ready to load in D2RMM.
 
 By hand: copy `d2rl-ethereal-ground-tag.dll` to `<game>/d2rloader/plugins/` (works for every mod), or to `<game>/mods/<mod>/d2rloader/plugins/` for one mod only. Remove the DLL to uninstall.
 
-The default settings are built into the DLL. On first launch D2RLoader writes them to `d2rloader/config/ethereal-ground-tag.toml` (same as [ethereal-ground-tag.toml](ethereal-ground-tag.toml)), which you then edit:
+The default settings are built into the DLL. On first launch D2RLoader writes them to `d2rloader/config/ethereal-ground-tag.toml` (same as [ethereal-ground-tag.toml](ethereal-ground-tag.toml)), which you can edit. With [I Hate TOMLs](../i-hate-tomls) loaded, every setting can also be changed in game, and applies at once:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -18,7 +18,6 @@ The default settings are built into the DLL. On first launch D2RLoader writes th
 | `brackets` | `"brackets"` | `"brackets"` for `[Eth]`, `"parentheses"` for `(Eth)`, or `"none"`. |
 | `bracket_color` | `"white"` | Color of the brackets. |
 | `tag_color` | `"gold"` | Color of the tag text. `gold` is the gold of unique item names, `gray` the gray of ethereal and socketed ones. |
-| `versions` | `["3.3"]` | Game major.minor versions allowed to hook. The build number is ignored, so Steam (3.3.93787) and Battle.net (3.3.93847) both pass. |
 
 Colors: `item` (same color as the item's name), `white`, `white2`, `gray`, `gray2`, `gray3`, `black`, `black2`, `lightred`, `red`, `red2`, `darkred`, `orange`, `orange2`, `orange3`, `orange4`, `lightgold`, `lightgold2`, `gold`, `gold2`, `yellow`, `yellow2`, `green`, `green2`, `green3`, `green4`, `darkgreen`, `darkgreen2`, `turquoise`, `skyblue`, `lightblue`, `lightblue2`, `blue`, `blue2`, `lightpink`, `pink`, `purple`. Colors are written with the marker D2R uses in memory for `ÿc` codes (U+E07E), the same one D2RLoader uses for its socket counts. After the tag, the name is colored back with the item's own color code, or the color of its quality (ethereal white items are gray); if neither is known, the tag is left uncolored.
 
