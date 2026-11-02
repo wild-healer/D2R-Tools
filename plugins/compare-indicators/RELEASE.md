@@ -9,6 +9,10 @@
 
 * Every setting can be changed in game with I Hate TOMLs and applies at once, enabled included.
 * The download is now named compare-indicators.zip, without a version.
+
+**Fixed**
+
+* The plugin no longer reads the game's code through ReadProcessMemory, which made an antivirus flag the DLL.
 ```
 
 ## GitHub release
@@ -25,6 +29,9 @@ Body:
 ### New
 - Every setting can be changed in game with I Hate TOMLs and applies at once, enabled included.
 - The download is now named `compare-indicators.zip`, without a version.
+
+### Fixed
+- The plugin no longer reads the game's code through ReadProcessMemory, which made an antivirus flag the DLL.
 
 ### Install
 Load `compare-indicators.zip` in D2RMM, or copy `d2rl-compare-indicators.dll` to `<game>/d2rloader/plugins/`. Settings are unchanged.

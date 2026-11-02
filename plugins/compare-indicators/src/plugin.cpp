@@ -1623,11 +1623,17 @@ bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint3
 	return true;
 }
 
+// Whether the game's code at rva is these bytes, read after checking it is
+// committed and readable (ReadProcessMemory made one antivirus heuristic call
+// the DLL an injector).
 bool Matches(std::uint64_t rva, const std::uint8_t* bytes, std::size_t size) {
-	SIZE_T                    copied = 0;
-	std::vector<std::uint8_t> code(size);
-	if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(Base + rva), code.data(), size, &copied) || copied != size) return false;
-	return std::memcmp(code.data(), bytes, size) == 0;
+	const std::uintptr_t     address = Base + rva;
+	MEMORY_BASIC_INFORMATION info {};
+	if (!Base || VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	if (address + size > reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize) return false;
+	return std::memcmp(reinterpret_cast<const void*>(address), bytes, size) == 0;
 }
 
 bool Locate() {
