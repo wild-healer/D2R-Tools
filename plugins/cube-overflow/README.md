@@ -32,7 +32,7 @@ Steam 3.3.93787 / 94995 RVAs:
   pickup the plugin asks D2R+0x46DED0 (the game's stack / belt / free spot search for
   an item given to the player) where it would go; when nowhere and the cube has a spot,
   it picks up with `toCube`, so nothing bounces. Scrolls are left to the game (tomes).
-  Cursor pickups (always on): no free inventory spot (D2R+0x3865B0 on page 0) but one in the cube.
+  Cursor pickups: no free inventory spot (D2R+0x3865B0 on page 0) but one in the cube.
 - Purchases and gambling: the client picks the destination (D2R+0x1121A4 searches
   page 0, D2R+0x1121CC builds a page 0 destination) and sends its x/y without a page
   in packet 0x32. The server rebuilds it as page 0 (D2R+0x4C46E5) and refuses the
