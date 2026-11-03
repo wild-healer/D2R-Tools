@@ -11,7 +11,7 @@ It is one D2RLoader plugin (`d2rl-visual-clutter.dll`) with native hooks.
 
 ## Config
 
-`d2rloader/config/visual-clutter.toml` (created on first launch; edit that copy, not the one in the zip). Changes apply at the next game start.
+`d2rloader/config/visual-clutter.toml` (written on first launch). Every setting except `versions` can also be changed in game with I Hate TOMLs, and applies at once. The kind lists show there as tables of check boxes (who is hidden on whom), which need I Hate TOMLs 1.0.1 or later.
 
 Each `on_<kind>` line is a kind of unit the effect is drawn on and lists the kinds of caster whose auras are hidden there. Both sides use the same five kinds:
 
@@ -56,11 +56,11 @@ Your merc and summons are told apart from monsters with the game's own pet list,
 
 The client turns a state's look on by adding the overlays listed in `states.txt` to the unit; the HD renderer draws those overlays. For a hidden aura the plugin skips that step, so the unit never gets the overlay: nothing is drawn and the state itself (stats, buff icons) is untouched. Addresses are those of Steam 3.3.93787 (unchanged in 3.3.94995) and are checked against the game's code at load; on a build where they don't match, the plugin loads but does nothing and says why in its log and in the `visual-clutter` console command.
 
-A decision is made when the aura reaches the unit. Changing the config needs a game restart, and an aura that is already on a unit keeps its look until it leaves and comes back.
+A decision is made when the aura reaches the unit, and the plugin remembers it. When a setting changes, auras and shouts already on units follow at once: the plugin removes the overlays of the ones now hidden, as the client does when a state ends, and adds those of the ones now shown.
 
 ## Other effects
 
-These change only what your client draws; the server still runs the skill and deals its damage. Firestorm and Thunder Storm missiles are not created on the client when their owner's kind is listed, so neither the missile nor its light shows. Charge orbs are legacy overlays the client skips. The terror zone tint is a screen effect the client starts when you enter a terror zone; with `hide_terror_zone_tint = true` the plugin removes that one call at load.
+These change only what your client draws; the server still runs the skill and deals its damage. Firestorm and Thunder Storm missiles are not created on the client when their owner's kind is listed, so neither the missile nor its light shows. Charge orbs are legacy overlays the client skips. The terror zone tint is a screen effect the client starts when you enter a terror zone; with `hide_terror_zone_tint = true` the plugin skips that one call, and a change made inside a terror zone clears the tint or puts it back. Charge orbs already drawn go away when they become hidden; orbs shown again come back with the next charge.
 
 ## Console
 
@@ -68,4 +68,4 @@ These change only what your client draws; the server still runs the skill and de
 
 ## Build
 
-`./build.sh` cross-builds the DLL with MinGW-w64 on Linux against the pinned PluginSDK commit and writes `visual-clutter-<version>.zip`.
+`./build.sh` cross-builds the DLL with MinGW-w64 on Linux against the pinned PluginSDK commit and writes `visual-clutter.zip` (the DLL alone; its config is built in).

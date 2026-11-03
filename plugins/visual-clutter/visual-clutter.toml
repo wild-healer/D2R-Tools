@@ -1,8 +1,8 @@
 # Visual Clutter
 #
-# Hides visual effects without changing what they do. D2RLoader copies this
-# file to d2rloader/config/visual-clutter.toml on first launch; edit that copy.
-# Changes apply the next time the game starts.
+# Hides visual effects without changing what they do. D2RLoader writes this
+# file to d2rloader/config/visual-clutter.toml on first launch. Every setting
+# can also be changed in game with I Hate TOMLs, and applies at once.
 
 [visual-clutter]
 enabled = true
@@ -57,5 +57,5 @@ hide_charges = []
 hide_terror_zone_tint = false
 
 # Game versions (major.minor) the plugin is allowed to hook. Addresses are
-# checked against the game's code at load either way.
+# checked against the game's code at load either way. Read at game start.
 versions = ["3.3"]

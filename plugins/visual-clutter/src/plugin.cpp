@@ -37,7 +37,13 @@
 //   - Martial arts charge orbs (kept up by Mosaic): the legacy overlay creation
 //     (0x150280) skips the charge overlays on the chosen units.
 //   - Terror zone tint: QuestUpdateFX starts a screen tint when you enter a
-//     terror zone; the call (0x170499) is NOPed.
+//     terror zone (call at 0x170499); the screen tint function (0xF3E40) skips
+//     that call.
+// Settings apply live (I Hate TOMLs or the TOML): the client's aura and shout
+// overlays are tracked, so a change removes the overlays of auras that are now
+// hidden (as the game does when a state ends, 0x21B400) and adds those of auras
+// that are now shown (0x21B640). Charge orbs already drawn are removed when
+// they become hidden; the terror zone tint is cleared or put back at once.
 // Everything is checked against the expected code at load: a mismatch leaves
 // the plugin loaded but inactive.
 
@@ -53,12 +59,15 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+#include "i_hate_tomls_client.h"
 
 namespace {
 
 constexpr const char* PluginId      = "visual-clutter";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -95,10 +104,17 @@ constexpr std::uintptr_t MissileParamsId    = 0x20;
 // Legacy overlay creation: void (Unit*, int overlay, int type, ...7 args); no caller uses a result.
 constexpr std::uint64_t CreateOverlayRva = 0x150280;
 constexpr std::array<std::uint8_t, 24> CreateOverlayBytes { 0x40, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x57, 0x48, 0x81, 0xEC, 0x30, 0x01, 0x00, 0x00, 0x45, 0x8B, 0xE1, 0x45, 0x8B, 0xF8, 0x8B, 0xFA, 0x48 };
-// QuestUpdateFX's "you entered a terror zone" screen tint: call ScreenTint(3, 2000, 1000, 1000).
-// The tint lasts until the player leaves the zone; NOPing the call keeps the zone's sound.
-constexpr std::uint64_t TerrorTintCallRva = 0x170499;
-constexpr std::array<std::uint8_t, 5> TerrorTintCallBytes { 0xE8, 0xA2, 0x39, 0xF8, 0xFF };
+// Screen tint: void (int kind, int fadeIn, int hold, int fadeOut), stores them in globals.
+// QuestUpdateFX calls ScreenTint(3, 1000, 2000, 1000) at 0x170499 when you enter a terror
+// zone; the tint lasts until you leave it. Skipping that call keeps the zone's sound.
+constexpr std::uint64_t ScreenTintRva = 0xF3E40;
+constexpr std::array<std::uint8_t, 15> ScreenTintBytes { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18 };
+constexpr std::uint64_t TerrorTintReturnRva = 0x17049E;
+constexpr std::uint64_t TerrorTintCallRva   = 0x170480; // jne skip; mov edx, 1000; mov ecx, 3; mov r9d, edx; mov r8d, 2000; call ScreenTint
+constexpr std::array<std::uint8_t, 30> TerrorTintCallBytes { 0x0F, 0x85, 0x92, 0x00, 0x00, 0x00, 0xBA, 0xE8, 0x03, 0x00, 0x00, 0xB9, 0x03, 0x00, 0x00, 0x00,
+	                                                         0x44, 0x8B, 0xCA, 0x41, 0xB8, 0xD0, 0x07, 0x00, 0x00, 0xE8, 0xA2, 0x39, 0xF8, 0xFF };
+constexpr std::uint64_t TintResetRva = 0xF3EB0; // void (), clears the screen tint (QuestUpdateFX calls it when you leave a terror zone)
+constexpr std::array<std::uint8_t, 4> TintResetBytes { 0x33, 0xC0, 0x89, 0x05 };
 
 // Called functions, checked the same way.
 constexpr std::uint64_t OverlayRecordRva = 0x1501A0; // OverlayRecord* (uint8 version, int overlay), 0xE0-byte records
@@ -110,6 +126,20 @@ constexpr std::array<std::uint8_t, 18> IsAuraStateBytes { 0x48, 0x89, 0x5C, 0x24
 constexpr std::uint64_t UnitVersionRva = 0x34A0E0; // uint8 (Unit*)
 constexpr std::array<std::uint8_t, 9> UnitVersionBytes { 0x48, 0x83, 0xEC, 0x28, 0x48, 0x85, 0xC9, 0x75, 0x1A };
 
+constexpr std::uint64_t FindClientUnitRva = 0x9A5D0; // Unit* (uint32 id, int type), the client's unit table
+constexpr std::array<std::uint8_t, 6> FindClientUnitBytes { 0x4C, 0x63, 0xCA, 0x48, 0x8D, 0x05 };
+constexpr std::uint64_t HasStateRva = 0x2F6220; // int (Unit*, int state): the state's bit in the unit's stat list
+constexpr std::array<std::uint8_t, 16> HasStateBytes { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x63, 0xFA, 0x48, 0x85, 0xC9 };
+constexpr std::uint64_t StateRecordRva = 0x21B0C0; // StatesRecord* (uint8 version, int state); +0x02 overlay1, +0x04 overlay2 (int16)
+constexpr std::array<std::uint8_t, 18> StateRecordBytes { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x63, 0xF2 };
+constexpr std::uintptr_t StateOverlay1 = 0x02;
+constexpr std::uintptr_t StateOverlay2 = 0x04;
+// The client's state-off code (0x21AC50) removes a state's look with this: void (Unit*, int overlay), every row of the overlay.
+constexpr std::uint64_t RemoveStateOverlayRva = 0x21B400;
+constexpr std::array<std::uint8_t, 15> RemoveStateOverlayBytes { 0x83, 0xFA, 0xFF, 0x74, 0x63, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x20 };
+constexpr std::uint64_t RemoveOverlayRva = 0x152090; // void (Unit*, 0, int overlay): removes the unit's first node of that overlay
+constexpr std::array<std::uint8_t, 9> RemoveOverlayBytes { 0x48, 0x85, 0xC9, 0x0F, 0x84, 0x98, 0x00, 0x00, 0x00 };
+
 // Globals, read from the RIP-relative operand of known instructions.
 constexpr std::uint64_t LocalIndexSiteRva = 0x8B2D0; // mov eax, [rip+x]; ret  -> local player index
 constexpr std::array<int, 7> LocalIndexSite { 0x8B, 0x05, -1, -1, -1, -1, 0xC3 };
@@ -117,6 +147,8 @@ constexpr std::uint64_t PlayerIdsSiteRva = 0x9A4BE; // lea rdi, [rip+x]  -> uint
 constexpr std::array<int, 7> PlayerIdsSite { 0x48, 0x8D, 0x3D, -1, -1, -1, -1 };
 constexpr std::uint64_t PetListSiteRva = 0x13B270; // mov rax, [rip+x]; test rax, rax  -> first pet node
 constexpr std::array<int, 10> PetListSite { 0x48, 0x8B, 0x05, -1, -1, -1, -1, 0x48, 0x85, 0xC0 };
+constexpr std::uint64_t TerrorFlagSiteRva = 0x17046F; // mov dword [rip+x], 1  -> 1 while the terror zone tint is on
+constexpr std::array<int, 10> TerrorFlagSite { 0xC7, 0x05, -1, -1, -1, -1, 0x01, 0x00, 0x00, 0x00 };
 
 // Units: +0x00 uint32 type (0 player, 1 monster), +0x08 uint32 id.
 constexpr std::uintptr_t UnitType = 0x00;
@@ -145,6 +177,13 @@ using ApplyAuraFn        = int (*)(void* game, void* caster, void* target, int d
 using StatListForStateFn = void* (*)(void* unit, int state) noexcept;
 using IsAuraStateFn      = int (*)(std::uint8_t version, int state) noexcept;
 using UnitVersionFn      = std::uint8_t (*)(void* unit) noexcept;
+using ScreenTintFn       = void (*)(int kind, int fadeIn, int hold, int fadeOut) noexcept;
+using TintResetFn        = void (*)() noexcept;
+using FindClientUnitFn   = void* (*)(std::uint32_t id, int type) noexcept;
+using HasStateFn         = int (*)(void* unit, int state) noexcept;
+using StateRecordFn      = const void* (*)(std::uint8_t version, int state) noexcept;
+using RemoveStateOverlayFn = void (*)(void* unit, int overlay) noexcept;
+using RemoveOverlayFn    = void (*)(void* unit, int zero, int overlay) noexcept;
 
 // ---- state ----
 
@@ -164,6 +203,14 @@ AuraTargetFn       OriginalAuraTarget {};
 StatListForStateFn StatListForState {};
 IsAuraStateFn      IsAuraState {};
 UnitVersionFn      UnitVersion {};
+ScreenTintFn       OriginalScreenTint {};
+TintResetFn        TintReset {};
+FindClientUnitFn   FindClientUnit {};
+HasStateFn         HasState {};
+StateRecordFn      StateRecord {};
+RemoveStateOverlayFn RemoveStateOverlay {};
+RemoveOverlayFn    RemoveOverlay {};
+std::uintptr_t     TerrorFlagAddress {};
 std::uintptr_t     LocalIndexAddress {};
 std::uintptr_t     PlayerIdsAddress {};
 std::uintptr_t     PetListAddress {};
@@ -172,17 +219,25 @@ std::uintptr_t     PetListAddress {};
 enum Kind : int { Self, Merc, Minions, Allies, Monsters, KindCount, Other = KindCount };
 constexpr std::array<const char*, KindCount> KindNames { "self", "merc", "minions", "allies", "monsters" };
 
+// A set of kinds, one bit per Kind.
+using Kinds = std::atomic<std::uint8_t>;
+
+bool Has(const Kinds& kinds, int kind) noexcept {
+	return kind >= 0 && kind < KindCount && (kinds.load(std::memory_order_relaxed) >> kind & 1);
+}
+
+// Read by the hooks on the game's threads, changed live from I Hate TOMLs.
 struct Settings {
-	bool                     enabled = true;
-	// hide[on][from]: hide auras drawn on a unit of kind `on` that a unit of kind `from` cast.
-	std::array<std::array<bool, KindCount>, KindCount> hide {};
+	std::atomic<bool> enabled { true };
+	// hide[on]: kinds of caster whose auras are hidden on a unit of kind `on`.
+	std::array<Kinds, KindCount> hide {};
 	// The same for the barbarian's shouts (Shout, Battle Orders, Battle Command),
 	// which the game also draws as auras.
-	std::array<std::array<bool, KindCount>, KindCount> hideShouts {};
+	std::array<Kinds, KindCount> hideShouts {};
 	// Kinds of unit whose effects are hidden: missiles by owner, charge orbs by the unit wearing them.
-	std::array<bool, KindCount> hideFirestorm {}, hideThunderStorm {}, hideCharges {};
-	bool                     hideTerrorTint = false;
-	std::vector<std::string> versions { "3.3" };
+	Kinds             hideFirestorm {}, hideThunderStorm {}, hideCharges {};
+	std::atomic<bool> hideTerrorTint { false };
+	std::vector<std::string> versions { "3.3" }; // read at load only
 } Config;
 
 // missiles.txt rows (RotW, same in 93787 and 94995).
@@ -206,6 +261,16 @@ std::unordered_map<std::uint64_t, std::uint64_t> Casters;
 thread_local void*         PendingTarget {};
 thread_local std::uint64_t PendingCaster {};
 
+// Aura and shout states the client has been asked to draw, by Key: Drawn or Skipped.
+// Kept so a settings change can add or remove their overlays.
+enum : std::uint8_t { Drawn = 1, Skipped = 2 };
+SRWLOCK                                         TrackLock = SRWLOCK_INIT;
+std::unordered_map<std::uint64_t, std::uint8_t> Tracked;
+// Units (Caster keys) that got a charge orb overlay drawn.
+std::unordered_set<std::uint64_t>               ChargeUnits;
+// Set while the game's own state overlay code runs: its off/on toggle of the state is not a state change.
+thread_local bool InStateOverlays {};
+
 std::atomic<std::uint32_t> HiddenCount {}, ShownCount {}, RecordedCount {};
 std::atomic<std::uint32_t> LoggedDecisions {};
 constexpr std::uint32_t    MaxLoggedDecisions = 40;
@@ -222,9 +287,18 @@ void Log(bool warn, const char* format, ...) noexcept {
 
 // ---- guarded memory access ----
 
+// Reads the game's own memory after checking it is committed and readable
+// (ReadProcessMemory made one antivirus heuristic call a DLL an injector).
 bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
-	SIZE_T copied = 0;
-	return address != 0 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), output, size, &copied) && copied == size;
+	if (address == 0) return false;
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+	if (address + size > end) return false;
+	std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	return true;
 }
 
 template <typename T>
@@ -304,9 +378,13 @@ void HookToggleState(void* unit, int state, int on) noexcept {
 	if (!UnitIdentity(unit, type, id) || (type != TypePlayer && type != TypeMonster)) return;
 	const std::uint64_t key = Key(type, id, state);
 	if (!on) {
+		if (InStateOverlays) return; // the overlay code's off/on toggle, the state stays
 		AcquireSRWLockExclusive(&CasterLock);
 		Casters.erase(key);
 		ReleaseSRWLockExclusive(&CasterLock);
+		AcquireSRWLockExclusive(&TrackLock);
+		Tracked.erase(key);
+		ReleaseSRWLockExclusive(&TrackLock);
 		return;
 	}
 	std::uint32_t ownerType = NoId, ownerId = NoId;
@@ -382,7 +460,7 @@ void* HookCreateMissile(void* params, int flags) noexcept {
 			if (firestorm || storm) {
 				std::uint32_t type = NoId, unitId = NoId;
 				const Kind    kind = owner && UnitIdentity(reinterpret_cast<void*>(owner), type, unitId) ? KindOf(type, unitId, LocalPlayerId()) : Other;
-				const bool    hide = kind != Other && (firestorm ? Config.hideFirestorm : Config.hideThunderStorm)[kind];
+				const bool    hide = Config.enabled.load(std::memory_order_relaxed) && Has(firestorm ? Config.hideFirestorm : Config.hideThunderStorm, kind);
 				if (LoggedMissiles.fetch_add(1, std::memory_order_relaxed) < MaxLoggedDecisions)
 					Log(false, "missile %d (%s) from %s: %s", id, firestorm ? "firestorm" : "thunder storm", kind == Other ? "other" : KindNames[kind], hide ? "hidden" : "shown");
 				if (hide) {
@@ -419,25 +497,27 @@ bool IsChargeOverlay(void* unit, int overlay) noexcept {
 }
 
 void HookCreateOverlay(void* unit, int overlay, int type, int a4, int a5, int a6, int a7) noexcept {
-	if (Active.load(std::memory_order_acquire) && unit) {
-		bool any = false;
-		for (const bool kind : Config.hideCharges) any |= kind;
-		std::uint32_t unitType = NoId, id = NoId;
-		if (any && IsChargeOverlay(unit, overlay) && UnitIdentity(unit, unitType, id)) {
-			const Kind kind = KindOf(unitType, id, LocalPlayerId());
-			if (kind != Other && Config.hideCharges[kind]) {
-				HiddenOverlays.fetch_add(1, std::memory_order_relaxed);
-				return;
-			}
+	std::uint32_t unitType = NoId, id = NoId;
+	if (Active.load(std::memory_order_acquire) && unit && IsChargeOverlay(unit, overlay) && UnitIdentity(unit, unitType, id)) {
+		const Kind kind = KindOf(unitType, id, LocalPlayerId());
+		if (Config.enabled.load(std::memory_order_relaxed) && Has(Config.hideCharges, kind)) {
+			HiddenOverlays.fetch_add(1, std::memory_order_relaxed);
+			return;
 		}
+		// Remembered so these orbs can be removed if they become hidden.
+		AcquireSRWLockExclusive(&TrackLock);
+		try {
+			ChargeUnits.insert(Caster(unitType, id));
+		} catch (...) {
+		}
+		ReleaseSRWLockExclusive(&TrackLock);
 	}
 	OriginalCreateOverlay(unit, overlay, type, a4, a5, a6, a7);
 }
 
-bool ShouldHide(void* unit, int state) noexcept {
-	if (state <= 0 || !IsAuraState(UnitVersion(unit), state)) return false;
-	std::uint32_t type {}, id {};
-	if (!UnitIdentity(unit, type, id)) return false;
+// Whether to leave out the look of an aura or shout state on a client unit. `log` = count it in the log.
+bool ShouldHide(void* unit, std::uint32_t type, std::uint32_t id, int state, bool log) noexcept {
+	if (!Config.enabled.load(std::memory_order_relaxed)) return false;
 	const std::uint32_t localId = LocalPlayerId();
 	const Kind on = KindOf(type, id, localId);
 	if (on == Other) return false;
@@ -449,21 +529,166 @@ bool ShouldHide(void* unit, int state) noexcept {
 	ReleaseSRWLockShared(&CasterLock);
 	if (known) from = KindOf(static_cast<std::uint32_t>(caster >> 32), static_cast<std::uint32_t>(caster), localId);
 	const bool shout = IsShoutState(state);
-	const bool hide  = from != Other && (shout ? Config.hideShouts : Config.hide)[on][from];
-	if (LoggedDecisions.fetch_add(1, std::memory_order_relaxed) < MaxLoggedDecisions)
+	const bool hide  = Has((shout ? Config.hideShouts : Config.hide)[on], from);
+	if (log && LoggedDecisions.fetch_add(1, std::memory_order_relaxed) < MaxLoggedDecisions)
 		Log(false, "%s state %d on %s (type %u id %u), cast by %s%s: %s", shout ? "shout" : "aura", state, KindNames[on], type, id,
 		    from == Other ? "other" : KindNames[from], known ? "" : " (own)", hide ? "hidden" : "shown");
 	return hide;
 }
 
+void Track(std::uint64_t key, std::uint8_t how) noexcept {
+	AcquireSRWLockExclusive(&TrackLock);
+	try {
+		Tracked[key] = how;
+	} catch (...) {
+	}
+	ReleaseSRWLockExclusive(&TrackLock);
+}
+
+// Units can leave without their states ending (killed, out of sight): every
+// 512 tracked states past 2048, forget the units the client no longer has.
+void PruneTracked() noexcept {
+	static std::uint32_t calls = 0;
+	if (++calls % 512 != 0) return;
+	std::vector<std::uint64_t> keys, units;
+	AcquireSRWLockShared(&TrackLock);
+	const bool many = Tracked.size() > 2048 || ChargeUnits.size() > 512;
+	try {
+		if (many) {
+			for (const auto& entry : Tracked) keys.push_back(entry.first);
+			units.assign(ChargeUnits.begin(), ChargeUnits.end());
+		}
+	} catch (...) {
+	}
+	ReleaseSRWLockShared(&TrackLock);
+	if (!many) return;
+	std::vector<std::uint64_t> goneKeys, goneUnits;
+	try {
+		for (const std::uint64_t key : keys)
+			if (!FindClientUnit(static_cast<std::uint32_t>(key), static_cast<int>(key >> 56))) goneKeys.push_back(key);
+		for (const std::uint64_t unit : units)
+			if (!FindClientUnit(static_cast<std::uint32_t>(unit), static_cast<int>(unit >> 32))) goneUnits.push_back(unit);
+	} catch (...) {
+	}
+	AcquireSRWLockExclusive(&TrackLock);
+	for (const std::uint64_t key : goneKeys) Tracked.erase(key);
+	for (const std::uint64_t unit : goneUnits) ChargeUnits.erase(unit);
+	ReleaseSRWLockExclusive(&TrackLock);
+}
+
+void DrawStateOverlays(void* unit, int state) noexcept {
+	InStateOverlays = true;
+	OriginalStateOverlays(unit, state);
+	InStateOverlays = false;
+}
+
 // The client's "add this state's overlays to the unit".
 void HookStateOverlays(void* unit, int state) noexcept {
-	if (Active.load(std::memory_order_acquire) && unit && ShouldHide(unit, state)) {
+	std::uint32_t type {}, id {};
+	if (!Active.load(std::memory_order_acquire) || !unit || state <= 0 || !IsAuraState(UnitVersion(unit), state) || !UnitIdentity(unit, type, id)) {
+		DrawStateOverlays(unit, state);
+		return;
+	}
+	const bool hide = ShouldHide(unit, type, id, state, true);
+	Track(Key(type, id, state), hide ? Skipped : Drawn);
+	PruneTracked();
+	if (hide) {
 		HiddenCount.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
-	if (Active.load(std::memory_order_relaxed)) ShownCount.fetch_add(1, std::memory_order_relaxed);
-	OriginalStateOverlays(unit, state);
+	ShownCount.fetch_add(1, std::memory_order_relaxed);
+	DrawStateOverlays(unit, state);
+}
+
+// QuestUpdateFX's terror zone tint is skipped while it is hidden; other tints pass.
+void HookScreenTint(int kind, int fadeIn, int hold, int fadeOut) noexcept {
+	if (reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)) == Base + TerrorTintReturnRva && Config.enabled.load(std::memory_order_relaxed) &&
+	    Config.hideTerrorTint.load(std::memory_order_relaxed))
+		return;
+	OriginalScreenTint(kind, fadeIn, hold, fadeOut);
+}
+
+// ---- live changes (game's main thread) ----
+
+bool TerrorTintHidden() noexcept {
+	return Config.enabled.load(std::memory_order_relaxed) && Config.hideTerrorTint.load(std::memory_order_relaxed);
+}
+
+// Adds or removes the overlays of every tracked aura and shout whose decision changed.
+void RefreshAuras() noexcept {
+	std::vector<std::pair<std::uint64_t, std::uint8_t>> states;
+	AcquireSRWLockShared(&TrackLock);
+	try {
+		states.assign(Tracked.begin(), Tracked.end());
+	} catch (...) {
+	}
+	ReleaseSRWLockShared(&TrackLock);
+	int added = 0, removed = 0, gone = 0;
+	for (const auto& [key, how] : states) {
+		const auto type  = static_cast<std::uint32_t>(key >> 56);
+		const auto state = static_cast<int>(key >> 32 & 0xFFFF);
+		const auto id    = static_cast<std::uint32_t>(key);
+		void* const unit = FindClientUnit(id, static_cast<int>(type));
+		if (!unit || !HasState(unit, state)) {
+			AcquireSRWLockExclusive(&TrackLock);
+			Tracked.erase(key);
+			ReleaseSRWLockExclusive(&TrackLock);
+			++gone;
+			continue;
+		}
+		const bool hide = ShouldHide(unit, type, id, state, false);
+		if (hide && how == Drawn) {
+			// What the client does when the state ends.
+			if (const auto record = reinterpret_cast<std::uintptr_t>(StateRecord(UnitVersion(unit), state))) {
+				std::int16_t first = -1, second = -1;
+				if (Read(record + StateOverlay1, first) && first >= 0) RemoveStateOverlay(unit, first);
+				if (Read(record + StateOverlay2, second) && second >= 0) RemoveStateOverlay(unit, second);
+			}
+			Track(key, Skipped);
+			++removed;
+		} else if (!hide && how == Skipped) {
+			DrawStateOverlays(unit, state);
+			Track(key, Drawn);
+			++added;
+		}
+	}
+	if (added || removed) Log(false, "settings changed: aura effects removed %d, added %d (%d tracked, %d gone)", removed, added, static_cast<int>(states.size()), gone);
+}
+
+// Removes the charge orbs drawn on units whose orbs are now hidden. Orbs shown
+// again appear with the next charge.
+void RefreshCharges() noexcept {
+	if (!Config.enabled.load(std::memory_order_relaxed) || !Config.hideCharges.load(std::memory_order_relaxed)) return;
+	std::vector<std::uint64_t> units;
+	AcquireSRWLockShared(&TrackLock);
+	try {
+		units.assign(ChargeUnits.begin(), ChargeUnits.end());
+	} catch (...) {
+	}
+	ReleaseSRWLockShared(&TrackLock);
+	const std::uint32_t localId = LocalPlayerId();
+	for (const std::uint64_t key : units) {
+		const auto type = static_cast<std::uint32_t>(key >> 32), id = static_cast<std::uint32_t>(key);
+		void* const unit = FindClientUnit(id, static_cast<int>(type));
+		if (unit && !Has(Config.hideCharges, KindOf(type, id, localId))) continue;
+		if (unit)
+			for (int overlay = 0; overlay < MaxOverlays; ++overlay)
+				if (ChargeOverlay[overlay].load(std::memory_order_relaxed) == 1)
+					for (int node = 0; node < 3; ++node) RemoveOverlay(unit, 0, overlay);
+		AcquireSRWLockExclusive(&TrackLock);
+		ChargeUnits.erase(key);
+		ReleaseSRWLockExclusive(&TrackLock);
+	}
+}
+
+// Clears the terror zone tint or puts it back, when you are in a terror zone.
+void RefreshTerrorTint(bool wasHidden) noexcept {
+	const bool hidden = TerrorTintHidden();
+	std::uint32_t inZone = 0;
+	if (hidden == wasHidden || !TerrorFlagAddress || !Read(TerrorFlagAddress, inZone) || inZone != 1) return;
+	if (hidden) TintReset();
+	else OriginalScreenTint(3, 1000, 2000, 1000);
+	Log(false, "terror zone tint %s", hidden ? "cleared" : "back on");
 }
 
 // ---- setup ----
@@ -481,6 +706,14 @@ bool Locate() noexcept {
 	UnitVersion      = reinterpret_cast<UnitVersionFn>(Base + UnitVersionRva);
 	if (!CodeMatches(OverlayRecordRva, OverlayRecordBytes)) return Problem = "overlay table lookup not found", false;
 	OverlayRecord = reinterpret_cast<OverlayRecordFn>(Base + OverlayRecordRva);
+	if (!CodeMatches(FindClientUnitRva, FindClientUnitBytes) || !CodeMatches(HasStateRva, HasStateBytes) || !CodeMatches(StateRecordRva, StateRecordBytes) ||
+	    !CodeMatches(RemoveStateOverlayRva, RemoveStateOverlayBytes) || !CodeMatches(RemoveOverlayRva, RemoveOverlayBytes))
+		return Problem = "overlay add/remove code not found", false;
+	FindClientUnit     = reinterpret_cast<FindClientUnitFn>(Base + FindClientUnitRva);
+	HasState           = reinterpret_cast<HasStateFn>(Base + HasStateRva);
+	StateRecord        = reinterpret_cast<StateRecordFn>(Base + StateRecordRva);
+	RemoveStateOverlay = reinterpret_cast<RemoveStateOverlayFn>(Base + RemoveStateOverlayRva);
+	RemoveOverlay      = reinterpret_cast<RemoveOverlayFn>(Base + RemoveOverlayRva);
 	return true;
 }
 
@@ -497,12 +730,12 @@ bool InstallHooks() noexcept {
 		return Problem = "missile hook refused (code differs or another plugin hooks it)", false;
 	if (!Context->InstallInlineHook(CreateOverlayRva, CreateOverlayBytes.data(), static_cast<std::uint32_t>(CreateOverlayBytes.size()), HookCreateOverlay, &OriginalCreateOverlay) || !OriginalCreateOverlay)
 		return Problem = "overlay hook refused (code differs or another plugin hooks it)", false;
-	if (Config.hideTerrorTint) {
-		if (Context->PatchFill(TerrorTintCallRva, TerrorTintCallBytes.data(), static_cast<std::uint32_t>(TerrorTintCallBytes.size()), 0x90, static_cast<std::uint32_t>(TerrorTintCallBytes.size())))
-			Log(false, "terror zone tint off (D2R+0x%llX)", static_cast<unsigned long long>(TerrorTintCallRva));
-		else
-			Log(true, "terror zone tint: code differs, left on");
-	}
+	// The terror zone tint is optional: without it everything else still works.
+	if (CodeMatches(TerrorTintCallRva, TerrorTintCallBytes) && CodeMatches(TintResetRva, TintResetBytes) &&
+	    Context->InstallInlineHook(ScreenTintRva, ScreenTintBytes.data(), static_cast<std::uint32_t>(ScreenTintBytes.size()), HookScreenTint, &OriginalScreenTint) && OriginalScreenTint) {
+		TintReset         = reinterpret_cast<TintResetFn>(Base + TintResetRva);
+		TerrorFlagAddress = RipTarget(TerrorFlagSiteRva, TerrorFlagSite, 2, 10);
+	} else Log(true, "terror zone tint: code differs or another plugin hooks it, the tint stays");
 	return true;
 }
 
@@ -582,19 +815,197 @@ int KindIndex(std::string_view name) noexcept {
 	return -1;
 }
 
+std::uint8_t Bit(int kind) noexcept {
+	return static_cast<std::uint8_t>(1u << kind);
+}
+
 void DefaultMatrix() noexcept {
 	// Hide what you, your merc and other players cast, on everyone but other
 	// players, except a unit's own auras on you and your merc.
-	for (int on : { Self, Merc, Minions, Monsters })
-		for (int from : { Self, Merc, Allies }) Config.hide[on][from] = true;
-	Config.hide[Self][Self] = false;
-	Config.hide[Merc][Merc] = false;
+	const std::uint8_t casters = Bit(Self) | Bit(Merc) | Bit(Allies);
+	Config.hide[Self]     = casters & ~Bit(Self);
+	Config.hide[Merc]     = casters & ~Bit(Merc);
+	Config.hide[Minions]  = casters;
+	Config.hide[Allies]   = 0;
+	Config.hide[Monsters] = casters;
+}
+
+// ["self", "merc"] -> bits; false + reason when a name is unknown.
+bool ParseKinds(const std::string& value, std::uint8_t& kinds, std::string& error) {
+	if (value.empty() || value[0] != '[') return error = "a list of kinds, like [\"self\", \"merc\"]", false;
+	kinds = 0;
+	for (const auto& name : ParseStrings(value)) {
+		const int kind = KindIndex(name);
+		if (kind < 0) return error = "unknown kind \"" + name + "\" (self, merc, minions, allies, monsters)", false;
+		kinds |= Bit(kind);
+	}
+	return true;
+}
+
+// The kinds setting a key names: on_<kind>, shouts_on_<kind>, hide_firestorm, hide_thunder_storm, hide_charges.
+Kinds* KindsSetting(std::string_view key) noexcept {
+	if (key == "hide_firestorm") return &Config.hideFirestorm;
+	if (key == "hide_thunder_storm") return &Config.hideThunderStorm;
+	if (key == "hide_charges") return &Config.hideCharges;
+	const bool shouts = key.rfind("shouts_on_", 0) == 0;
+	if (!shouts && key.rfind("on_", 0) != 0) return nullptr;
+	const int on = KindIndex(key.substr(shouts ? 10 : 3));
+	if (on < 0) return nullptr;
+	return &(shouts ? Config.hideShouts : Config.hide)[on];
+}
+
+// I Hate TOMLs shows each kinds setting as one switch per kind: "<setting>.<kind>".
+bool SplitSwitch(std::string_view key, Kinds*& setting, int& kind) noexcept {
+	const auto dot = key.rfind('.');
+	if (dot == std::string_view::npos) return false;
+	setting = KindsSetting(key.substr(0, dot));
+	kind    = KindIndex(key.substr(dot + 1));
+	return setting && kind >= 0;
+}
+
+// Applies one setting from its TOML text (strings unquoted); false + reason when refused.
+bool Apply(const std::string& key, const std::string& value, std::string& error) {
+	const auto flag = [&](std::atomic<bool>& target) {
+		if (value != "true" && value != "false") return error = "true or false", false;
+		target = value == "true";
+		return true;
+	};
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "hide_terror_zone_tint") return flag(Config.hideTerrorTint);
+	if (Kinds* setting = KindsSetting(key)) {
+		std::uint8_t kinds = 0;
+		if (!ParseKinds(value, kinds, error)) return false;
+		setting->store(kinds);
+		return true;
+	}
+	Kinds* setting {};
+	int    kind {};
+	if (SplitSwitch(key, setting, kind)) {
+		if (value != "true" && value != "false") return error = "true or false", false;
+		if (value == "true") setting->fetch_or(Bit(kind));
+		else setting->fetch_and(static_cast<std::uint8_t>(~Bit(kind)));
+		return true;
+	}
+	if (key == "versions") {
+		if (value.empty() || value[0] != '[') return error = "a list of versions, like [\"3.3\"]", false;
+		auto versions = ParseStrings(value);
+		if (!versions.empty()) Config.versions = std::move(versions);
+		return true;
+	}
+	return error = "unknown setting", false;
+}
+
+std::string KindsList(const Kinds& kinds) {
+	std::string text;
+	for (int kind = 0; kind < KindCount; ++kind)
+		if (Has(kinds, kind)) text += std::string(text.empty() ? "" : ", ") + "\"" + KindNames[kind] + "\"";
+	return "[" + text + "]";
+}
+
+std::string ValueOf(const std::string& key) {
+	const auto flag = [](bool on) { return std::string(on ? "true" : "false"); };
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "hide_terror_zone_tint") return flag(Config.hideTerrorTint);
+	if (const Kinds* setting = KindsSetting(key)) return KindsList(*setting);
+	Kinds* setting {};
+	int    kind {};
+	if (SplitSwitch(key, setting, kind)) return flag(Has(*setting, kind));
+	return {};
+}
+
+std::string VersionsList() {
+	std::string text;
+	for (const auto& version : Config.versions) text += std::string(text.empty() ? "" : ", ") + "\"" + version + "\"";
+	return "[" + text + "]";
+}
+
+std::string Render() {
+	const auto row = [](const char* prefix) {
+		std::string text;
+		for (int kind = 0; kind < KindCount; ++kind) {
+			const std::string key = std::string(prefix) + KindNames[kind];
+			text += key + std::string(std::strlen(prefix) + std::strlen("monsters") - key.size() + 1, ' ') + "= " + ValueOf(key) + "\n";
+		}
+		return text;
+	};
+	return R"(# Visual Clutter
+#
+# Hides visual effects without changing what they do. D2RLoader writes this
+# file to d2rloader/config/visual-clutter.toml on first launch. Every setting
+# can also be changed in game with I Hate TOMLs, and applies at once.
+
+[visual-clutter]
+enabled = )" + ValueOf("enabled") + R"(
+
+# ---- aura effects ----
+#
+# Only the look of an aura is hidden (the glow, the rings at the feet, the
+# small icons over affected units); the aura still works.
+#
+# Each "on_..." line is one kind of unit the effect is drawn on, and lists who
+# cast the auras to hide there. Both sides use the same five kinds:
+#   "self"      you
+#   "merc"      your mercenary
+#   "minions"   your summons (golems, spirits, Valkyrie, ...)
+#   "allies"    other players, their mercenaries and their summons
+#   "monsters"  monsters (aura-enchanted bosses, monster auras)
+# An empty list [] shows every aura on that kind of unit.
+#
+# Who cast an aura is read from the game you play in, so it needs a single
+# player game or a game you host. Joined to someone else's game, every aura
+# counts as cast by the unit it is on.
+)" + row("on_") + R"(
+# ---- shout effects ----
+#
+# The same, for the barbarian's Shout, Battle Orders and Battle Command, which
+# the game draws like auras. These lines do not affect the aura lines above.
+# By default every shout is shown.
+)" + row("shouts_on_") + R"(
+# ---- other effects ----
+#
+# Lists of kinds as above. Only the look is removed; the damage still happens.
+#
+# Hellfire Torch's Firestorm (also the druid skill Firestorm), by who cast it.
+hide_firestorm = )" + ValueOf("hide_firestorm") + R"(
+# Thunder Storm's lightning bolts and their flash, by who cast it.
+hide_thunder_storm = )" + ValueOf("hide_thunder_storm") + R"(
+# Martial arts charge orbs (Tiger Strike, Fists of Fire, ... kept up by
+# Mosaic), by who carries them.
+hide_charges = )" + ValueOf("hide_charges") + R"(
+# The red screen tint inside terror zones. The zone itself, its sound and its
+# name on screen are unchanged.
+hide_terror_zone_tint = )" + ValueOf("hide_terror_zone_tint") + R"(
+
+# Game versions (major.minor) the plugin is allowed to hook. Addresses are
+# checked against the game's code at load either way. Read at game start.
+versions = )" + VersionsList() + "\n";
+}
+
+void SaveConfig() {
+	const std::string toml = Render();
+	if (!Context->WriteConfig(toml.c_str())) Log(true, "config: could not write the config file");
+}
+
+void ApplyText(std::string_view text) {
+	std::size_t lineStart = 0;
+	while (lineStart < text.size()) {
+		auto lineEnd = text.find('\n', lineStart);
+		if (lineEnd == std::string_view::npos) lineEnd = text.size();
+		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
+		lineStart              = lineEnd + 1;
+		const auto equals      = line.find('=');
+		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
+		const std::string key   = Trim(std::string_view(line).substr(0, equals));
+		const std::string value = Trim(std::string_view(line).substr(equals + 1));
+		std::string       error;
+		if (!Apply(key, value, error)) Log(true, "config: %s = %s ignored (%s)", key.c_str(), value.c_str(), error.c_str());
+	}
 }
 
 void LoadConfig() {
 	DefaultMatrix();
 	(void)Context->EnsureConfig();
-	std::uint32_t required = 0;
+	std::uint32_t     required = 0;
 	std::vector<char> buffer(8192);
 	if (!Context->ReadConfig(buffer.data(), static_cast<std::uint32_t>(buffer.size()), &required)) {
 		if (required <= buffer.size()) {
@@ -604,52 +1015,13 @@ void LoadConfig() {
 		buffer.resize(required);
 		if (!Context->ReadConfig(buffer.data(), static_cast<std::uint32_t>(buffer.size()), &required)) return;
 	}
-	const std::string_view text(buffer.data(), std::strlen(buffer.data()));
-	std::size_t lineStart = 0;
-	while (lineStart < text.size()) {
-		auto lineEnd = text.find('\n', lineStart);
-		if (lineEnd == std::string_view::npos) lineEnd = text.size();
-		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
-		lineStart = lineEnd + 1;
-		const auto equals = line.find('=');
-		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
-		const std::string key   = Trim(std::string_view(line).substr(0, equals));
-		const std::string value = Trim(std::string_view(line).substr(equals + 1));
-		if (key == "enabled") Config.enabled = value.rfind("false", 0) != 0;
-		else if ((key.rfind("on_", 0) == 0 || key.rfind("shouts_on_", 0) == 0) && !value.empty() && value[0] == '[') {
-			const bool shouts = key[0] == 's';
-			const int  on     = KindIndex(std::string_view(key).substr(shouts ? 10 : 3));
-			if (on < 0) {
-				Log(true, "config: unknown key %s", key.c_str());
-				continue;
-			}
-			auto& row = (shouts ? Config.hideShouts : Config.hide)[on];
-			row.fill(false);
-			for (const auto& name : ParseStrings(value)) {
-				const int from = KindIndex(name);
-				if (from < 0) Log(true, "config: %s: unknown kind \"%s\"", key.c_str(), name.c_str());
-				else row[from] = true;
-			}
-		} else if ((key == "hide_firestorm" || key == "hide_thunder_storm" || key == "hide_charges") && !value.empty() && value[0] == '[') {
-			auto& row = key == "hide_firestorm" ? Config.hideFirestorm : key == "hide_charges" ? Config.hideCharges : Config.hideThunderStorm;
-			row.fill(false);
-			for (const auto& name : ParseStrings(value)) {
-				const int kind = KindIndex(name);
-				if (kind < 0) Log(true, "config: %s: unknown kind \"%s\"", key.c_str(), name.c_str());
-				else row[kind] = true;
-			}
-		} else if (key == "hide_terror_zone_tint") Config.hideTerrorTint = value.rfind("true", 0) == 0;
-		else if (key == "versions" && !value.empty() && value[0] == '[') {
-			auto versions = ParseStrings(value);
-			if (!versions.empty()) Config.versions = std::move(versions);
-		}
-	}
+	ApplyText(std::string_view(buffer.data(), std::strlen(buffer.data())));
 }
 
-std::string KindsText(const std::array<bool, KindCount>& kinds) {
+std::string KindsText(const Kinds& kinds) {
 	std::string text;
 	for (int kind = 0; kind < KindCount; ++kind)
-		if (kinds[kind]) text += std::string(text.empty() ? "" : ",") + KindNames[kind];
+		if (Has(kinds, kind)) text += std::string(text.empty() ? "" : ",") + KindNames[kind];
 	return text.empty() ? "-" : text;
 }
 
@@ -658,29 +1030,109 @@ std::string EffectsText() {
 	       KindsText(Config.hideCharges) + "; terror zone tint " + (Config.hideTerrorTint ? "off" : "on");
 }
 
-std::string MatrixText(const std::array<std::array<bool, KindCount>, KindCount>& hide) {
+std::string MatrixText(const std::array<Kinds, KindCount>& hide) {
 	std::string text;
-	for (int on = 0; on < KindCount; ++on) {
-		text += std::string(on ? "; " : "") + "on " + KindNames[on] + ":";
-		bool any = false;
-		for (int from = 0; from < KindCount; ++from)
-			if (hide[on][from]) text += std::string(any ? "," : " ") + KindNames[from], any = true;
-		if (!any) text += " -";
-	}
+	for (int on = 0; on < KindCount; ++on) text += std::string(on ? "; " : "") + "on " + KindNames[on] + ": " + KindsText(hide[on]);
 	return text;
+}
+
+// ---- I Hate TOMLs ----
+
+// Who the kinds are, as the menu names them (column labels wrap to two short lines).
+constexpr std::array<const char*, KindCount> RowLabels { "You", "Your merc", "Your summons", "Other players", "Monsters" };
+constexpr std::array<const char*, KindCount> FromLabels { "From you", "From merc", "From summons", "From players", "From monsters" };
+constexpr std::array<const char*, KindCount> OnLabels { "On you", "On merc", "On summons", "On players", "On monsters" };
+
+std::string Schema;
+
+std::string List(const std::vector<std::string>& items) {
+	std::string text;
+	for (const auto& item : items) text += std::string(text.empty() ? "" : ", ") + "\"" + item + "\"";
+	return "[" + text + "]";
+}
+
+std::vector<std::string> Strings(const std::array<const char*, KindCount>& items, const std::string& prefix = {}) {
+	std::vector<std::string> strings;
+	for (const char* item : items) strings.push_back(prefix + item);
+	return strings;
+}
+
+// A grid of check boxes: each box is the switch "<row>.<kind>" served by MenuGet/MenuSet.
+std::string Table(const std::string& label, const std::string& note, const std::vector<std::string>& rows, const std::vector<std::string>& rowLabels,
+                  const std::array<const char*, KindCount>& columnLabels) {
+	return "[[setting]]\ntype = \"table\"\nlabel = \"" + label + "\"\n" + (note.empty() ? "" : "note = \"" + note + "\"\n") + "rows = " + List(rows) +
+	       "\nrow_labels = " + List(rowLabels) + "\ncolumns = " + List(Strings(KindNames)) + "\ncolumn_labels = " + List(Strings(columnLabels)) + "\n";
+}
+
+void BuildSchema() {
+	Schema = R"(title = "Visual Clutter"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Hide the chosen effects"
+note = "Only the look goes away: auras, shouts and skills still work."
+)";
+	Schema += Table("Auras on", "Tick whose auras to hide on each kind of unit. Who cast an aura is known in single player and in games you host.",
+	                Strings(KindNames, "on_"), Strings(RowLabels), FromLabels);
+	Schema += Table("Shouts on", "Shout, Battle Orders and Battle Command, apart from the auras above.", Strings(KindNames, "shouts_on_"), Strings(RowLabels), FromLabels);
+	Schema += Table("Skills", "Hellfire Torch's Firestorm (and the druid skill), Thunder Storm's bolts and flash, by who cast them.",
+	                { "hide_firestorm", "hide_thunder_storm" }, { "Firestorm", "Thunder Storm" }, FromLabels);
+	Schema += Table("Charge orbs", "Martial arts charges (Mosaic), by who carries them. Orbs shown again come back with the next charge.", { "hide_charges" },
+	                { "Charge orbs" }, OnLabels);
+	Schema += R"([[setting]]
+type = "header"
+label = "Terror zones"
+[[setting]]
+key = "hide_terror_zone_tint"
+type = "bool"
+label = "Hide the red tint"
+note = "The zone, its sound and its name on screen stay."
+)";
+}
+
+PluginMenu::Connection Menu;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	const bool  tintWasHidden = TerrorTintHidden();
+	std::string reason;
+	try {
+		if (!Apply(key, Trim(value), reason)) {
+			std::snprintf(error, size, "%s", reason.c_str());
+			return false;
+		}
+		SaveConfig();
+	} catch (...) {
+		std::snprintf(error, size, "%s", "out of memory");
+		return false;
+	}
+	if (Active.load(std::memory_order_acquire)) {
+		RefreshAuras();
+		RefreshCharges();
+		RefreshTerrorTint(tintWasHidden);
+	}
+	return true;
 }
 
 // ---- console ----
 
 auto StatusCommand(D2R::Game::Client*, const D2RL::ConsoleCommandContext* command, void*) noexcept -> D2RL::ConsoleCommandResult {
 	if (!command || !command->plugin) return D2RL::ConsoleCommandResult::Failed;
-	char line[384] {};
+	char line[400] {};
 	if (Active.load()) {
 		std::size_t casters = 0;
 		AcquireSRWLockShared(&CasterLock);
 		casters = Casters.size();
 		ReleaseSRWLockShared(&CasterLock);
-		std::snprintf(line, sizeof(line), "visual-clutter %s: active on %s; aura effects hidden %u, shown %u; casters known %zu (recorded %u)", PluginVersion, GameVersion.c_str(),
+		std::snprintf(line, sizeof(line), "visual-clutter %s: %s on %s; aura effects hidden %u, shown %u; casters known %zu (recorded %u)", PluginVersion, Config.enabled ? "active" : "turned off", GameVersion.c_str(),
 		              HiddenCount.load(), ShownCount.load(), casters, RecordedCount.load());
 	} else std::snprintf(line, sizeof(line), "visual-clutter %s: inactive on %s (%s)", PluginVersion, GameVersion.c_str(), Problem.empty() ? "disabled" : Problem.c_str());
 	command->plugin->WriteConsoleMessage(line);
@@ -709,16 +1161,17 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	(void)context->RegisterConsoleCommand("visual-clutter", StatusCommand, "Show Visual Clutter status.");
 
 	LoadConfig();
+	try {
+		BuildSchema();
+		(void)Menu.Start(context, Schema.c_str(), MenuGet, MenuSet, nullptr);
+	} catch (...) {
+	}
 	GameVersion = ReadGameVersion();
 	const std::string majorMinor = MajorMinor(GameVersion);
 	Log(false, "Visual Clutter %s: game %s, hide auras %s", PluginVersion, GameVersion.c_str(), MatrixText(Config.hide).c_str());
 	Log(false, "hide shouts %s", MatrixText(Config.hideShouts).c_str());
 	Log(false, "hide %s", EffectsText().c_str());
-	if (!Config.enabled) {
-		Problem = "disabled in config";
-		Log(false, "disabled in config");
-		return true;
-	}
+	// Hooked even when turned off: it can be turned on while playing.
 	bool supported = false;
 	for (const auto& version : Config.versions) supported |= version == majorMinor;
 	if (!supported) {
@@ -731,10 +1184,11 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		return true;
 	}
 	Active.store(true, std::memory_order_release);
-	Log(false, "active: state overlays hooked at D2R+0x%llX, state toggle at D2R+0x%llX", static_cast<unsigned long long>(StateOverlaysRva), static_cast<unsigned long long>(ToggleStateRva));
+	Log(false, "%s: state overlays hooked at D2R+0x%llX, state toggle at D2R+0x%llX", Config.enabled ? "active" : "loaded but turned off", static_cast<unsigned long long>(StateOverlaysRva), static_cast<unsigned long long>(ToggleStateRva));
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
 	Active.store(false, std::memory_order_release);
+	Menu.Stop();
 }
