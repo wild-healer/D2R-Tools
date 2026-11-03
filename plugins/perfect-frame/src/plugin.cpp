@@ -664,6 +664,7 @@ std::uint64_t     ShownHash {};   // the text of the first box they were matched
 void*             ShownPanel {};  // and its panel
 bool              ToldRect {};
 int               ToldBoxes {};
+int               ToldHovered {};
 
 void __cdecl OnTooltip(const D2RL::PluginContext*, Events::ItemTooltipEvent* event, void*) noexcept {
 	if (!event || !Ready || !ItemApi) return;
@@ -888,6 +889,28 @@ int BuiltVerdict(std::string_view box, std::uint64_t now) {
 		const std::string_view text = it->text;
 		if ((text.size() >= 16 && box.find(text) != std::string_view::npos) || (box.size() >= 16 && text.find(box) != std::string_view::npos)) return it->at = now, it->mark;
 	}
+	// Lines added to the box after its text was built (another plugin's
+	// compare markers, roll ranges): the text whose lines the box holds
+	// most of, when it holds most of them.
+	BuiltText* best      = nullptr;
+	double     bestScore = 0;
+	for (auto it = BuiltTexts.rbegin(); it != BuiltTexts.rend(); ++it) {
+		const std::string_view text = it->text;
+		std::size_t            lines = 0, held = 0;
+		for (std::size_t start = 0; start <= text.size();) {
+			std::size_t end = text.find('\n', start);
+			if (end == std::string_view::npos) end = text.size();
+			const std::string_view line = text.substr(start, end - start);
+			if (line.size() >= 3) {
+				++lines;
+				if (box.find(line) != std::string_view::npos) ++held;
+			}
+			start = end + 1;
+		}
+		const double score = lines ? static_cast<double>(held) / static_cast<double>(lines) : 0;
+		if (score > bestScore) best = &*it, bestScore = score;
+	}
+	if (best && bestScore >= 0.6) return best->at = now, best->mark;
 	return -1;
 }
 
@@ -963,7 +986,14 @@ void HookPanelDraw(void* panel) noexcept {
 		// like the compared ones, else the tooltip event (which can name the
 		// compared item first when the game compares).
 		const std::uint64_t now = GetTickCount64();
-		if (const int verdict = BuiltVerdict(BoxText(boxes), now); verdict >= 0) frames[0] = static_cast<std::uint8_t>(verdict);
+		const int hovered = BuiltVerdict(BoxText(boxes), now);
+		if (hovered >= 0) frames[0] = static_cast<std::uint8_t>(hovered);
+		if (count > 1 && ToldHovered < 4) {
+			++ToldHovered;
+			const std::string_view text = BoxText(boxes);
+			Say(false, "Perfect Frame: hovered box of %llu (%llu bytes \"%s\"): %s, frame %s", static_cast<unsigned long long>(count), static_cast<unsigned long long>(text.size()),
+			    Printable(text, 60).c_str(), hovered >= 0 ? "matches a built text" : "no built text matches", frames[0] ? "yes" : "no");
+		}
 		// The order the boxes were asked for: the last pair of calls.
 		if (!PendingCalls.empty()) {
 			ShownCompare.clear();
