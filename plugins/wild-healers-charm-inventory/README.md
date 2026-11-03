@@ -13,17 +13,17 @@ Needs Player Page Host (`aaa-player-page-host`). The charms stay on the player p
 
 ## Install
 
-Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/wild-healer-s-charm-inventory). Load `wild-healers-charm-inventory-<version>.zip` (the DLL alone; its default settings are built in) in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Remove the DLL to uninstall.
+Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/wild-healer-s-charm-inventory). Load `wild-healers-charm-inventory.zip` (the DLL alone; its default settings are built in) in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Remove the DLL to uninstall.
 
 ## Settings
 
-`d2rloader/config/wild-healers-charm-inventory.toml`, written on first launch:
+`d2rloader/config/wild-healers-charm-inventory.toml`, written on first launch, or in game with [I Hate TOMLs](../i-hate-tomls). Every setting applies at once:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `true` | Turns the plugin off without removing it. |
+| `enabled` | `true` | Off: no button or panel, and charms in the normal inventory give their bonuses again. Charms left in the charm inventory stay there, without bonuses. |
 | `columns` | `10` | Width of the charm inventory in cells, 1 to 10. |
-| `rows` | `4` | Height of the charm inventory in cells, 1 to 12. Take the charms out of the cells you remove before making it smaller. |
+| `rows` | `4` | Height of the charm inventory in cells, 1 to 12. Take the charms out of the cells you remove before making it smaller (I Hate TOMLs refuses the change otherwise). |
 
 ## Console
 
