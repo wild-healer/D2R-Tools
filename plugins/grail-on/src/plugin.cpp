@@ -3417,7 +3417,7 @@ std::string RunewordArt(const Tile& tile, const std::string& n, int left, int to
 			out += Image(n + "Back", x, y, std::string("d2rloader\\item-quality-backgrounds\\") + (bare ? "normal\\" : "runeword\\") + std::to_string(box.width) + "x" + std::to_string(box.height),
 			             bare ? ", \"transparency\": 0.65" : ", \"transparency\": 0.55");
 		// The game's sockets are about 62% of a cell, their runes 55%. The
-		// sockets are under the item, at about 60% (the game's grid in Théo's
+		// sockets are under the item, at about 60% (the game's grid in a
 		// screenshot), the runes over it.
 		const auto   spots = SocketSpots(box.width, box.height, static_cast<int>(entry.runes.size()));
 		const double room  = Cell * std::min(1.0, spots.second) * 0.62;
