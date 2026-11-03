@@ -61,6 +61,7 @@ All of them are on the grail's settings page (the gear icon), on five pages (Gen
 | `compact` | `false` | The Layout choice: Compact puts the window against the screen's left edge, with its menus on its right. |
 | `swap_columns` | `false` | The Menu direction choice: Right to left puts the category icons in the left column and the menu icons in the right one. |
 | `loot_uniques`, `loot_ethereal`, `loot_sets` | `all` | `all`, `found` or `perfect`: ground items hidden once the grail has them, or has them perfect. |
+| `loot_unid_only` | `true` | Only unidentified ground items are hidden; identified ones always show. |
 | `loot_ambiguous` | `false` | Unidentified ground items are hidden by what they really are. Off: only when every unique or set item of their base would be hidden. |
 
 ## Keybind

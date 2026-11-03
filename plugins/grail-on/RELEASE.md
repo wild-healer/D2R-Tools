@@ -1,3 +1,21 @@
+# Grail On! 1.1.5: patch notes
+
+```
+**Grail On! 1.1.5**
+
+**New**
+
+* Only unidentified items: a Loot setting, on by default, so the loot filter only hides unidentified items.
+
+**Fixed**
+
+* The game no longer crashes when grail buttons, slots or the scroll bar are clicked quickly: quick clicks make one view, and each view waits for the last one to finish loading.
+* The grail keeps at most 8 closed views ready instead of 40, so it holds far fewer of the game's widgets.
+* The plugin no longer writes copies of the game's art into the logs folder.
+* Jewels show their own picture instead of a perfect diamond, and stored jewels and charms show the picture they have.
+* Items with Enhanced Damage or Enhanced Defense rolls are counted as perfect as soon as they go in, and ones already stored are checked again, so the loot filter hides their copies.
+```
+
 # Grail On! 1.1.4: patch notes
 
 ```

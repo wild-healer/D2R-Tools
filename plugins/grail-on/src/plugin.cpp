@@ -114,7 +114,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.1.4";
+constexpr const char* PluginVersion = "1.1.5";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -286,6 +286,7 @@ struct Settings {
 	bool uniqueNames {}, uniqueArt {}, setItemNames {}, setItemArt {}, setNames {}, runewordNames {}, runewordRunes {};
 	int  goal[4] { GoalFind, GoalFind, GoalFind, GoalFind }; // by Kind: uniques, ethereal uniques, set items, runewords
 	int  loot[3] { LootAll, LootAll, LootAll };               // uniques, ethereal uniques, set items on the ground
+	bool lootUnidOnly = true; // only unidentified ground items are hidden
 	bool lootAmbiguous {};  // unidentified items hidden by what they are, not only when every item of their base would be
 	int  compare = CompareAlways; // the grail copy in the comparison: never, with Shift held, always
 	bool perfectFrames = true;     // perfect copies' glow around their tile
@@ -323,6 +324,8 @@ constexpr Toggle Toggles[] {
 	{ "runeword_runes", &Settings::runewordRunes, "Runewords", "Unfound runewords show their runes. Off: blank stones until you find them.", ShowArt },
 	{ "perfect_frames", &Settings::perfectFrames, "Perfect frames", "Perfect copies glow around their tile.", DisplayGroup },
 	{ "scroll_animations", &Settings::scrollAnimations, "Scroll animations", "The mouse wheel scrolls smoothly. Off: it jumps a row at a time.", DisplayGroup },
+	{ "loot_unid_only", &Settings::lootUnidOnly, "Only unidentified items",
+	  "Only unidentified items are hidden; identified ones always show. Off: identified items are hidden too.", LootGroup },
 	{ "loot_ambiguous", &Settings::lootAmbiguous, "Filter ambiguous bases",
 	  "Unidentified items are hidden by what they really are, even when other items share their base. Off: an unidentified item is only hidden when every unique or set item of its base would be.",
 	  LootGroup },
@@ -1374,6 +1377,9 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 		if (base.name.empty()) base.name = code;
 		const auto asset = mod.bases.count(code) ? mod.bases.at(code) : builtin.count(code) ? builtin[code] : "";
 		if (!asset.empty()) base.asset = folder(base.kind) + asset;
+		// A jewel's own art is the game's gem/perfect_diamond1..6 (the plain
+		// name is the perfect diamond gem): its first picture by default.
+		if ((code == "jew" || code == "cjw") && !mod.bases.count(code) && !base.asset.empty()) base.asset += "1";
 		Bases[code] = base;
 	}
 	std::map<std::string, std::string> uniqueArt;
@@ -1928,26 +1934,6 @@ using FileSizeFn  = std::uint64_t (*)(void* file) noexcept;
 using FileReadFn  = bool (*)(void* file, void* buffer, std::uint64_t size, std::uint64_t* read) noexcept;
 using FileCloseFn = void (*)(void* file) noexcept;
 
-// A copy of `bytes` in d2rloader\logs next to this plugin's folder (for
-// looking at the game's art the plugin uses).
-void DumpFile(const wchar_t* name, const std::string& bytes) {
-	HMODULE module = nullptr;
-	wchar_t path[MAX_PATH] {};
-	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&DumpFile), &module)
-	    || !GetModuleFileNameW(module, path, MAX_PATH))
-		return;
-	std::wstring folder = path;
-	folder.resize(folder.find_last_of(L"\\/") == std::wstring::npos ? 0 : folder.find_last_of(L"\\/"));
-	folder.resize(folder.find_last_of(L"\\/") == std::wstring::npos ? 0 : folder.find_last_of(L"\\/"));
-	if (folder.empty()) return;
-	const std::wstring file = folder + L"\\logs\\grail-on-" + name;
-	HANDLE out = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-	if (out == INVALID_HANDLE_VALUE) return;
-	DWORD written = 0;
-	(void)WriteFile(out, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
-	CloseHandle(out);
-}
-
 // The whole file, or empty when it is not there or cannot be read.
 std::string ArchiveFile(const char* path) {
 	static const FileOpenFn open = [] {
@@ -2290,13 +2276,11 @@ void __cdecl BuildFromGame(const D2RL::PluginContext* context, void*) noexcept {
 		AdvancedButtonFile             = ArchiveFile(advanced);
 		if (AdvancedButtonFile.empty()) AdvancedButtonFile = ResourceFile(advanced);
 		if (AdvancedButtonFile.empty()) Say(false, "grailon: the Advanced Stats button picture was not found");
-		else DumpFile(L"advancedstatsbutton.sprite", AdvancedButtonFile);
 		for (auto& art : SettingsArt) {
 			art.file = ArchiveFile(art.path);
 			if (art.file.empty()) art.file = ResourceFile(art.path);
 			const std::string name = std::strrchr(art.path, '/') + 1;
 			if (art.file.empty()) Say(false, "grailon: settings art %s not found", name.c_str());
-			else DumpFile(std::wstring(name.begin(), name.end()).c_str(), art.file);
 		}
 		RefreshArt = FindRefreshButton();
 		SettingsArtRead = true;
@@ -3417,7 +3401,7 @@ std::string RunewordArt(const Tile& tile, const std::string& n, int left, int to
 			out += Image(n + "Back", x, y, std::string("d2rloader\\item-quality-backgrounds\\") + (bare ? "normal\\" : "runeword\\") + std::to_string(box.width) + "x" + std::to_string(box.height),
 			             bare ? ", \"transparency\": 0.65" : ", \"transparency\": 0.55");
 		// The game's sockets are about 62% of a cell, their runes 55%. The
-		// sockets are under the item, at about 60% (the game's grid in a
+		// sockets are under the item, at about 60% (the game's grid in Théo's
 		// screenshot), the runes over it.
 		const auto   spots = SocketSpots(box.width, box.height, static_cast<int>(entry.runes.size()));
 		const double room  = Cell * std::min(1.0, spots.second) * 0.62;
@@ -5235,7 +5219,11 @@ struct ViewPanel {
 	unsigned long long                  used {}; // when it was last shown
 	ULONGLONG                           closedAt {}; // when it was last closed (GetTickCount64)
 	ULONGLONG                           preparedAt {}; // when its layout was last loaded (GetTickCount64)
+	bool                                loaded {};     // the game has its widgets (opened since its last unload)
+	ULONGLONG                           unloadedAt {}; // when the game was last told to let them go
 };
+constexpr int KeptLoaded = 8; // closed views the game keeps built; the others are let go (each holds many widgets)
+ULONGLONG     LastViewBuild {}; // when ShowView last built or picked a view
 ViewPanel                       Views[ViewCount];
 int                             ShownView = -1, PreparedView = -1;
 unsigned                        OpenSequence {}; // the latest prepared view; older ones never open
@@ -5288,8 +5276,8 @@ void CloseView() {
 	CloseScrollPanel();
 	if (ErrorPanel != D2RL::Panels::InvalidHandle && IsOpen(ErrorPanel)) (void)PanelApi->closePanel(Context, ErrorPanel);
 	PreparedView = -1;
-	for (const auto& view : Views)
-		if (IsOpen(view.panel)) (void)PanelApi->closePanel(Context, view.panel);
+	for (auto& view : Views)
+		if (IsOpen(view.panel)) (void)PanelApi->closePanel(Context, view.panel), view.closedAt = GetTickCount64();
 	ShownView  = -1;
 	ViewIsOpen = false;
 	SyncArea();
@@ -5402,6 +5390,21 @@ void ShowView(const Drop& drop = {}) {
 		Say(true, "grailon: the item lists are not ready yet");
 		return;
 	}
+	// Fast clicks (the scroll bar dragged, peek slots, arrows) become one
+	// view: never two within 60 ms, and never while the last new layout is
+	// still loading (half a second at most). Building a panel over one the game
+	// was still making crashed it in its layout loader.
+	if (!drop.wanted) {
+		const ULONGLONG now = GetTickCount64();
+		ULONGLONG       due = 0;
+		if (LastViewBuild && now - LastViewBuild < 60) due = LastViewBuild + 60;
+		if (PreparedView >= 0 && PreparedNew && now - PrepareStart < 500) due = std::max<ULONGLONG>(due, std::min<ULONGLONG>(PrepareStart + 500, now + 60));
+		if (due) {
+			ViewRetryAt = ViewRetryAt ? std::min<ULONGLONG>(ViewRetryAt, due) : due;
+			return;
+		}
+	}
+	LastViewBuild = GetTickCount64();
 	int         index = -1;
 	bool        settings {};
 	std::string layout;
@@ -5438,7 +5441,7 @@ void ShowView(const Drop& drop = {}) {
 		settings              = !TilesView(); // the stats overview keeps its grid for the standard's tile
 		const std::string key = ViewKey();
 		for (int i = 0; i < ViewCount; ++i)
-			if (Views[i].key == key) index = i;
+			if (Views[i].key == key && (Views[i].loaded || GetTickCount64() - Views[i].unloadedAt >= 1500)) index = i;
 		if (index >= 0 && index == ShownView && IsOpen(Views[index].panel) && !drop.wanted) {
 			++OpenSequence; // the view on screen is already this one
 			PreparedView = -1;
@@ -5460,6 +5463,7 @@ void ShowView(const Drop& drop = {}) {
 					// made while the scroll bar is dragged, overtaken by the next):
 					// unloading it again at once crashed the game's layout loader.
 					if (!allowRecent && view.preparedAt && now - view.preparedAt < 1500) continue;
+					if (!allowRecent && view.unloadedAt && now - view.unloadedAt < 1500) continue;
 					if (index < 0 || view.used < Views[index].used) index = i;
 				}
 				if (index >= 0) break;
@@ -5480,10 +5484,11 @@ void ShowView(const Drop& drop = {}) {
 	PrepareStart = GetTickCount64();
 	PreparedNew  = !layout.empty();
 	if (!layout.empty()) {
-		if (next.opened && WidgetApi) {
+		if (next.loaded && WidgetApi) {
 			const std::string             name = std::string("grail-on/") + next.id;
 			const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = name.c_str() };
 			(void)WidgetApi->dispatchUiAction(Context, &unload);
+			next.loaded = false, next.unloadedAt = GetTickCount64();
 		}
 		if (next.layout != D2RL::Resources::InvalidHandle) (void)ResourceApi->unregisterResource(Context, next.layout);
 		next.layout = D2RL::Resources::InvalidHandle;
@@ -5497,6 +5502,40 @@ void ShowView(const Drop& drop = {}) {
 		if (QueueArrange(job)) return;
 	}
 	OpenPrepared(sequence);
+}
+
+// UI thread. A view put off (fast clicks, no free panel) is made now.
+void RetryViewIfDue() {
+	if (ViewRetryAt && GetTickCount64() >= ViewRetryAt) {
+		ViewRetryAt = 0;
+		if (ViewOpen() || PreparedView >= 0) ShowView();
+	}
+}
+
+// UI thread. Closed views beyond the newest KeptLoaded are let go by the game
+// (UnloadPanel): their layout stays registered, so showing one again loads it
+// back. Never one in use, closed under 1.5 s ago, or loading.
+bool IsOpen(D2RL::Panels::RegistrationHandle panel);
+void LetClosedViewsGo() {
+	if (!WidgetApi) return;
+	const ULONGLONG now = GetTickCount64();
+	std::vector<int> closed;
+	for (int i = 0; i < ViewCount; ++i) {
+		const auto& view = Views[i];
+		if (!view.loaded || i == ShownView || i == PreparedView || LateClose.count(i) || view.panel == D2RL::Panels::InvalidHandle || IsOpen(view.panel)) continue;
+		closed.push_back(i);
+	}
+	if (static_cast<int>(closed.size()) <= KeptLoaded) return;
+	std::sort(closed.begin(), closed.end(), [](int a, int b) { return Views[a].used > Views[b].used; });
+	for (std::size_t k = KeptLoaded; k < closed.size(); ++k) {
+		auto& view = Views[closed[k]];
+		if (now - view.closedAt < 1500 || now - view.preparedAt < 1500) continue;
+		const std::string             name = std::string("grail-on/") + view.id;
+		const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = name.c_str() };
+		(void)WidgetApi->dispatchUiAction(Context, &unload);
+		view.loaded = false, view.unloadedAt = now;
+		return; // one per tick
+	}
 }
 
 void OpenPrepared(unsigned sequence) {
@@ -5550,6 +5589,7 @@ void OpenPrepared(unsigned sequence) {
 	if (Config.timing) Say(false, "grailon: %s view, shown after %llu ms", PreparedNew ? "new" : "cached", static_cast<unsigned long long>(GetTickCount64() - PrepareStart));
 	if (result != D2RL::Panels::Result::Success) Say(true, "grailon: could not open the view (result %u)", static_cast<unsigned>(result));
 	next.opened = true;
+	next.loaded = true;
 	next.used   = ++UseClock;
 	ShownView   = index;
 	ViewIsOpen  = true;
@@ -6186,17 +6226,20 @@ int PictureInBytes(const std::vector<std::uint8_t>& bytes, std::uint32_t itemLev
 }
 
 Record* RecordAt(int u, bool eth);
-// Lock held. A stored ring's or amulet's tile: the picture its item has
-// (ring1..5, amulet1..3 next to the base's own), not the base's.
+// Lock held. A stored ring's, amulet's, jewel's or charm's tile: the picture
+// its item has (ring1..5, amulet1..3, perfect_diamond1..6, charm_small1..3),
+// not the base's.
 std::string StoredArt(int u, bool eth, const std::string& art) {
 	const auto& entry = Uniques[u];
-	if (entry.code != "rin" && entry.code != "amu") return art;
+	const int   count = entry.code == "rin" ? 5 : entry.code == "amu" ? 3 : entry.code == "jew" || entry.code == "cjw" ? 6 : entry.code == "cm1" || entry.code == "cm2" || entry.code == "cm3" ? 3 : 0;
+	if (!count) return art;
 	const Record* record = RecordAt(u, eth);
 	if (!record) return art;
 	const int picture = PictureInBytes(record->bytes, record->itemLevel, record->quality);
-	const int count   = entry.code == "rin" ? 5 : 3;
 	if (picture < 0 || picture >= count || entry.ghost.empty()) return art;
-	return entry.ghost + std::to_string(picture + 1);
+	std::string name = entry.ghost;
+	while (!name.empty() && name.back() >= '0' && name.back() <= '9') name.pop_back(); // the jewel's default picture
+	return name + std::to_string(picture + 1);
 }
 
 // A simple item's stand-in fingerprint, from its base's code.
@@ -6357,9 +6400,15 @@ int RunewordRowOf(const Items::ItemInfo& item) {
 	return -2;
 }
 
+// By runtime id: whether an item going into the grail is perfect, as the UI
+// thread read it (Enhanced Damage and Enhanced Defense are only in its
+// tooltip, which the game thread cannot build). Guarded by Lock.
+std::map<std::uint32_t, bool> UiPerfect;
+
 // Lock held. A new record for page item `item` of entry `u`.
 bool RecordItem(const Items::ItemInfo& item, int u, bool eth, bool perfect) {
 	if (Uniques[u].misc) perfect = true; // nothing on a misc item varies: every copy is perfect
+	if (const auto known = UiPerfect.find(item.runtimeId); known != UiPerfect.end()) perfect = perfect || known->second, UiPerfect.erase(known);
 	Snapshot snapshot { .itemLevel = item.itemLevel, .quality = static_cast<std::uint32_t>(item.quality) };
 	snapshot.code = item.code;
 	const auto read = ItemApi->editNativeItem(Context, item.handle, TakeSnapshot, &snapshot);
@@ -6495,6 +6544,9 @@ struct Ghost {
 std::map<std::uint32_t, Ghost> Ghosts;      // by fingerprint; guarded by Lock
 std::set<std::uint32_t>        GhostWanted; // guarded by Lock
 std::atomic<bool>              GhostQueued {}, GhostsFreeing {};
+std::atomic<std::uint64_t>     GhostEpoch {};   // counts ghost frees: a freed ghost's address can come back as another item
+std::set<std::uint32_t>        PerfectChecked;  // records whose ghost told whether they are perfect (this launch); guarded by Lock
+std::set<std::uint32_t>        SweepGhosts;     // ghosts made only for that check, freed after it; guarded by Lock
 
 // The server game, learnt from a createItem whose decode makes nothing.
 void* LearnGame(D2RL::PlayerHandle player, std::uint32_t code) {
@@ -6563,9 +6615,22 @@ void __cdecl FreeGhosts(const D2RL::PluginContext*, void*) noexcept {
 		std::lock_guard guard(Lock);
 		gone.swap(Ghosts);
 	}
+	++GhostEpoch;
 	for (const auto& [fingerprint, ghost] : gone)
 		if (ghost.unit && ghost.game && ghost.game == ServerGame.load()) FreeItem(ghost.game, ghost.unit);
+	{
+		std::lock_guard guard(Lock);
+		SweepGhosts.clear();
+	}
 	GhostsFreeing = false;
+}
+
+// Game thread: the ghosts the perfect check is done with.
+void __cdecl FreeSomeGhosts(const D2RL::PluginContext*, void* userData) noexcept {
+	auto* gone = static_cast<std::vector<Ghost>*>(userData);
+	for (const auto& ghost : *gone)
+		if (ghost.unit && ghost.game && ghost.game == ServerGame.load()) FreeItem(ghost.game, ghost.unit);
+	delete gone;
 }
 
 // ---- an empty page outside the view (game thread) ----
@@ -8151,11 +8216,13 @@ bool RemoteCursorJob(CursorJob* job) {
 // Lock held. Takes a Ctrl+clicked grail item: it goes from where it is
 // straight into its tile (Queue("drop") runs RunDrop).
 bool QueueCursorJob(CursorJob* job);
+void NoteUiPerfect(int u, std::uint32_t runtimeId, bool eth);
 // Lock held. A grail item whose tile holds a stored copy: swapped with it.
 bool QueueSwap(const Items::ItemInfo& item, int u, bool cursor) {
 	const auto twin = StoreReady && !StorePath.empty() ? RecordAt(u, IsEth(item)) : nullptr;
 	if (!twin || Materialized.count(item.runtimeId) || Busy.count(item.runtimeId)) return false; // no copy, or the item is the copy
 	Busy.insert(item.runtimeId);
+	NoteUiPerfect(u, item.runtimeId, IsEth(item));
 	if (!QueueCursorJob(new CursorJob { .step = cursor ? CursorStep::SwapPut : CursorStep::SwapIn, .id = item.runtimeId, .cursor = cursor, .unique = u, .eth = IsEth(item) })) {
 		Busy.erase(item.runtimeId);
 		return false;
@@ -9000,9 +9067,9 @@ std::atomic<DWORD> UiThread {}; // the UI thread, from its tick
 // An item's Enhanced Damage and Enhanced Defense, from its own tooltip (built
 // once per item and grail state; Lock may be held).
 TextRolls ItemTextRolls(void* copy, int entry) {
-	static std::map<std::tuple<void*, int, std::uint64_t>, TextRolls> known;
+	static std::map<std::tuple<void*, int, std::uint64_t, std::uint64_t>, TextRolls> known;
 	if (!copy) return {};
-	const auto key = std::tuple { copy, entry, GrailChanges };
+	const auto key = std::tuple { copy, entry, GrailChanges, GhostEpoch.load() };
 	if (const auto found = known.find(key); found != known.end()) return found->second;
 	if (GetCurrentThreadId() != UiThread.load()) return {}; // tooltips are built on the UI thread only
 	// The tooltip builder D2RCore puts behind the game's thunk pointer.
@@ -9170,7 +9237,8 @@ struct LootTable {
 	// By Items row: hidden whatever unique (set item) of that base it is, for
 	// unidentified items when ambiguous bases are not filtered.
 	std::vector<std::uint8_t> uniqueBases, setBases;
-	bool                      exact {}; // unidentified items by their row
+	bool                      exact {};   // unidentified items by their row
+	bool                      unidOnly {}; // identified items are never hidden
 	bool operator==(const LootTable&) const = default;
 };
 std::atomic<std::shared_ptr<const LootTable>> LootRows;
@@ -9179,29 +9247,37 @@ VisibleFn                                     LootBefore[std::size(Loot::Sites)]
 std::uint8_t*                                 LootSite[std::size(Loot::Sites)] {};
 bool                                          LootTried {};
 
+bool LootDecide(const void* unit, const void* data, const LootTable& table, std::uint32_t quality, int& file) noexcept {
+	const auto* rows = quality == Game::UniqueQuality ? &table.uniques : &table.sets;
+	const auto flags = At<std::uint32_t>(data, Game::DataFlags);
+	const auto item  = static_cast<int>(At<std::uint32_t>(unit, Loot::UnitClass));
+	const int  bit   = (flags & Game::Ethereal) ? 2 : 1;
+	file             = -1;
+	if ((flags & Loot::Identified) && table.unidOnly) return false;
+	// Unidentified, filtered as its base only: hidden when every item of that base would be.
+	if (!(flags & Loot::Identified) && !table.exact) {
+		const auto& bases = quality == Game::UniqueQuality ? table.uniqueBases : table.setBases;
+		return item >= 0 && item < static_cast<int>(bases.size()) && (bases[item] & bit) != 0;
+	}
+	file = At<std::int32_t>(data, Game::DataFile);
+	if (file < 0 || file >= static_cast<int>(rows->size())) return false;
+	const LootRow& row = (*rows)[file];
+	// An unidentified item's row is only trusted when its base is the row's.
+	if (!row.hide || row.item != item) return false;
+	return (row.hide & bit) != 0;
+}
+
 bool LootHidden(const void* unit) noexcept {
 	if (!LootOn.load(std::memory_order_relaxed) || !unit || At<std::uint32_t>(unit, 0) != Game::ItemUnit) return false;
 	const void* data = At<const void*>(unit, Game::UnitData);
 	if (!data) return false;
 	const auto table = LootRows.load(std::memory_order_acquire);
 	if (!table) return false;
-	const auto  quality = At<std::uint32_t>(data, Game::DataQuality);
-	const auto* rows    = quality == Game::UniqueQuality ? &table->uniques : quality == Game::SetQuality ? &table->sets : nullptr;
-	if (!rows) return false;
-	const auto flags = At<std::uint32_t>(data, Game::DataFlags);
-	const auto item  = static_cast<int>(At<std::uint32_t>(unit, Loot::UnitClass));
-	const int  bit   = (flags & Game::Ethereal) ? 2 : 1;
-	// Unidentified, filtered as its base only: hidden when every item of that base would be.
-	if (!(flags & Loot::Identified) && !table->exact) {
-		const auto& bases = quality == Game::UniqueQuality ? table->uniqueBases : table->setBases;
-		return item >= 0 && item < static_cast<int>(bases.size()) && (bases[item] & bit) != 0;
-	}
-	const auto file = At<std::int32_t>(data, Game::DataFile);
-	if (file < 0 || file >= static_cast<int>(rows->size())) return false;
-	const LootRow& row = (*rows)[file];
-	// An unidentified item's row is only trusted when its base is the row's.
-	if (!row.hide || row.item != item) return false;
-	return (row.hide & bit) != 0;
+	const auto quality = At<std::uint32_t>(data, Game::DataQuality);
+	if (quality != Game::UniqueQuality && quality != Game::SetQuality) return false;
+	int        file   = -1;
+	const bool hidden = LootDecide(unit, data, *table, quality, file);
+	return hidden;
 }
 
 template <int N>
@@ -9313,7 +9389,8 @@ void PublishLootTable() {
 	};
 	byBase(table->uniques, UniqueByRow, table->uniqueBases);
 	byBase(table->sets, SetByRow, table->setBases);
-	table->exact = Config.lootAmbiguous;
+	table->exact    = Config.lootAmbiguous;
+	table->unidOnly = Config.lootUnidOnly;
 	if (const auto now = LootRows.load(); !now || !(*now == *table)) LootRows.store(std::move(table), std::memory_order_release);
 }
 
@@ -9425,9 +9502,18 @@ void PredictDrop(const Drop& drop) {
 	BaseTiles.erase(key);
 	if (!RollsReady || !ReadStat) return;
 	if (void* unit = reinterpret_cast<GetUnitFn>(Base + Game::GetUnit)(drop.runtimeId, Game::ItemUnit)) {
-		if (IsPerfect(drop.unique, unit, drop.eth)) Perfect.insert(key);
+		const bool perfect = Uniques[drop.unique].secret || IsPerfect(drop.unique, unit, drop.eth);
+		UiPerfect[drop.runtimeId] = perfect; // for its record, made on the game thread
+		if (perfect) Perfect.insert(key);
 		else Perfect.erase(key);
 	}
+}
+
+// Lock held (UI thread). Whether an item about to go into the grail is
+// perfect, read now for its record (made on the game thread).
+void NoteUiPerfect(int u, std::uint32_t runtimeId, bool eth) {
+	if (u < 0 || u >= UniqueCount() || !RollsReady || !ReadStat || GetCurrentThreadId() != UiThread.load()) return;
+	if (void* unit = reinterpret_cast<GetUnitFn>(Base + Game::GetUnit)(runtimeId, Game::ItemUnit)) UiPerfect[runtimeId] = Uniques[u].secret || IsPerfect(u, unit, eth);
 }
 
 // Lock held. Whether the perfect tiles changed.
@@ -9443,6 +9529,41 @@ bool RefreshPerfect() {
 		if (!unit) continue;
 		const bool perfect = Uniques[entry->second].secret || IsPerfect(entry->second, unit, record->second.eth);
 		if (perfect != record->second.perfect) record->second.perfect = perfect, changed = true;
+	}
+	// The others: a record stored while its tile was a picture, or while its
+	// rolls could not be read (Enhanced Damage is only in the tooltip, built on
+	// this thread), kept "not perfect". Its ghost tells, once per launch.
+	if (!Remote() && !GhostsFreeing && GetCurrentThreadId() == UiThread.load()) {
+		std::set<std::uint32_t> onPage;
+		for (const auto& [runtime, fingerprint] : Materialized) onPage.insert(fingerprint);
+		auto* done  = new std::vector<Ghost>;
+		int   asked = 0;
+		for (auto& [fingerprint, record] : Records) {
+			if (record.perfect || record.base || onPage.count(fingerprint) || PerfectChecked.count(fingerprint)) continue;
+			const auto entry = EntryById.find(record.id);
+			if (entry == EntryById.end()) {
+				PerfectChecked.insert(fingerprint);
+				continue;
+			}
+			const auto ghost = Ghosts.find(fingerprint);
+			if (ghost == Ghosts.end()) {
+				if (asked < 8 && !GhostWanted.count(fingerprint)) ++asked, SweepGhosts.insert(fingerprint), (void)GhostOf(fingerprint);
+				continue;
+			}
+			if (!ghost->second.unit) {
+				PerfectChecked.insert(fingerprint);
+				continue;
+			}
+			const bool perfect = Uniques[entry->second].secret || IsPerfect(entry->second, ghost->second.unit, record.eth);
+			PerfectChecked.insert(fingerprint);
+			if (perfect) record.perfect = true, changed = true;
+			if (SweepGhosts.erase(fingerprint) && ghost->second.unit != PeekShown) done->push_back(ghost->second), Ghosts.erase(ghost);
+		}
+		if (done->empty()) delete done;
+		else {
+			++GhostEpoch;
+			if (Threads->runOnGameThread(Context, FreeSomeGhosts, done) != D2RL::Threads::Result::Success) delete done; // freed with the game
+		}
 	}
 	if (!changed) return false;
 	SaveStore();
@@ -9536,7 +9657,10 @@ void Animate() {
 	HideLifeText(true);
 }
 
-void __cdecl AnimateOnUi(const D2RL::PluginContext*, void*) noexcept { Animate(); }
+void __cdecl AnimateOnUi(const D2RL::PluginContext*, void*) noexcept {
+	Animate();
+	RetryViewIfDue(); // every frame tick, not only every UI tick
+}
 
 // `grailon rolls`: each stored copy's variable rolls against the best, to see
 // why a copy is or is not perfect.
@@ -9605,6 +9729,7 @@ void ClickPeek(int index) {
 			if (u == peek.unique && IsEth(item) == peek.eth) {
 				job = new CursorJob { .step = CursorStep::PutPage, .id = item.runtimeId, .unique = u, .eth = IsEth(item) };
 				Busy.insert(item.runtimeId);
+				NoteUiPerfect(u, item.runtimeId, IsEth(item));
 			} else {
 				int width = 1, height = 1;
 				(void)ItemSize(CodeText(item.code), width, height);
@@ -10776,10 +10901,8 @@ void __cdecl UiTick(const D2RL::PluginContext* context, void*) noexcept {
 	KickPending(); // a kept cursor item never stays kept
 	ObjInputTick();
 	WatchMiddleClick();
-	if (ViewRetryAt && GetTickCount64() >= ViewRetryAt) {
-		ViewRetryAt = 0;
-		if (ViewOpen() || PreparedView >= 0) ShowView();
-	}
+	RetryViewIfDue();
+	LetClosedViewsGo();
 	WatchScrollTest();
 	{
 		// Closed (or a character just in): the page is emptied once.
