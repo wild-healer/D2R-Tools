@@ -12,12 +12,10 @@ out=$here/build
 mkdir -p "$out"
 x86_64-w64-mingw32-windres -I"$sdk/include" -I"$here" "$here/src/plugin.rc" -O coff -o "$out/plugin.res"
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s \
-  -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion -lshell32 -lole32 -luuid \
+  -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion \
   -o "$out/d2rl-quickcast-save-fix.dll"
 cp "$out/d2rl-quickcast-save-fix.dll" "$here/"
-# D2RMM package: the DLL and its config at the zip root.
-version=$(sed -n 's/.*PluginVersion = "\(.*\)";/\1/p' "$here/src/plugin.cpp")
-zip=quickcast-save-fix-$version.zip
+# Package: the DLL alone (its config is built in; D2RLoader writes it on first launch).
 rm -f "$here"/quickcast-save-fix*.zip
-(cd "$here" && zip -q -X "$zip" d2rl-quickcast-save-fix.dll quickcast-save-fix.toml)
-echo "built $here/d2rl-quickcast-save-fix.dll and $here/$zip"
+(cd "$here" && zip -q -X quickcast-save-fix.zip d2rl-quickcast-save-fix.dll)
+echo "built $here/d2rl-quickcast-save-fix.dll and $here/quickcast-save-fix.zip"

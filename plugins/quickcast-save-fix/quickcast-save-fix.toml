@@ -5,8 +5,7 @@
 # click. Saving before that (Save and Exit in the middle of a cast, or right
 # after one) wrote the hotkey skill as your left/right skill. This plugin puts
 # your own skills in the save instead.
-# D2RLoader copies this file to d2rloader/config/quickcast-save-fix.toml on
-# first launch; edit that copy. Changes apply the next time the game starts.
+# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
 
 [quickcast-save-fix]
 enabled = true

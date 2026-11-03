@@ -28,6 +28,7 @@
 #include <windows.h>
 
 #include <array>
+#include <atomic>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -37,10 +38,12 @@
 #include <string_view>
 #include <vector>
 
+#include "i_hate_tomls_client.h"
+
 namespace {
 
 constexpr const char* PluginId      = "quickcast-save-fix";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -53,9 +56,10 @@ const D2RL::PluginInfo Info {
 	.flags       = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
 };
 
+// Read by the save on the game thread, changed live from I Hate TOMLs.
 struct Settings {
-	bool enabled = true;
-	bool logFixes = true;
+	std::atomic<bool> enabled { true };
+	std::atomic<bool> logFixes { true };
 } Config;
 
 // ---- native layout (Steam 3.3.93787 / 94995) ----
@@ -125,9 +129,18 @@ void Log(bool warn, const char* format, ...) noexcept {
 	warn ? Context->LogWarn(line) : Context->LogInfo(line);
 }
 
+// Reads the game's own memory after checking it is committed and readable
+// (ReadProcessMemory made one antivirus heuristic call a DLL an injector).
 bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
-	SIZE_T copied = 0;
-	return address != 0 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), output, size, &copied) && copied == size;
+	if (address == 0) return false;
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+	if (address + size > end) return false;
+	std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	return true;
 }
 
 template <typename T>
@@ -185,6 +198,7 @@ std::array<PutBack, 2> PendingPutBacks(void* player) noexcept {
 }
 
 std::uint64_t SaveWriter(void* game, void* player, void* buffer, void* size, std::uint64_t capacity, std::uint64_t flag) noexcept {
+	if (!Config.enabled) return Writer(game, player, buffer, size, capacity, flag);
 	const auto  backs  = PendingPutBacks(player);
 	auto* const skills = static_cast<std::uint8_t*>(backs[0].skill >= 0 || backs[1].skill >= 0 ? Skills(player) : nullptr);
 	std::array<void*, 2> before {};
@@ -257,6 +271,8 @@ bool RedirectSaves() noexcept {
 	return false;
 }
 
+// ---- config ----
+
 std::string Trim(std::string_view text) {
 	const auto first = text.find_first_not_of(" \t\r\n");
 	if (first == std::string_view::npos) return {};
@@ -268,6 +284,63 @@ std::string Unquote(std::string value) {
 	if (const auto hash = value.find('#'); hash != std::string::npos) value = Trim(value.substr(0, hash));
 	if (value.size() >= 2 && value.front() == '"' && value.back() == '"') value = value.substr(1, value.size() - 2);
 	return value;
+}
+
+// Applies one setting from its TOML text (strings unquoted); false + reason when refused.
+bool Apply(const std::string& key, const std::string& value, std::string& error) {
+	const auto flag = [&](std::atomic<bool>& target) {
+		if (value != "true" && value != "false") return error = "true or false", false;
+		target = value == "true";
+		return true;
+	};
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "log_fixes") return flag(Config.logFixes);
+	return error = "unknown setting", false;
+}
+
+std::string ValueOf(const std::string& key) {
+	const auto flag = [](bool on) { return std::string(on ? "true" : "false"); };
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "log_fixes") return flag(Config.logFixes);
+	return {};
+}
+
+std::string Render() {
+	return R"(# Quickcast Save Fix
+#
+# With Quick Cast on, a skill hotkey puts its skill on your left or right
+# click for the cast, and the game only puts your own skill back on your next
+# click. Saving before that (Save and Exit in the middle of a cast, or right
+# after one) wrote the hotkey skill as your left/right skill. This plugin puts
+# your own skills in the save instead.
+# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
+
+[quickcast-save-fix]
+enabled = )" + ValueOf("enabled") + R"(
+
+# Write a line in the D2RLoader log each time a save gets your skills back.
+log_fixes = )" + ValueOf("log_fixes") + "\n";
+}
+
+void SaveConfig() {
+	const std::string toml = Render();
+	if (!Context->WriteConfig(toml.c_str())) Log(true, "config: could not write the config file");
+}
+
+void ApplyText(std::string_view text) {
+	std::size_t lineStart = 0;
+	while (lineStart < text.size()) {
+		auto lineEnd = text.find('\n', lineStart);
+		if (lineEnd == std::string_view::npos) lineEnd = text.size();
+		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
+		lineStart              = lineEnd + 1;
+		const auto equals      = line.find('=');
+		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
+		const std::string key   = Trim(std::string_view(line).substr(0, equals));
+		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
+		std::string       error;
+		if (!Apply(key, value, error)) Log(true, "config: %s = %s ignored (%s)", key.c_str(), value.c_str(), error.c_str());
+	}
 }
 
 void LoadConfig() {
@@ -282,21 +355,43 @@ void LoadConfig() {
 		buffer.resize(required);
 		if (!Context->ReadConfig(buffer.data(), static_cast<std::uint32_t>(buffer.size()), &required)) return;
 	}
-	const std::string_view text(buffer.data(), std::strlen(buffer.data()));
-	std::size_t            lineStart = 0;
-	while (lineStart < text.size()) {
-		auto lineEnd = text.find('\n', lineStart);
-		if (lineEnd == std::string_view::npos) lineEnd = text.size();
-		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
-		lineStart              = lineEnd + 1;
-		const auto equals      = line.find('=');
-		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
-		const std::string key   = Trim(std::string_view(line).substr(0, equals));
-		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
-		if (key == "enabled") Config.enabled = value != "false";
-		else if (key == "log_fixes") Config.logFixes = value != "false";
-		else Log(true, "config: unknown key %s", key.c_str());
+	ApplyText(std::string_view(buffer.data(), std::strlen(buffer.data())));
+}
+
+// ---- I Hate TOMLs ----
+
+constexpr const char* Schema = R"toml(title = "Quickcast Save Fix"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Save your own skills after a quick cast"
+note = "Save and Exit mid-cast keeps your left and right skills."
+[[setting]]
+key = "log_fixes"
+type = "bool"
+label = "Log fixed saves"
+note = "A line in the D2RLoader log each time a save gets your skills back."
+)toml";
+
+PluginMenu::Connection Menu;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	std::string reason;
+	if (!Apply(key, Unquote(Trim(value)), reason)) {
+		std::snprintf(error, size, "%s", reason.c_str());
+		return false;
 	}
+	SaveConfig();
+	return true;
 }
 
 } // namespace
@@ -309,10 +404,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
 	LoadConfig();
-	if (!Config.enabled) {
-		Log(false, "Quickcast Save Fix %s: disabled in config", PluginVersion);
-		return true;
-	}
+	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
+	// Redirected even when turned off: it can be turned on while playing.
 	Base = context->exeBase;
 	if (!Base || !Locate()) {
 		Log(true, "Quickcast Save Fix %s: inactive, this game build isn't supported (Steam 3.3.93787 / 3.3.94995 are)", PluginVersion);
@@ -322,8 +415,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "Quickcast Save Fix %s: inactive, the save could not be redirected", PluginVersion);
 		return true;
 	}
-	Log(false, "Quickcast Save Fix %s: active", PluginVersion);
+	Log(false, "Quickcast Save Fix %s: %s", PluginVersion, Config.enabled ? "active" : "loaded but turned off");
 	return true;
 }
 
-D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {}
+D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	Menu.Stop();
+}
