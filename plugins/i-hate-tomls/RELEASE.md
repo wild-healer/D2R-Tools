@@ -1,3 +1,39 @@
+# I Hate TOMLs 1.0.1: release texts
+
+## Patch notes
+
+```
+**I Hate TOMLs 1.0.1**
+
+**New**
+
+* Table setting type for plugins: a grid of check boxes, one per row and column.
+
+**Fixed**
+
+* Scrolling or clicking fast in the window could crash the game after a while.
+* The position reset button now uses the game's own refresh button, as in Grail On!.
+```
+
+## GitHub release
+
+- Tag: `i-hate-tomls-v1.0.1`
+- Title: `I Hate TOMLs 1.0.1`
+- Asset: `i-hate-tomls.zip`
+
+Body:
+
+```markdown
+**I Hate TOMLs** 1.0.1: table settings, and a crash fix.
+
+### New
+- `type = "table"` settings: a grid of check boxes. `rows` and `columns` (with optional `row_labels` and `column_labels`) name the boxes; each one is the bool `<row>.<column>` for get and set. See `include/i_hate_tomls_client.h`.
+
+### Fixed
+- Fast scrolling or clicking could pile up windows until the game crashed. Refreshes are now combined, wait for the previous one to load, and windows left behind are unloaded.
+- The X/Y position reset button is the game's lobby refresh button.
+```
+
 # I Hate TOMLs 1.0.0: release texts
 
 ## Patch notes

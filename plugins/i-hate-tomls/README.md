@@ -12,7 +12,7 @@ One in-game window, drawn like the character screen, listing every running plugi
 - Each plugin has a status gem and a gear button that opens its settings:
   - green, *this menu*: the plugin joined with `include/i_hate_tomls_client.h` (`Connection::Start`): a TOML list
     of its settings and get/set callbacks. Its page has check boxes, drop-down lists, numbers with `<` `>`
-    (Shift and Ctrl steps), X/Y positions with a reset, text boxes, action buttons, section titles and plain text; the plugin keeps its own values and config, so without I Hate TOMLs it works from its TOML.
+    (Shift and Ctrl steps), X/Y positions with a reset, tables of check boxes (one bool per row and column), text boxes, action buttons, section titles and plain text; the plugin keeps its own values and config, so without I Hate TOMLs it works from its TOML.
   - blue, *own window*: the plugin has its own settings window and declared it (`Connection::StartInterface`);
     the gear closes the menu and calls the plugin.
   - white, *TOML file*: any other plugin with `config/<id>.toml`. The page shows the file: comments as text,

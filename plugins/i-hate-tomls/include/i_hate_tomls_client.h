@@ -17,7 +17,7 @@
 //   title = "Ethereal Ground Tag"      # optional, else the plugin's name
 //   [[setting]]
 //   key = "text"                       # passed to get and set
-//   type = "string"                    # bool, int, float, enum, string, position, action, header, text
+//   type = "string"                    # bool, int, float, enum, string, position, table, action, header, text
 //   label = "Tag text"                 # text: the text itself (\n for a new line)
 //   hint = "Shown when the mouse is over the label"
 //   note = "Shown under the row, like a TOML comment"
@@ -31,6 +31,18 @@
 //   confirm = true                     # action: asks for a second click
 //
 // A position's value is a two-number array, [x, y]; get and set use it so.
+//
+// A table is a grid of check boxes, one per row and column; it needs no key.
+// Each box is the bool "<row>.<column>" for get and set:
+//
+//   [[setting]]
+//   type = "table"
+//   label = "Auras on"                 # optional title over the table
+//   rows = ["on_self", "on_merc"]
+//   row_labels = ["You", "Your merc"]  # optional, else the row names
+//   columns = ["self", "merc"]
+//   column_labels = ["From you", "From your merc"]
+//   -> get("on_self.merc") / set("on_self.merc", "true")
 //
 // A plugin with a settings window of its own declares it instead, and the
 // menu's Open button then opens that window:

@@ -49,7 +49,7 @@
 namespace {
 
 constexpr const char* PluginId      = "i-hate-tomls";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.1";
 constexpr const char* CommandPrefix = "i-hate-tomls/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -289,7 +289,7 @@ bool WriteWholeFile(const std::wstring& path, const std::string& bytes) {
 
 // ---- joined plugins ----
 
-enum class Kind { Bool, Int, Float, Enum, String, Action, Header, Text, Position };
+enum class Kind { Bool, Int, Float, Enum, String, Action, Header, Text, Position, Table };
 
 struct Setting {
 	std::string              key, label, hint;
@@ -301,6 +301,8 @@ struct Setting {
 	bool                     restart {}, confirm {};
 	std::string              note;        // text under the row, as a TOML comment
 	std::string              defaultValue; // position: what its reset button sets
+	// table: a check box per row and column, each one the bool "<row>.<column>"
+	std::vector<std::string> rows, rowLabels, columns, columnLabels;
 };
 
 struct Client {
@@ -333,6 +335,7 @@ Kind KindOf(const std::string& name) {
 	if (name == "header") return Kind::Header;
 	if (name == "text") return Kind::Text;
 	if (name == "position") return Kind::Position;
+	if (name == "table") return Kind::Table;
 	return Kind::Bool;
 }
 
@@ -378,9 +381,20 @@ void ReadSchema(const char* text, Client& client) {
 		else if (key == "ctrl_step") current->ctrlStep = Number(value, 0);
 		else if (key == "note") current->note = Unquote(value);
 		else if (key == "default") current->defaultValue = value;
+		else if (key == "rows") current->rows = ArrayItems(value);
+		else if (key == "row_labels") current->rowLabels = ArrayItems(value);
+		else if (key == "columns") current->columns = ArrayItems(value);
+		else if (key == "column_labels") current->columnLabels = ArrayItems(value);
 	}
 	for (auto& s : client.settings) {
-		if (s.label.empty()) s.label = s.key;
+		if (s.label.empty() && s.kind != Kind::Table) s.label = s.key;
+		if (s.kind == Kind::Table) {
+			s.rowLabels.resize(s.rows.size()), s.columnLabels.resize(s.columns.size());
+			for (std::size_t r = 0; r < s.rows.size(); ++r)
+				if (s.rowLabels[r].empty()) s.rowLabels[r] = s.rows[r];
+			for (std::size_t c = 0; c < s.columns.size(); ++c)
+				if (s.columnLabels[c].empty()) s.columnLabels[c] = s.columns[c];
+		}
 		if (s.step <= 0) s.step = 1;
 		if (s.shiftStep <= 0) s.shiftStep = s.step * 10;
 		if (s.ctrlStep <= 0) s.ctrlStep = s.step * 100;
@@ -388,7 +402,10 @@ void ReadSchema(const char* text, Client& client) {
 		if (s.kind == Kind::Int) s.decimals = 0;
 	}
 	// Rows a menu cannot show.
-	std::erase_if(client.settings, [](const Setting& s) { return s.kind != Kind::Header && s.kind != Kind::Text && s.key.empty(); });
+	std::erase_if(client.settings, [](const Setting& s) {
+		if (s.kind == Kind::Table) return s.rows.empty() || s.columns.empty();
+		return s.kind != Kind::Header && s.kind != Kind::Text && s.key.empty();
+	});
 }
 
 // ---- running plugins ----
@@ -1693,8 +1710,13 @@ struct DropList {
 
 // A row's height on a joined plugin's page: a text row as its lines, a
 // setting with a note taller by the note's lines.
+constexpr int TableTitle = 64, TableHead = 72, TableLine = 84, TableCheck = 79; // a table's title, column names, rows; the check box's size
+int TableColumnWidth(const Setting& setting) { return std::min(150, (ContentRight - ContentLeft - 260) / std::max<int>(1, static_cast<int>(setting.columns.size()))); }
+
 int RowHeightOf(const Setting& setting) {
 	if (setting.kind == Kind::Text) return Lines(setting.label) * NoteLine + 12;
+	if (setting.kind == Kind::Table)
+		return (setting.label.empty() ? 0 : TableTitle) + TableHead + static_cast<int>(setting.rows.size()) * TableLine + (setting.note.empty() ? 0 : Lines(setting.note) * NoteLine) + 8;
 	return RowHeight + (setting.note.empty() ? 0 : Lines(setting.note) * NoteLine);
 }
 
@@ -1723,6 +1745,28 @@ std::string RowWidgets(const Client& client, const Setting& setting, int row, in
 		return out;
 	}
 	if (setting.kind == Kind::Text) return Text("Text" + id, ContentLeft, y + 4, ContentRight - ContentLeft, RowHeightOf(setting) - 8, setting.label, CommentStyle, setting.hint);
+	if (setting.kind == Kind::Table) {
+		// title, note, then the column names over a grid of check boxes
+		int at = y;
+		if (!setting.label.empty()) out += Text("Label" + id, ContentLeft, at, ContentRight - ContentLeft, TableTitle - 4, setting.label, LabelStyle, setting.hint), at += TableTitle;
+		if (!setting.note.empty()) out += Text("Note" + id, ContentLeft, at - 6, ContentRight - ContentLeft, Lines(setting.note) * NoteLine, setting.note, CommentStyle), at += Lines(setting.note) * NoteLine;
+		const int width = TableColumnWidth(setting), left = ContentRight - width * static_cast<int>(setting.columns.size());
+		for (std::size_t c = 0; c < setting.columns.size(); ++c)
+			out += Text("Col" + id + "_" + std::to_string(c), left + static_cast<int>(c) * width, at, width, TableHead - 6, setting.columnLabels[c], SmallValueStyle);
+		at += TableHead;
+		for (std::size_t r = 0; r < setting.rows.size(); ++r, at += TableLine) {
+			const std::string cell = id + "_" + std::to_string(r);
+			out += Text("RowName" + cell, ContentLeft, at, left - ContentLeft - 10, TableLine, setting.rowLabels[r], SmallLabelStyle);
+			for (std::size_t c = 0; c < setting.columns.size(); ++c) {
+				char value[64] {};
+				const std::string key = setting.rows[r] + "." + setting.columns[c];
+				const bool on = client.get(key.c_str(), value, sizeof(value), client.user) && Unquote(Trim(value)) == "true";
+				out += Check("Cell" + cell + "_" + std::to_string(c), left + static_cast<int>(c) * width + (width - TableCheck) / 2, at + (TableLine - TableCheck) / 2, on,
+				             "C" + id + ":" + std::to_string(r) + ":" + std::to_string(c));
+			}
+		}
+		return out;
+	}
 	const std::string label = setting.label + (setting.restart ? " *" : "");
 	// a position's controls start further left: its label has less room
 	const int labelWidth = (setting.kind == Kind::Position ? PositionLeft : ControlLeft) - ContentLeft - 20;
@@ -2091,7 +2135,43 @@ int NextPanel() {
 
 void __cdecl ProbeTask(const D2RL::PluginContext*, void*) noexcept;
 
+// Whether panel `name` has finished loading the layout holding widget `probe`.
+bool Loaded(const std::string& name, const std::string& probe) {
+	D2RL::Widgets::WidgetHandle root = D2RL::Widgets::InvalidHandle, widget = D2RL::Widgets::InvalidHandle;
+	return WidgetApi && WidgetApi->findPanel(Context, name.c_str(), &root) == D2RL::Widgets::Result::Success
+	    && WidgetApi->findWidget(Context, root, probe.c_str(), &widget) == D2RL::Widgets::Result::Success;
+}
+
+// The view last opened: its panel and probe, and when it was opened.
+std::string LoadingPanel, LoadingProbe;
+ULONGLONG   LoadingSince {};
+bool        ViewWanted {}, ViewQueued {};
+
+void ShowViewNow();
+
+// Rebuilds wait for the next frame (fast clicks and scrolls make one) and for
+// the last view's layout to be loaded (at most 500 ms): a panel opened while
+// another one is still loading can leave the game with a widget it failed to
+// create.
+void __cdecl ViewTask(const D2RL::PluginContext*, void*) noexcept {
+	ViewQueued = false;
+	if (!ViewWanted) return;
+	if (!LoadingPanel.empty() && !Loaded(LoadingPanel, LoadingProbe) && GetTickCount64() - LoadingSince < 500) {
+		ViewQueued = Threads && Threads->runOnUiThread(Context, ViewTask, nullptr) == D2RL::Threads::Result::Success;
+		if (ViewQueued) return;
+	}
+	ViewWanted = false;
+	ShowViewNow();
+}
+
 void ShowView() {
+	ViewWanted = true;
+	if (ViewQueued) return;
+	ViewQueued = Threads && Threads->runOnUiThread(Context, ViewTask, nullptr) == D2RL::Threads::Result::Success;
+	if (!ViewQueued) ViewWanted = false, ShowViewNow();
+}
+
+void ShowViewNow() {
 	if (Panels.empty() || !PanelApi || !ResourceApi) {
 		Say("I Hate TOMLs is not available (see i-hate-tomls.log)");
 		return;
@@ -2104,6 +2184,13 @@ void ShowView() {
 	kept.push_back(ViewLayout(next.id, Serial));
 	const std::string& layout = kept.back();
 	ClosePanels();
+	// Without reuse each view takes a fresh panel: the one left behind is
+	// unloaded, so loaded panels don't pile up.
+	if (!ReuseWorks && WidgetApi && ShownPanel >= 0 && ShownPanel != index && Panels[static_cast<std::size_t>(ShownPanel)].opened) {
+		const std::string             name = std::string(PluginId) + "/" + Panels[static_cast<std::size_t>(ShownPanel)].id;
+		const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = name.c_str() };
+		(void)WidgetApi->dispatchUiAction(Context, &unload);
+	}
 	if (next.opened && WidgetApi) {
 		const std::string             name = std::string(PluginId) + "/" + next.id;
 		const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = name.c_str() };
@@ -2122,10 +2209,13 @@ void ShowView() {
 	const auto opened     = PanelApi->openPanel(Context, next.panel);
 	if (registered != D2RL::Resources::Result::Success || opened != D2RL::Panels::Result::Success)
 		Log(true, "view on %s: layout result %u, open result %u (%zu bytes)", next.id.c_str(), static_cast<unsigned>(registered), static_cast<unsigned>(opened), layout.size());
+	LoadingPanel = std::string(PluginId) + "/" + next.id;
+	LoadingProbe = "Probe" + std::to_string(Serial);
+	LoadingSince = GetTickCount64();
 	if (ReuseWorks && next.opened) {
-		ProbeName  = "Probe" + std::to_string(Serial);
-		ProbePanel = std::string(PluginId) + "/" + next.id;
-		ProbeUntil = GetTickCount64() + 3000;
+		ProbeName  = LoadingProbe;
+		ProbePanel = LoadingPanel;
+		ProbeUntil = 0; // counted from when the panel is open
 	}
 	next.opened = true;
 	ShownPanel  = index;
@@ -2136,19 +2226,31 @@ void ShowView() {
 
 // Each frame until done: once a reused panel is open, checks that it shows
 // the new layout. True to run again next frame.
+// Only a probe of the panel still shown, open for 3 s, counts; reuse is given
+// up after two such misses in a row.
+int ProbeMisses {};
 bool CheckProbe() {
 	if (ProbeName.empty() || !WidgetApi) return false;
-	D2RL::Widgets::WidgetHandle root = D2RL::Widgets::InvalidHandle, probe = D2RL::Widgets::InvalidHandle;
-	if (WidgetApi->findPanel(Context, ProbePanel.c_str(), &root) == D2RL::Widgets::Result::Success
-	    && WidgetApi->findWidget(Context, root, ProbeName.c_str(), &probe) == D2RL::Widgets::Result::Success) {
+	if (Loaded(ProbePanel, ProbeName)) {
 		ProbeName.clear();
+		ProbeMisses = 0;
 		return false;
 	}
+	// another view replaced it, or the menu closed: no verdict
+	if (ShownPanel < 0 || ProbePanel != std::string(PluginId) + "/" + Panels[static_cast<std::size_t>(ShownPanel)].id || !MenuOpen()) {
+		if (!MenuOpen() || ProbeName != LoadingProbe) ProbeName.clear();
+		return !ProbeName.empty();
+	}
+	if (!ProbeUntil) ProbeUntil = GetTickCount64() + 3000;
 	if (GetTickCount64() < ProbeUntil) return true;
 	ProbeName.clear();
-	if (!MenuOpen()) return false;
+	if (++ProbeMisses < 2) {
+		Log(true, "a reopened panel did not show its new layout within 3 s; trying it again");
+		ShowView();
+		return false;
+	}
 	ReuseWorks = false;
-	Log(true, "a reopened panel kept its old layout; each view now takes a new panel");
+	Log(true, "a reopened panel kept its old layout twice; each view now takes a new panel");
 	ShowView();
 	return false;
 }
@@ -2644,6 +2746,18 @@ void RunClientCommand(const std::string& command) {
 			if (!setting.defaultValue.empty()) (void)SetValue(client, setting, setting.defaultValue);
 			break;
 		case 'T': (void)SetValue(client, setting, Unquote(GetValue(client, setting)) == "true" ? "false" : "true"); break;
+		case 'C': { // a table's check box: C<index>:<row>:<column>
+			const auto first = command.find(':'), second = first == std::string::npos ? first : command.find(':', first + 1);
+			if (second == std::string::npos) break;
+			const std::size_t r = std::strtoul(command.c_str() + first + 1, nullptr, 10), c = std::strtoul(command.c_str() + second + 1, nullptr, 10);
+			if (r >= setting.rows.size() || c >= setting.columns.size()) break;
+			Setting cell = setting;
+			cell.kind  = Kind::Bool;
+			cell.key   = setting.rows[r] + "." + setting.columns[c];
+			cell.label = setting.rowLabels[r] + ", " + setting.columnLabels[c];
+			(void)SetValue(client, cell, Unquote(GetValue(client, cell)) == "true" ? "false" : "true");
+			break;
+		}
 		case 'L': Step(client, setting, false); break;
 		case 'R': Step(client, setting, true); break;
 		case 'A':

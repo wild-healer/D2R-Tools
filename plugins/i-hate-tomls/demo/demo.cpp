@@ -60,6 +60,14 @@ shift_step = 5
 ctrl_step = 50
 note = "Click the arrows: 1 at a time, 5 with Shift, 50 with Ctrl."
 [[setting]]
+type = "table"
+label = "Tag shown on"
+note = "One check box per item quality and ground or vendor."
+rows = ["ground", "vendor"]
+row_labels = ["On the ground", "At vendors"]
+columns = ["normal", "magic", "rare", "unique"]
+column_labels = ["Normal", "Magic", "Rare", "Unique"]
+[[setting]]
 key = "scale"
 type = "float"
 label = "Text scale"
@@ -90,7 +98,7 @@ confirm = true
 )";
 
 const D2RL::PluginContext*         Context {};
-std::map<std::string, std::string> Values { { "enabled", "true" }, { "position", "\"before\"" }, { "color", "\"gold\"" }, { "count", "3" }, { "scale", "1.0" }, { "text", "\"Eth\"" }, { "button", "[0, 0]" } };
+std::map<std::string, std::string> Values { { "enabled", "true" }, { "position", "\"before\"" }, { "color", "\"gold\"" }, { "count", "3" }, { "scale", "1.0" }, { "text", "\"Eth\"" }, { "button", "[0, 0]" }, { "ground.normal", "true" }, { "ground.magic", "true" }, { "ground.rare", "true" }, { "ground.unique", "true" }, { "vendor.normal", "false" }, { "vendor.magic", "false" }, { "vendor.rare", "true" }, { "vendor.unique", "true" } };
 const std::map<std::string, std::string> Defaults = Values;
 PluginMenu::Connection             Menu;
 
