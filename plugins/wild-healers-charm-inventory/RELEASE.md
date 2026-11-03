@@ -1,6 +1,19 @@
-# Wild Healer's Charm Inventory 1.1.0: release texts
+# Wild Healer's Charm Inventory 1.1.1: release texts
 
 ## Patch notes
+
+```
+**Wild Healer's Charm Inventory 1.1.1**
+
+**New**
+
+* I Hate TOMLs support: enabled, columns and rows can be changed in game and apply at once.
+* enabled off hides the button and the panel, and charms in the normal inventory give their bonuses again.
+* A columns or rows change that would leave charms out of the charm inventory is refused.
+* The download is now wild-healers-charm-inventory.zip, without the version in its name.
+```
+
+## Patch notes 1.1.0
 
 ```
 **Wild Healer's Charm Inventory 1.1.0**
@@ -52,20 +65,21 @@
 
 ## GitHub release
 
-- Tag: `wild-healers-charm-inventory-v1.1.0`
-- Title: `Wild Healer's Charm Inventory 1.1.0`
-- Asset: `wild-healers-charm-inventory-1.1.0.zip`
+- Tag: `wild-healers-charm-inventory-v1.1.1`
+- Title: `Wild Healer's Charm Inventory 1.1.1`
+- Asset: `wild-healers-charm-inventory.zip`
 
 Body:
 
 ```markdown
-**Wild Healer's Charm Inventory** 1.1.0: a charm inventory (10x4 by default) on Player Page Host's player page.
+**Wild Healer's Charm Inventory** 1.1.1: a charm inventory (10x4 by default) on Player Page Host's player page.
 
 ### Features
 - 10x4 cells by default, the size of the inventory's grid, or any size up to 10x12 with the `columns` and `rows` settings. Only charms go in, one of each unique charm (a second copy can only be swapped with the first), and only these charms give their bonuses: charms in the normal inventory don't (Charm Dedup works alongside).
 - A game-style left panel: "Charms" title, plain stone and the grid.
 - Opens from the charm button on the inventory's left edge (under Grail On!'s grail button), from the "Open/close charms" action of the Controls menu (no key by default), or with the `charms` console command.
 - Ctrl+click moves charms between the inventory and the open panel.
+- I Hate TOMLs support: every setting can be changed in game and applies at once.
 - Fixed at the vanilla left panel position, so mods that move the left panel anchor don't carry it off screen.
 
 ### Requirements
@@ -73,7 +87,7 @@ Body:
 - Player Page Host (`aaa-player-page-host`).
 
 ### Install
-Load `wild-healers-charm-inventory-1.1.0.zip` in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/wild-healers-charm-inventory.toml`, written on first launch.
+Load `wild-healers-charm-inventory.zip` in D2RMM next to Player Page Host, or copy `wild-healers-charm-inventory.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/wild-healers-charm-inventory.toml`, written on first launch, or in I Hate TOMLs.
 ```
 
 ## D2RLoader Hub

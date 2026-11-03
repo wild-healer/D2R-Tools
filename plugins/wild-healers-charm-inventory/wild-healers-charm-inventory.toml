@@ -3,12 +3,14 @@
 # A charm inventory on Player Page Host's page, opened from the charm
 # button on the inventory's left edge (or the console command "charms", or a key set in the game's Controls menu).
 # Only charms go in it, and the charms in it give their bonuses.
+# Every setting can also be changed in game with I Hate TOMLs and applies at once.
 
 [wild-healers-charm-inventory]
+# false: no button or panel, and charms in the normal inventory give their
+# bonuses again. Charms left in the charm inventory stay there, without bonuses.
 enabled = true
 
 # Size of the charm inventory in cells. columns 1 to 10, rows 1 to 12.
-# Restart the game after a change. Take the charms out of the cells you remove
-# before making it smaller.
+# Take the charms out of the cells you remove before making it smaller.
 columns = 10
 rows = 4
