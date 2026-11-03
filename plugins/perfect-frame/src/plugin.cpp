@@ -32,6 +32,8 @@
 #include <D2RLPlugin/api.h>
 #include <windows.h>
 
+#include "i_hate_tomls_client.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -53,7 +55,7 @@ namespace Tables = D2RL::DataTables;
 namespace Events = D2RL::SharedEvents;
 
 constexpr const char* PluginId      = "perfect-frame";
-constexpr const char* PluginVersion = "1.0.1";
+constexpr const char* PluginVersion = "1.0.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -66,11 +68,14 @@ const D2RL::PluginInfo Info {
 	.flags       = D2RL::PluginFlags::Client | D2RL::PluginFlags::NativeHooks,
 };
 
+// Every setting applies at once (I Hate TOMLs or the file at start): the
+// hooks are always installed and read these when they run.
 struct Settings {
 	bool  enabled = true, uniques = true, sets = true, runewords = true;
 	bool  antiperfect = true;
 	float color[4] { 226 / 255.f, 182 / 255.f, 76 / 255.f, 1.f };
 	float antiColor[4] { 180 / 255.f, 20 / 255.f, 20 / 255.f, 1.f };
+	int   colorRgb[3] { 226, 182, 76 }, antiRgb[3] { 180, 20, 20 };
 	int   thickness = 0;
 } Config;
 
@@ -587,7 +592,7 @@ Verdict JudgeRow(const RowProps& entry, bool isRune, const char* kind, int row, 
 }
 
 std::uint8_t Verdict::Mark() const {
-	return perfect ? 1 : anti && Config.antiperfect ? 2 : 0;
+	return perfect ? 1 : anti ? 2 : 0; // the worst rolls frame is turned off at draw time
 }
 
 // unit: the item's unit when known (a comparison's), else the client's unit
@@ -873,12 +878,15 @@ std::string_view BoxText(const unsigned char* box) {
 
 // Whether a box shows a built comparison text (the same, or one holding the
 // other), and its verdict, else -1.
-int BuiltVerdict(std::string_view box) {
+// The same text first: a hovered item and its compared copy can hold each
+// other's lines. A match keeps the text remembered while its box shows.
+int BuiltVerdict(std::string_view box, std::uint64_t now) {
 	if (box.empty()) return -1;
+	for (auto it = BuiltTexts.rbegin(); it != BuiltTexts.rend(); ++it)
+		if (box == it->text) return it->at = now, it->mark;
 	for (auto it = BuiltTexts.rbegin(); it != BuiltTexts.rend(); ++it) {
 		const std::string_view text = it->text;
-		if (box == text || (text.size() >= 16 && box.find(text) != std::string_view::npos) || (box.size() >= 16 && text.find(box) != std::string_view::npos))
-			return it->mark;
+		if ((text.size() >= 16 && box.find(text) != std::string_view::npos) || (box.size() >= 16 && text.find(box) != std::string_view::npos)) return it->at = now, it->mark;
 	}
 	return -1;
 }
@@ -951,6 +959,11 @@ void HookPanelDraw(void* panel) noexcept {
 			Shown.clear(); // other boxes now (a skill, a button): the events were for earlier ones
 		if (panel == ShownPanel) frames = Shown;
 		frames.resize(count, 0);
+		// The hovered item's box: its text, built through the tooltip pointer
+		// like the compared ones, else the tooltip event (which can name the
+		// compared item first when the game compares).
+		const std::uint64_t now = GetTickCount64();
+		if (const int verdict = BuiltVerdict(BoxText(boxes), now); verdict >= 0) frames[0] = static_cast<std::uint8_t>(verdict);
 		// The order the boxes were asked for: the last pair of calls.
 		if (!PendingCalls.empty()) {
 			ShownCompare.clear();
@@ -963,7 +976,7 @@ void HookPanelDraw(void* panel) noexcept {
 		// Comparison boxes: by their text, else by the order they were asked for.
 		for (std::uint64_t i = 1; i < count; ++i) {
 			const std::string_view text    = BoxText(boxes + i * Game::BoxSize);
-			const int              verdict = BuiltVerdict(text);
+			const int              verdict = BuiltVerdict(text, now);
 			if (verdict >= 0) frames[i] = static_cast<std::uint8_t>(verdict);
 			else if (i - 1 < ShownCompare.size()) frames[i] = ShownCompare[i - 1];
 			if (ToldBoxes < 4) {
@@ -973,9 +986,10 @@ void HookPanelDraw(void* panel) noexcept {
 			}
 		}
 	}
+	if (!Config.enabled) return;
 	const int thickness = Thickness();
 	for (std::uint64_t i = 0; i < count && i < frames.size(); ++i) {
-		if (!frames[i]) continue;
+		if (!frames[i] || (frames[i] == 2 && !Config.antiperfect)) continue;
 		// The panel shows one comparison at a time when cycling them.
 		if (one && i != 0 && i != (side ? 1u : 2u)) continue;
 		const unsigned char* box = boxes + i * Game::BoxSize;
@@ -1033,6 +1047,85 @@ std::string Unquote(std::string value) {
 	return value;
 }
 
+const std::pair<const char*, bool Settings::*> Flags[] { { "enabled", &Settings::enabled }, { "uniques", &Settings::uniques }, { "sets", &Settings::sets },
+	                                                   { "runewords", &Settings::runewords }, { "antiperfect", &Settings::antiperfect } };
+
+bool ParseColor(const std::string& value, int rgb[3], float out[4]) {
+	int r = 0, g = 0, b = 0;
+	char extra = 0;
+	if (std::sscanf(value.c_str(), "%d , %d , %d %c", &r, &g, &b, &extra) != 3) return false;
+	const int parts[3] { std::clamp(r, 0, 255), std::clamp(g, 0, 255), std::clamp(b, 0, 255) };
+	for (int i = 0; i < 3; ++i) rgb[i] = parts[i], out[i] = parts[i] / 255.f;
+	return true;
+}
+
+bool Apply(const std::string& key, const std::string& value, std::string& error) {
+	for (const auto& [name, field] : Flags)
+		if (key == name) {
+			if (value != "true" && value != "false") return error = "not true or false", false;
+			return Config.*field = value == "true", true;
+		}
+	if (key == "color" || key == "antiperfect_color") {
+		const bool anti = key != "color";
+		if (!ParseColor(value, anti ? Config.antiRgb : Config.colorRgb, anti ? Config.antiColor : Config.color)) return error = "not r,g,b", false;
+		return true;
+	}
+	if (key == "thickness") {
+		char* end    = nullptr;
+		const long n = std::strtol(value.c_str(), &end, 10);
+		if (value.empty() || *end || n < 0 || n > 40) return error = "not a number from 0 to 40", false;
+		return Config.thickness = static_cast<int>(n), true;
+	}
+	return error = "unknown setting", false;
+}
+
+std::string Rgb(const int rgb[3]) {
+	return std::to_string(rgb[0]) + "," + std::to_string(rgb[1]) + "," + std::to_string(rgb[2]);
+}
+
+// A setting's value as TOML writes it.
+std::string ValueOf(const std::string& key) {
+	for (const auto& [name, field] : Flags)
+		if (key == name) return Config.*field ? "true" : "false";
+	if (key == "color") return "\"" + Rgb(Config.colorRgb) + "\"";
+	if (key == "antiperfect_color") return "\"" + Rgb(Config.antiRgb) + "\"";
+	if (key == "thickness") return std::to_string(Config.thickness);
+	return {};
+}
+
+// The config file, as the embedded default writes it, with the current values.
+std::string Render() {
+	return R"(# Perfect Frame
+#
+# Draws a golden frame around the tooltip of a perfect item: every stat that
+# can roll is at its best, by the game's own tables (modded tables included).
+# Every setting can also be changed in game with I Hate TOMLs.
+
+[perfect-frame]
+enabled = )" + ValueOf("enabled") + R"(
+
+# Which items get the frame.
+uniques = )" + ValueOf("uniques") + R"(
+sets = )" + ValueOf("sets") + R"(
+runewords = )" + ValueOf("runewords") + R"(
+
+# Frame colour, as red, green, blue (0 to 255).
+color = )" + ValueOf("color") + R"(
+
+# A red frame on items whose every roll is at its worst.
+antiperfect = )" + ValueOf("antiperfect") + R"(
+antiperfect_color = )" + ValueOf("antiperfect_color") + R"(
+
+# Frame thickness in screen pixels. 0 picks it from the window height
+# (3 pixels at 1080p, 6 at 4K).
+thickness = )" + ValueOf("thickness") + "\n";
+}
+
+void SaveConfig() {
+	const std::string toml = Render();
+	if (!Context->WriteConfig(toml.c_str())) Say(true, "config: could not write the config file");
+}
+
 void LoadConfig() {
 	(void)Context->EnsureConfig();
 	std::uint32_t     required = 0;
@@ -1056,38 +1149,95 @@ void LoadConfig() {
 		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
 		const std::string key   = Trim(std::string_view(line).substr(0, equals));
 		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
-		if (key == "enabled") Config.enabled = value != "false";
-		else if (key == "uniques") Config.uniques = value != "false";
-		else if (key == "sets") Config.sets = value != "false";
-		else if (key == "runewords") Config.runewords = value != "false";
-		else if (key == "antiperfect") Config.antiperfect = value != "false";
-		else if (key == "antiperfect_color") {
-			int r = 0, g = 0, b = 0;
-			if (std::sscanf(value.c_str(), "%d , %d , %d", &r, &g, &b) == 3) {
-				Config.antiColor[0] = std::clamp(r, 0, 255) / 255.f;
-				Config.antiColor[1] = std::clamp(g, 0, 255) / 255.f;
-				Config.antiColor[2] = std::clamp(b, 0, 255) / 255.f;
-			} else
-				Say(true, "config: antiperfect_color \"%s\" is not r,g,b", value.c_str());
-		} else if (key == "thickness") Config.thickness = std::clamp(std::atoi(value.c_str()), 0, 40);
-		else if (key == "color") {
-			int r = 0, g = 0, b = 0;
-			if (std::sscanf(value.c_str(), "%d , %d , %d", &r, &g, &b) == 3) {
-				Config.color[0] = std::clamp(r, 0, 255) / 255.f;
-				Config.color[1] = std::clamp(g, 0, 255) / 255.f;
-				Config.color[2] = std::clamp(b, 0, 255) / 255.f;
-			} else
-				Say(true, "config: color \"%s\" is not r,g,b", value.c_str());
-		} else
-			Say(true, "config: unknown key %s", key.c_str());
+		std::string       error;
+		if (!Apply(key, value, error)) Say(true, "config: %s = %s ignored (%s)", key.c_str(), value.c_str(), error.c_str());
 	}
 }
 
+// ---- I Hate TOMLs ----
+
+constexpr const char* Schema = R"(title = "Perfect Frame"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Show frames"
+[[setting]]
+type = "header"
+label = "Items"
+[[setting]]
+key = "uniques"
+type = "bool"
+label = "Uniques"
+[[setting]]
+key = "sets"
+type = "bool"
+label = "Set items"
+[[setting]]
+key = "runewords"
+type = "bool"
+label = "Runewords"
+[[setting]]
+type = "header"
+label = "Frames"
+[[setting]]
+key = "color"
+type = "string"
+label = "Perfect frame colour"
+note = "Red, green, blue, 0 to 255: 226,182,76"
+[[setting]]
+key = "antiperfect"
+type = "bool"
+label = "Worst rolls frame"
+note = "A frame on items whose every roll is at its worst."
+[[setting]]
+key = "antiperfect_color"
+type = "string"
+label = "Worst rolls frame colour"
+note = "Red, green, blue, 0 to 255: 180,20,20"
+[[setting]]
+key = "thickness"
+type = "int"
+label = "Thickness"
+note = "In pixels; 0 follows the window height (3 at 1080p, 6 at 4K)."
+min = 0
+max = 40
+step = 1
+shift_step = 5
+ctrl_step = 10
+)";
+
+PluginMenu::Connection Menu;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	std::string reason;
+	if (!Apply(key, Unquote(Trim(value)), reason)) {
+		std::snprintf(error, size, "%s", reason.c_str());
+		return false;
+	}
+	SaveConfig();
+	return true;
+}
+
+// Whether the game's code at rva is these bytes, read after checking it is
+// committed and readable (ReadProcessMemory made one antivirus heuristic call
+// such DLLs injectors).
 bool Matches(std::uint64_t rva, const std::uint8_t* bytes, std::size_t size) {
-	SIZE_T copied = 0;
-	std::vector<std::uint8_t> code(size);
-	if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(Base + rva), code.data(), size, &copied) || copied != size) return false;
-	return std::memcmp(code.data(), bytes, size) == 0;
+	const std::uintptr_t     address = Base + rva;
+	MEMORY_BASIC_INFORMATION info {};
+	if (!Base || VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	if (address + size > reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize) return false;
+	return std::memcmp(reinterpret_cast<const void*>(address), bytes, size) == 0;
 }
 
 bool Locate() {
@@ -1215,10 +1365,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
 	LoadConfig();
-	if (!Config.enabled) {
-		Say(false, "Perfect Frame %s: disabled in config", PluginVersion);
-		return true;
-	}
+	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
 	ItemApi  = Query<D2RL::ItemService>("item");
 	if (Context->QueryService(&TextApi) != D2RL::ServiceQueryResult::Success) TextApi = nullptr;
 	if (Context->QueryService(&InventoryApi) != D2RL::ServiceQueryResult::Success) InventoryApi = nullptr;
@@ -1270,12 +1417,13 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		TickerDone = true;
 		Say(true, "Perfect Frame: could not start its worker; the tables are not read");
 	}
-	Say(false, "Perfect Frame %s: active (uniques %s, sets %s, runewords %s)", PluginVersion, Config.uniques ? "on" : "off", Config.sets ? "on" : "off",
-	    Config.runewords ? "on" : "off");
+	Say(false, "Perfect Frame %s: active (frames %s, uniques %s, sets %s, runewords %s)", PluginVersion, Config.enabled ? "on" : "off", Config.uniques ? "on" : "off",
+	    Config.sets ? "on" : "off", Config.runewords ? "on" : "off");
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	Menu.Stop();
 	StopTicker();
 	if (Ticker) {
 		WaitForSingleObject(Ticker, 1000);

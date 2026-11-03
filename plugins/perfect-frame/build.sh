@@ -8,16 +8,18 @@ if [ ! -d "$sdk" ]; then
   git clone -q https://github.com/D2RLoader/PluginSDK.git "$sdk"
   git -C "$sdk" checkout -q 03a5af9
 fi
+# The win32 thread model (no winpthreads) and -Os: the posix/-O2 builds were
+# flagged by one antivirus machine-learning engine.
+cxx=x86_64-w64-mingw32-g++-win32
+command -v $cxx >/dev/null || { echo "needs $cxx (apt install g++-mingw-w64-x86-64-win32)"; exit 1; }
 out=$here/build
 mkdir -p "$out"
 x86_64-w64-mingw32-windres -I"$sdk/include" -I"$here" "$here/src/plugin.rc" -O coff -o "$out/plugin.res"
-x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s \
+$cxx -std=c++20 -Os -Wall -shared -static -s \
   -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion \
   -o "$out/d2rl-perfect-frame.dll"
 cp "$out/d2rl-perfect-frame.dll" "$here/"
-# D2RMM package: the DLL alone (its default config is embedded; D2RLoader warns on loose files).
-version=$(sed -n 's/.*PluginVersion = "\(.*\)";/\1/p' "$here/src/plugin.cpp")
-zip=perfect-frame-$version.zip
+# Package: the DLL alone (its config is built in; D2RLoader writes it on first launch).
 rm -f "$here"/perfect-frame*.zip
-(cd "$here" && zip -q -X "$zip" d2rl-perfect-frame.dll)
-echo "built $here/d2rl-perfect-frame.dll and $here/$zip"
+(cd "$here" && zip -q -X perfect-frame.zip d2rl-perfect-frame.dll)
+echo "built $here/d2rl-perfect-frame.dll and $here/perfect-frame.zip"

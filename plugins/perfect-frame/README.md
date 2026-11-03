@@ -11,11 +11,11 @@ Hooks the game's tooltip panel and tooltip text builders; it checks that code wh
 
 ## Install
 
-Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/perfect-frame). Load `perfect-frame-<version>.zip` (the DLL alone; its default settings are built in) in D2RMM, or copy `d2rl-perfect-frame.dll` to `<game>/d2rloader/plugins/`. Remove the DLL to uninstall.
+Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/perfect-frame). Load `perfect-frame.zip` (the DLL alone; its default settings are built in) in D2RMM, or copy `d2rl-perfect-frame.dll` to `<game>/d2rloader/plugins/`. Remove the DLL to uninstall.
 
 ## Settings
 
-`d2rloader/config/perfect-frame.toml`, written on first launch:
+`d2rloader/config/perfect-frame.toml`, written on first launch. Every setting can also be changed in game with [I Hate TOMLs](https://d2rloader.net/hub/plugins/i-hate-tomls) and applies at once:
 
 | Key | Default | Meaning |
 | --- | --- | --- |

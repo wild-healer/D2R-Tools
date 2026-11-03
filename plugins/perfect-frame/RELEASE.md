@@ -1,3 +1,44 @@
+# Perfect Frame 1.0.2: release texts
+
+## Patch notes
+
+```
+**Perfect Frame 1.0.2**
+
+**New**
+
+* Every setting can be changed in game with I Hate TOMLs and applies at once, enabled included.
+* The download is now named perfect-frame.zip, without a version.
+
+**Fixed**
+
+* While comparing, the hovered item gets its frame too, not only the compared item.
+* The plugin no longer reads the game's code through ReadProcessMemory, which made an antivirus flag such DLLs.
+```
+
+## GitHub release
+
+- Tag: `perfect-frame-v1.0.2`
+- Title: `Perfect Frame 1.0.2`
+- Asset: `perfect-frame.zip`
+
+Body:
+
+```markdown
+**Perfect Frame** 1.0.2
+
+### New
+- Every setting can be changed in game with I Hate TOMLs and applies at once, enabled included.
+- The download is now named `perfect-frame.zip`, without a version.
+
+### Fixed
+- While comparing, the hovered item gets its frame too, not only the compared item.
+- The plugin no longer reads the game's code through ReadProcessMemory, which made an antivirus flag such DLLs.
+
+### Install
+Load `perfect-frame.zip` in D2RMM, or copy `d2rl-perfect-frame.dll` to `<game>/d2rloader/plugins/` over the old one. Settings are unchanged.
+```
+
 # Perfect Frame 1.0.1: release texts
 
 ## Patch notes
