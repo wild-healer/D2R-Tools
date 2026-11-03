@@ -10,8 +10,7 @@
 # When you cast the skill, its weapons go in your hands for the cast and set I
 # comes back right after; a skill with no mode casts with set I.
 # Modes are saved per character in <game>\d2rloader\swap-cast\modes.txt.
-# D2RLoader copies this file to d2rloader/config/swap-cast.toml on first
-# launch; edit that copy. Changes apply the next time the game starts.
+# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
 
 [swap-cast]
 enabled = true

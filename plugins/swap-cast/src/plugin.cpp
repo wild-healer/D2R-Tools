@@ -70,10 +70,12 @@
 #include <string_view>
 #include <vector>
 
+#include "i_hate_tomls_client.h"
+
 namespace {
 
 constexpr const char* PluginId      = "swap-cast";
-constexpr const char* PluginVersion = "1.1.0";
+constexpr const char* PluginVersion = "1.1.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -86,14 +88,20 @@ const D2RL::PluginInfo Info {
 	.flags       = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
 };
 
+// Read on the game and UI threads, changed live from I Hate TOMLs.
 struct Settings {
-	bool enabled       = true;
-	bool showMainLabel = false;
-	bool allowCross    = true; // MS and SM
-	int  restoreMs     = 150;
-	bool logSwaps      = false;
-	bool keepSwapSkills = true;
+	std::atomic<bool> enabled { true };
+	std::atomic<bool> showMainLabel { false };
+	std::atomic<bool> allowCross { true }; // MS and SM
+	std::atomic<int>  restoreMs { 150 };
+	std::atomic<bool> logSwaps { false };
+	std::atomic<bool> keepSwapSkills { true };
 } Config;
+
+std::atomic<bool> KeepHooked { true }; // the hooks that keep set II skills went in
+
+// Set II skills kept while you hold set I.
+bool Keeping() noexcept { return Config.enabled && Config.keepSwapSkills && KeepHooked; }
 
 // ---- modes ----
 
@@ -380,9 +388,18 @@ void Log(bool warn, const char* format, ...) noexcept {
 	warn ? Context->LogWarn(line) : Context->LogInfo(line);
 }
 
+// Reads the game's own memory after checking it is committed and readable
+// (ReadProcessMemory made one antivirus heuristic call a DLL an injector).
 bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
-	SIZE_T copied = 0;
-	return address != 0 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), output, size, &copied) && copied == size;
+	if (address == 0) return false;
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+	if (address + size > end) return false;
+	std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	return true;
 }
 
 template <typename T>
@@ -495,7 +512,7 @@ bool ClientMayRemove(void* unit) noexcept { return unit == ClientPlayer.load(std
 // Hovering an item in your inventory adds its skills to compare and removes
 // them right away: those removals go through.
 void HookSetItemSkill(void* unit, std::uint32_t owner, int skill, int level, int charges, int remove) noexcept {
-	if (Config.keepSwapSkills && owner != NoId && level > 0 && IsLocalPlayer(unit)) {
+	if (Keeping() && owner != NoId && level > 0 && IsLocalPlayer(unit)) {
 		if (remove && (!ClientMayRemove(unit) || SlotOf(CurrentItems(unit), owner) >= 0)) {
 			Keep({ unit, owner, skill, level });
 			return;
@@ -508,7 +525,7 @@ void HookSetItemSkill(void* unit, std::uint32_t owner, int skill, int level, int
 }
 
 std::uint64_t HookRemoveSkill(void* unit, int skill, const char* file, int line) noexcept {
-	if (Config.keepSwapSkills && skill >= 0 && IsLocalPlayer(unit) && (!ClientMayRemove(unit) || GrantedByWeapon(unit, skill))) {
+	if (Keeping() && skill >= 0 && IsLocalPlayer(unit) && (!ClientMayRemove(unit) || GrantedByWeapon(unit, skill))) {
 		Keep({ unit, NoId, skill, 0 });
 		return 0;
 	}
@@ -535,10 +552,14 @@ Mode OwnMode(void* unit, int skill, const std::array<std::uint32_t, 4>& sets) no
 	return node && SkillLevel(unit, node, 0, 0) > 0 ? Main : Swap;
 }
 
+// With show_swap_skills off (or Swap Cast off), only the items in your hands
+// count, so the set II "+skills" kept so far go away.
 bool GrantedByWeapon(void* unit, int skill) noexcept {
 	void* const inventory = UnitInventory(unit, __FILE__, __LINE__);
 	if (!inventory) return false;
+	const bool both = Keeping();
 	for (const auto slot : Slots) {
+		if (!both && slot != 4 && slot != 5) continue;
 		void* const item = BodyItem(inventory, slot);
 		if (item && (GetStat(item, NonClassSkillStat, skill) > 0 || GetStat(item, SingleSkillStat, skill) > 0)) return true;
 	}
@@ -567,7 +588,7 @@ void Sweep(void* unit) noexcept {
 		for (auto kept = Kept.begin(); kept != Kept.end();) {
 			bool drop = false;
 			if (kept->unit == unit) {
-				if (kept->owner != NoId) drop = SlotOf(items, kept->owner) < 0;
+				if (kept->owner != NoId) drop = Keeping() ? SlotOf(items, kept->owner) < 0 : kept->owner != items[0] && kept->owner != items[1];
 				else if (!GrantedByWeapon(unit, kept->skill)) {
 					void* const node = FindSkill(unit, kept->skill, NoId);
 					if (!node || !Orphan(unit, node, kept->skill)) {
@@ -593,8 +614,8 @@ void Sweep(void* unit) noexcept {
 int HookButtonLevel(void* unit, void* node, int bonus, int flag) noexcept {
 	const int     level = SkillLevel(unit, node, bonus, flag);
 	std::uint32_t owner = 0;
-	if (level > 0 && Config.keepSwapSkills && IsLocalPlayer(unit) && Orphan(unit, node, SkillId(node))) return 0; // the button lets it go, then Sweep removes it
-	if (level > 0 || !Config.keepSwapSkills || !node || !ReadField(node, SkillOwnerOffset, owner) || owner != NoId || !IsLocalPlayer(unit)) return level;
+	if (level > 0 && Keeping() && IsLocalPlayer(unit) && Orphan(unit, node, SkillId(node))) return 0; // the button lets it go, then Sweep removes it
+	if (level > 0 || !Keeping() || !node || !ReadField(node, SkillOwnerOffset, owner) || owner != NoId || !IsLocalPlayer(unit)) return level;
 	void*        txt = nullptr;
 	std::int16_t id  = -1;
 	return ReadField(node, SkillTxtOffset, txt) && ReadField(txt, 0, id) && GrantedByWeapon(unit, id) ? 1 : level;
@@ -638,7 +659,7 @@ OtherSetGrant OtherSetLevel(void* unit, void* node) noexcept {
 	return grant;
 }
 
-bool ForClient(void* unit, void* node) noexcept { return node && Config.keepSwapSkills && (unit == ClientPlayer.load(std::memory_order_relaxed) || IsLocalPlayer(unit)); }
+bool ForClient(void* unit, void* node) noexcept { return node && Keeping() && (unit == ClientPlayer.load(std::memory_order_relaxed) || IsLocalPlayer(unit)); }
 
 // SkillLevel for you (skill buttons, picker colour, the "can cast" checks):
 // a skill at level 0 that your set II gives counts at the level set II gives
@@ -683,7 +704,7 @@ thread_local bool Refused = false; // HookCanUseSkill refused a skill for its mo
 // in your hands, the server checks it once they are there.
 int HookCanUseSkill(void* unit, void* node) noexcept {
 	const int result = CanUseSkill(unit, node);
-	if (result >= 2 && result <= WrongWeaponResult && node && Config.keepSwapSkills && unit == ClientPlayer.load(std::memory_order_relaxed)) {
+	if (result >= 2 && result <= WrongWeaponResult && node && Config.enabled && KeepHooked && unit == ClientPlayer.load(std::memory_order_relaxed)) {
 		const auto want = WantedFor(unit, node);
 		const auto now  = CurrentItems(unit);
 		return want[0] != now[0] || want[1] != now[1] ? 0 : result;
@@ -739,7 +760,7 @@ struct Looked {
 Looked ClientLooked, ServerLooked; // UI thread, game thread
 
 int AddSetTwoSkills(void* player, Looked& looked) noexcept {
-	if (!Config.keepSwapSkills || !player) return 0;
+	if (!Keeping() || !player) return 0;
 	if (player != looked.player) {
 		looked.items.clear();
 		looked.player = player;
@@ -918,7 +939,7 @@ std::array<std::uint32_t, 4> Follow(void* player, const std::array<std::uint32_t
 // Before a cast: puts the skill's weapons in your hands, and leaves them there.
 // A skill with no mode casts with set 1.
 void BeforeCast(void* game, void* player, void* skill) noexcept {
-	if (!game || !player || !skill || !IsLocalPlayer(player)) return;
+	if (!Config.enabled || !game || !player || !skill || !IsLocalPlayer(player)) return;
 	void*         txt   = nullptr;
 	std::int16_t  id    = -1;
 	std::uint32_t owner = 0;
@@ -1009,7 +1030,7 @@ void Settle(void* game, void* player) noexcept {
 	(void)Follow(player, current);
 	Sweep(player);
 	// A set never held this game has no skill nodes yet: hold it once.
-	if (!Config.keepSwapSkills || Server.tracking || Server.away) return;
+	if (!Keeping() || Server.tracking || Server.away) return;
 	auto primed = [](std::uint32_t item) { return item == NoId || std::find(Primed.begin(), Primed.end(), item) != Primed.end(); };
 	auto mark   = [&](std::uint32_t item) {
 		if (!primed(item)) Primed.push_back(item);
@@ -1062,6 +1083,7 @@ std::uint64_t HookDispatch(void* game, void* player, std::uint8_t* packet, int s
 // yours (the first game after starting D2R), which left your sets unread and
 // set II skills red until your first move: read them here.
 std::atomic<bool> ResyncQueued {};
+std::atomic<bool> ServerRelook {}; // show_swap_skills (or Swap Cast) turned on: add the set II skills again
 
 void __cdecl Resync(const D2RL::PluginContext*, void*) noexcept {
 	ResyncQueued.store(false);
@@ -1071,6 +1093,10 @@ void __cdecl Resync(const D2RL::PluginContext*, void*) noexcept {
 	if (!player) return;
 	const bool fresh = Server.player != player || Server.game != game;
 	Bind(game, player);
+	if (!fresh && ServerRelook.exchange(false)) {
+		ServerLooked.items.clear();
+		if (const int added = AddSetTwoSkills(player, ServerLooked)) Log(false, "%d skill%s of your other set added again", added, added == 1 ? "" : "s");
+	}
 	if (Server.tracking || Server.away) return;
 	if (fresh) {
 		// No hold now that you're in: the "+skills" of set II get their node
@@ -1146,7 +1172,7 @@ void Label(void* widget) noexcept {
 	SetVisibleFn   setVisible {};
 	if (!ReadField(text, 0, vtable) || !Read(vtable + 0x50, &setVisible, sizeof(setVisible)) || !setVisible) return;
 	const Mode mode = TileMode(widget, skill);
-	if (mode == Main && !Config.showMainLabel) {
+	if (!Config.enabled || (mode == Main && !Config.showMainLabel)) {
 		setVisible(text, false);
 		return;
 	}
@@ -1187,7 +1213,7 @@ GameString* HookSkillTip(GameString* out, void* unit, int skill, int level, int 
 	GameString* const result = SkillTip(out, unit, skill, level, a5, a6);
 	void* const       widget = HoveredWidget();
 	int               shown  = -1;
-	if (!result || !result->text || !IsSkillButton(widget) || !ReadField(widget, WidgetSkill, shown) || shown != skill) return result;
+	if (!Config.enabled || !result || !result->text || !IsSkillButton(widget) || !ReadField(widget, WidgetSkill, shown) || shown != skill) return result;
 	int        slot = -1;
 	const Mode mode = TileMode(widget, skill, &slot);
 	if (TileOwner(widget, skill, unit) != NoId && slot < 0) return result; // an item that isn't in a weapon slot
@@ -1308,6 +1334,8 @@ std::string NameOf(void* player) noexcept {
 // UI tick: follows the local player (id for the server side, name for modes).
 std::atomic<bool> UiQueued {};
 
+std::atomic<bool> Relabel {}, Relook {}; // a setting changed: labels / set II skills again
+
 void __cdecl UiTick(const D2RL::PluginContext*, void*) noexcept {
 	UiQueued.store(false);
 	void* const   player = LocalPlayer();
@@ -1329,7 +1357,15 @@ void __cdecl UiTick(const D2RL::PluginContext*, void*) noexcept {
 		if (const auto found = SavedItems.find(name); found != SavedItems.end()) count += static_cast<int>(found->second.size());
 		Log(false, "%s: %d skill%s with a weapon mode", name.c_str(), count, count == 1 ? "" : "s");
 	}
+	if (Relook.exchange(false)) {
+		ClientLooked.items.clear();
+		ServerRelook.store(true);
+		QueueResync();
+	}
 	Sweep(player);
+	if (Relabel.exchange(false))
+		for (void* hud : HudButtons)
+			if (IsSkillButton(hud)) Label(hud);
 	if (const int added = AddSetTwoSkills(player, ClientLooked)) Log(false, "added %d skill%s of your other set", added, added == 1 ? "" : "s");
 	static void*     seen = nullptr;
 	static ULONGLONG seenAt = 0, resynced = 0;
@@ -1436,6 +1472,7 @@ void* HoveredWidget() noexcept {
 }
 
 void __cdecl CycleHovered(const D2RL::PluginContext*, void*) noexcept {
+	if (!Config.enabled) return;
 	void* const widget = HoveredWidget();
 	int         skill  = -1;
 	if (!IsSkillButton(widget) || !ReadField(widget, WidgetSkill, skill) || skill < 0 || skill >= MaxSkills || Character.empty()) return;
@@ -1463,6 +1500,7 @@ void __cdecl CycleHovered(const D2RL::PluginContext*, void*) noexcept {
 auto OnCycleKey(const D2RL::PluginContext*, const D2RL::Input::ActionEvent* event, void*) noexcept -> D2RL::Input::ActionResult {
 	if (!D2RL::Input::HasActionEventField(event, D2RL::Input::ActionEventRequiredSize) || event->kind != D2RL::Input::ActionEventKind::Pressed)
 		return D2RL::Input::ActionResult::Ignored;
+	if (!Config.enabled) return D2RL::Input::ActionResult::Ignored;
 	void* const hovered = HoveredWidget();
 	if (!IsSkillButton(hovered)) return D2RL::Input::ActionResult::Ignored;
 	(void)Threads->runOnUiThread(Context, CycleHovered, nullptr);
@@ -1578,6 +1616,100 @@ std::string Unquote(std::string value) {
 	return value;
 }
 
+// Applies one setting from its TOML text (strings unquoted); false + reason when refused.
+bool Apply(const std::string& key, const std::string& value, std::string& error) {
+	const auto flag = [&](std::atomic<bool>& target) {
+		if (value != "true" && value != "false") return error = "true or false", false;
+		const bool was = target.exchange(value == "true");
+		if (was != target) Relabel = true;
+		if (!was && target && (&target == &Config.enabled || &target == &Config.keepSwapSkills)) Relook = true;
+		return true;
+	};
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "show_m_label") return flag(Config.showMainLabel);
+	if (key == "allow_cross_cast") return flag(Config.allowCross);
+	if (key == "show_swap_skills") return flag(Config.keepSwapSkills);
+	if (key == "log_swaps") return flag(Config.logSwaps);
+	if (key == "restore_delay_ms") {
+		char*      end = nullptr;
+		const long ms  = std::strtol(value.c_str(), &end, 10);
+		if (value.empty() || *end || ms < 0 || ms > 5000) return error = "0 to 5000", false;
+		Config.restoreMs = static_cast<int>(ms);
+		return true;
+	}
+	return error = "unknown setting", false;
+}
+
+std::string ValueOf(const std::string& key) {
+	const auto flag = [](bool on) { return std::string(on ? "true" : "false"); };
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "show_m_label") return flag(Config.showMainLabel);
+	if (key == "allow_cross_cast") return flag(Config.allowCross);
+	if (key == "show_swap_skills") return flag(Config.keepSwapSkills);
+	if (key == "log_swaps") return flag(Config.logSwaps);
+	if (key == "restore_delay_ms") return std::to_string(Config.restoreMs.load());
+	return {};
+}
+
+std::string Render() {
+	return R"(# Swap Cast
+#
+# Pick which weapons cast each skill. In the skill picker (or over the left or
+# right skill button), hover a skill and press the "Swap Cast: change skill
+# weapons" key (Options > Controls, Extensions; F10 by default) to cycle its mode:
+#   M  = weapon set I (no label shown by default)
+#   MS = set I weapon + set II shield/off-hand
+#   SM = set II weapon + set I shield/off-hand
+#   S  = weapon set II
+# When you cast the skill, its weapons go in your hands for the cast and set I
+# comes back right after; a skill with no mode casts with set I.
+# Modes are saved per character in <game>\d2rloader\swap-cast\modes.txt.
+# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
+
+[swap-cast]
+enabled = )" + ValueOf("enabled") + R"(
+
+# Also show "M" on skills that cast with set I.
+show_m_label = )" + ValueOf("show_m_label") + R"(
+
+# Allow the MS and SM modes (one hand from each set). false = the key only
+# switches between M and S, and skills saved as MS or SM cast with M or S, by
+# where their weapon comes from.
+allow_cross_cast = )" + ValueOf("allow_cross_cast") + R"(
+
+# Milliseconds without casting before set I comes back. A short wait keeps the
+# items in place while you hold the cast button.
+restore_delay_ms = )" + ValueOf("restore_delay_ms") + R"(
+
+# Keep the skills your set II items give (Call to Arms...) in the skill picker
+# and on the skill buttons while you hold set I. They default to S.
+show_swap_skills = )" + ValueOf("show_swap_skills") + R"(
+
+# Log every swap in mods/D2RMM/d2rloader/logs/swap-cast.log.
+log_swaps = )" + ValueOf("log_swaps") + "\n";
+}
+
+void SaveConfig() {
+	const std::string toml = Render();
+	if (!Context->WriteConfig(toml.c_str())) Log(true, "config: could not write the config file");
+}
+
+void ApplyText(std::string_view text) {
+	std::size_t lineStart = 0;
+	while (lineStart < text.size()) {
+		auto lineEnd = text.find('\n', lineStart);
+		if (lineEnd == std::string_view::npos) lineEnd = text.size();
+		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
+		lineStart              = lineEnd + 1;
+		const auto equals      = line.find('=');
+		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
+		const std::string key   = Trim(std::string_view(line).substr(0, equals));
+		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
+		std::string       error;
+		if (!Apply(key, value, error)) Log(true, "config: %s = %s ignored (%s)", key.c_str(), value.c_str(), error.c_str());
+	}
+}
+
 void LoadConfig() {
 	(void)Context->EnsureConfig();
 	std::uint32_t     required = 0;
@@ -1590,28 +1722,70 @@ void LoadConfig() {
 		buffer.resize(required);
 		if (!Context->ReadConfig(buffer.data(), static_cast<std::uint32_t>(buffer.size()), &required)) return;
 	}
-	const std::string_view text(buffer.data(), std::strlen(buffer.data()));
-	std::size_t            lineStart = 0;
-	while (lineStart < text.size()) {
-		auto lineEnd = text.find('\n', lineStart);
-		if (lineEnd == std::string_view::npos) lineEnd = text.size();
-		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
-		lineStart              = lineEnd + 1;
-		const auto equals      = line.find('=');
-		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
-		const std::string key   = Trim(std::string_view(line).substr(0, equals));
-		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
-		if (key == "enabled") Config.enabled = value != "false";
-		else if (key == "show_m_label") Config.showMainLabel = value == "true";
-		else if (key == "allow_cross_cast") Config.allowCross = value != "false";
-		else if (key == "restore_delay_ms") {
-			const int ms = std::atoi(value.c_str());
-			if (ms >= 0 && ms <= 5000) Config.restoreMs = ms;
-			else Log(true, "config: restore_delay_ms %s ignored (0-5000)", value.c_str());
-		} else if (key == "log_swaps") Config.logSwaps = value == "true";
-		else if (key == "show_swap_skills") Config.keepSwapSkills = value != "false";
-		else Log(true, "config: unknown key %s", key.c_str());
+	ApplyText(std::string_view(buffer.data(), std::strlen(buffer.data())));
+	Relabel = Relook = false;
+}
+
+// ---- I Hate TOMLs ----
+
+constexpr const char* Schema = R"toml(title = "Swap Cast"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Swap Cast on"
+note = "Off: skills cast with the weapons in your hands, no labels."
+[[setting]]
+key = "show_m_label"
+type = "bool"
+label = "Show M labels"
+note = "Also label the skills that cast with set I."
+[[setting]]
+key = "allow_cross_cast"
+type = "bool"
+label = "Allow MS and SM"
+note = "One hand from each set. Off: the key only switches M and S."
+[[setting]]
+key = "show_swap_skills"
+type = "bool"
+label = "Show set II skills"
+note = "Keep Call to Arms and other set II skills while you hold set I."
+[[setting]]
+key = "restore_delay_ms"
+type = "int"
+label = "Set I back after (ms)"
+note = "Time without casting before set I comes back."
+min = 0
+max = 5000
+step = 10
+[[setting]]
+key = "log_swaps"
+type = "bool"
+label = "Log swaps"
+note = "A line in swap-cast.log for every swap."
+[[setting]]
+type = "text"
+label = "Hover a skill and press the key set in Options > Controls (F10 by default) to change its weapons."
+)toml";
+
+PluginMenu::Connection Menu;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	std::string reason;
+	if (!Apply(key, Unquote(Trim(value)), reason)) {
+		std::snprintf(error, size, "%s", reason.c_str());
+		return false;
 	}
+	SaveConfig();
+	return true;
 }
 
 template <typename Service>
@@ -1667,10 +1841,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
 	LoadConfig();
-	if (!Config.enabled) {
-		Log(false, "Swap Cast %s: disabled in config", PluginVersion);
-		return true;
-	}
+	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
+	// Hooked even when turned off: every setting can change while playing.
 	Base = context->exeBase;
 	if (!Base || !Locate()) {
 		Log(true, "Swap Cast %s: inactive, this game build isn't supported (Steam 3.3.93787 / 3.3.94995 are)", PluginVersion);
@@ -1708,14 +1880,14 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!Hook(SkillTipRva, SkillTipBytes, &HookSkillTip, &SkillTip)) Log(true, "skill tooltips show no weapon line");
 	if (!Hook(SetSkillRva, SetSkillBytes, &HookSetSkill, &SetSkill) | !Hook(SetSkillObjectRva, SetSkillObjectBytes, &HookSetSkillObject, &SetSkillObject))
 		Log(true, "some skill tiles show no labels");
-	if (Config.keepSwapSkills && (!Hook(SetItemSkillRva, SetItemSkillBytes, &HookSetItemSkill, &SetItemSkill) ||
+	if ((!Hook(SetItemSkillRva, SetItemSkillBytes, &HookSetItemSkill, &SetItemSkill) ||
 	                              !Hook(RemoveSkillRva, RemoveSkillBytes, &HookRemoveSkill, &RemoveSkill) || !RedirectButtonLevel())) {
 		Log(true, "your other set's item skills are not kept (hook failed)");
-		Config.keepSwapSkills = false;
+		KeepHooked = false;
 	}
-	if (Config.keepSwapSkills && (!Hook(SkillLevelRva, SkillLevelBytes, &HookSkillLevel, &SkillLevel) | !Hook(BonusLevelRva, BonusLevelBytes, &HookBonusLevel, &BonusLevel)))
+	if (KeepHooked && (!Hook(SkillLevelRva, SkillLevelBytes, &HookSkillLevel, &SkillLevel) | !Hook(BonusLevelRva, BonusLevelBytes, &HookBonusLevel, &BonusLevel)))
 		Log(true, "class skills only your set II gives may show red on set I (hook failed)");
-	if (Config.keepSwapSkills && !Hook(CanUseSkillRva, CanUseSkillBytes, &HookCanUseSkill, &CanUseSkill))
+	if (KeepHooked && !Hook(CanUseSkillRva, CanUseSkillBytes, &HookCanUseSkill, &CanUseSkill))
 		Log(true, "skills only your set II gives are not red when their mode leaves the item out of your hands (hook failed)");
 	else if (!LocateSpeech() || !Hook(TryCastRva, TryCastBytes, &HookTryCast, &TryCast))
 		Log(true, "game code differs: no \"impossible\" when a skill's mode can't cast it");
@@ -1727,10 +1899,11 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (Speak) {
 		if (HANDLE clicks = CreateThread(nullptr, 0, WatchClicks, nullptr, 0, nullptr)) CloseHandle(clicks);
 	}
-	Log(false, "Swap Cast %s: active, modes in %s", PluginVersion, ModesPath.empty() ? "(not saved)" : ModesPath.c_str());
+	Log(false, "Swap Cast %s: %s, modes in %s", PluginVersion, Config.enabled ? "active" : "loaded but turned off", ModesPath.empty() ? "(not saved)" : ModesPath.c_str());
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	Menu.Stop();
 	Running.store(false);
 }

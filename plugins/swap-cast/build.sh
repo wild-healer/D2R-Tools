@@ -15,9 +15,8 @@ x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s \
   -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion -lshell32 -lole32 -luuid \
   -o "$out/d2rl-swap-cast.dll"
 cp "$out/d2rl-swap-cast.dll" "$here/"
-# D2RMM package: the DLL and its config at the zip root.
-version=$(sed -n 's/.*PluginVersion = "\(.*\)";/\1/p' "$here/src/plugin.cpp")
-zip=swap-cast-$version.zip
+# D2RMM package: the DLL only (the config is embedded and written on first launch).
+zip=swap-cast.zip
 rm -f "$here"/swap-cast*.zip
-(cd "$here" && zip -q -X "$zip" d2rl-swap-cast.dll swap-cast.toml)
+(cd "$here" && zip -q -X "$zip" d2rl-swap-cast.dll)
 echo "built $here/d2rl-swap-cast.dll and $here/$zip"
