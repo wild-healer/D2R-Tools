@@ -53,10 +53,12 @@
 #include <string_view>
 #include <vector>
 
+#include "i_hate_tomls_client.h"
+
 namespace {
 
 constexpr const char* PluginId      = "un-anya-lyse";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -69,8 +71,9 @@ const D2RL::PluginInfo Info {
 	.flags       = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
 };
 
+// Read by the hooks on the game's threads, changed live from I Hate TOMLs.
 struct Settings {
-	bool enabled = true;
+	std::atomic<bool> enabled { true };
 } Config;
 
 // ---- native layout (Steam 3.3.93787 / 94995) ----
@@ -191,9 +194,18 @@ void Log(bool warn, const char* format, ...) noexcept {
 	warn ? Context->LogWarn(line) : Context->LogInfo(line);
 }
 
+// Reads the game's own memory after checking it is committed and readable
+// (ReadProcessMemory made one antivirus heuristic call a DLL an injector).
 bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
-	SIZE_T copied = 0;
-	return address != 0 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), output, size, &copied) && copied == size;
+	if (address == 0) return false;
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+	if (address + size > end) return false;
+	std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	return true;
 }
 
 bool CodeMatches(std::uint64_t rva, const Code& bytes) noexcept {
@@ -327,7 +339,7 @@ std::uint64_t HookAddLine(void* menu, const char* text, int a3, int a4, void* ca
 	if (CalledFrom(__builtin_return_address(0), CancelSiteRva)) {
 		// A new dialog: whatever window comes next opens in its normal mode.
 		RemoveMode = false;
-		if (NpcClass() == NpcAnya && LocalGame()) {
+		if (Config.enabled && NpcClass() == NpcAnya && LocalGame()) {
 			LoadTexts();
 			AddLine(menu, MenuLabel.c_str(), a3, a4, reinterpret_cast<void*>(&RemoveLine), enabled);
 		}
@@ -504,6 +516,55 @@ std::string Unquote(std::string value) {
 	return value;
 }
 
+// Applies one setting from its TOML text (strings unquoted); false + reason when refused.
+bool Apply(const std::string& key, const std::string& value, std::string& error) {
+	if (key == "enabled") {
+		if (value != "true" && value != "false") return error = "true or false", false;
+		Config.enabled = value == "true";
+		return true;
+	}
+	return error = "unknown setting", false;
+}
+
+std::string ValueOf(const std::string& key) {
+	if (key == "enabled") return Config.enabled ? "true" : "false";
+	return {};
+}
+
+std::string Render() {
+	return R"(# Un-Anya-lyse
+#
+# Anya gets a "Remove Personalization" line in her dialog. Pick it, put a
+# personalized item in the window and confirm: the item loses its name.
+# Free, any number of times, no quest needed. Single player and games you host
+# only (the line doesn't show in games you join).
+# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
+
+[un-anya-lyse]
+enabled = )" + ValueOf("enabled") + "\n";
+}
+
+void SaveConfig() {
+	const std::string toml = Render();
+	if (!Context->WriteConfig(toml.c_str())) Log(true, "config: could not write the config file");
+}
+
+void ApplyText(std::string_view text) {
+	std::size_t lineStart = 0;
+	while (lineStart < text.size()) {
+		auto lineEnd = text.find('\n', lineStart);
+		if (lineEnd == std::string_view::npos) lineEnd = text.size();
+		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
+		lineStart              = lineEnd + 1;
+		const auto equals      = line.find('=');
+		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
+		const std::string key   = Trim(std::string_view(line).substr(0, equals));
+		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
+		std::string       error;
+		if (!Apply(key, value, error)) Log(true, "config: %s = %s ignored (%s)", key.c_str(), value.c_str(), error.c_str());
+	}
+}
+
 void LoadConfig() {
 	(void)Context->EnsureConfig();
 	std::uint32_t     required = 0;
@@ -516,20 +577,38 @@ void LoadConfig() {
 		buffer.resize(required);
 		if (!Context->ReadConfig(buffer.data(), static_cast<std::uint32_t>(buffer.size()), &required)) return;
 	}
-	const std::string_view text(buffer.data(), std::strlen(buffer.data()));
-	std::size_t            lineStart = 0;
-	while (lineStart < text.size()) {
-		auto lineEnd = text.find('\n', lineStart);
-		if (lineEnd == std::string_view::npos) lineEnd = text.size();
-		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
-		lineStart              = lineEnd + 1;
-		const auto equals      = line.find('=');
-		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
-		const std::string key   = Trim(std::string_view(line).substr(0, equals));
-		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
-		if (key == "enabled") Config.enabled = value != "false";
-		else Log(true, "config: unknown key %s", key.c_str());
+	ApplyText(std::string_view(buffer.data(), std::strlen(buffer.data())));
+}
+
+// ---- I Hate TOMLs ----
+
+constexpr const char* Schema = R"toml(title = "Un-Anya-lyse"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Remove Personalization at Anya"
+note = "Adds the line to her dialog (single player and games you host)."
+)toml";
+
+PluginMenu::Connection Menu;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	std::string reason;
+	if (!Apply(key, Unquote(Trim(value)), reason)) {
+		std::snprintf(error, size, "%s", reason.c_str());
+		return false;
 	}
+	SaveConfig();
+	return true;
 }
 
 } // namespace
@@ -542,10 +621,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
 	LoadConfig();
-	if (!Config.enabled) {
-		Log(false, "Un-Anya-lyse %s: disabled in config", PluginVersion);
-		return true;
-	}
+	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
+	// Hooked even when turned off: it can be turned on while playing.
 	Base = context->exeBase;
 	if (!Base || !Locate()) {
 		Log(true, "Un-Anya-lyse %s: inactive, this game build isn't supported (Steam 3.3.93787 / 3.3.94995 are)", PluginVersion);
@@ -577,8 +654,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "Un-Anya-lyse %s: inactive, a hook could not be installed", PluginVersion);
 		return true;
 	}
-	Log(false, "Un-Anya-lyse %s: active, Anya can remove personalization (single player and hosted games)", PluginVersion);
+	Log(false, "Un-Anya-lyse %s: %s, Anya can remove personalization (single player and hosted games)", PluginVersion, Config.enabled ? "active" : "loaded but turned off");
 	return true;
 }
 
-D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {}
+D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	Menu.Stop();
+}

@@ -5,8 +5,11 @@ opens her personalize window; put a personalized item in it and confirm, and the
 item loses its name. Free, as many times as you like, with or without her
 Betrayal of Harrogath reward (the reward is not used up).
 
-- Install: add `un-anya-lyse-1.0.0.zip` through D2RMM like the other plugins.
-- Config (`d2rloader/config/un-anya-lyse.toml`): `enabled`.
+- Install: get Un-Anya-lyse from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/un-anya-lyse) and load it with D2RMM, or copy `d2rl-un-anya-lyse.dll`
+  to `<game>/d2rloader/plugins/`.
+- Config (`d2rloader/config/un-anya-lyse.toml`, written on first launch): `enabled`.
+  It can be changed in game with I Hate TOMLs and applies at once (from the next
+  time you talk to Anya).
 - Texts in all 13 game languages.
 - Works in single player and in games you host. The line doesn't show in games
   you join: the host decides, and an unmodded host refuses the request.
