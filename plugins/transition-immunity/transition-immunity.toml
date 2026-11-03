@@ -3,8 +3,7 @@
 # After anything with a loading screen (portal, waypoint, entrance, stairs,
 # joining a game), monsters can't hurt or curse you until you move or the time
 # below runs out. A shield symbol floats over your head while it lasts.
-# D2RLoader copies this file to d2rloader/config/transition-immunity.toml on
-# first launch; edit that copy. Changes apply the next time the game starts.
+# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
 
 [transition-immunity]
 enabled = true

@@ -25,12 +25,15 @@
 // player in another level than the client shows, the player is protected too.
 // The server checks run on the game's server thread, so it works in single
 // player and in games you host (for you only), not in games you join.
+// Every setting can be changed in game with I Hate TOMLs and applies at once:
+// the hooks are always installed and check `enabled` on each call.
 
 #include <D2RLPlugin/api.h>
 #include <windows.h>
 
 #include <array>
 #include <atomic>
+#include <mutex>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -40,10 +43,12 @@
 #include <string_view>
 #include <vector>
 
+#include "i_hate_tomls_client.h"
+
 namespace {
 
 constexpr const char* PluginId      = "transition-immunity";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -59,11 +64,16 @@ const D2RL::PluginInfo Info {
 namespace Tables = D2RL::DataTables;
 
 struct Settings {
-	bool        enabled   = true;
-	int         seconds   = 60;
-	bool        indicator = true;
-	std::string overlay   = "ShrineArmor";
+	std::atomic<bool> enabled { true };
+	std::atomic<int>  seconds { 60 };
+	std::atomic<bool> indicator { true };
+	std::string       overlay = "ShrineArmor"; // under TableLock
 } Config;
+
+// The overlay table seen at the last data table load, to find a newly chosen
+// indicator without waiting for the next load.
+std::mutex        TableLock;
+Tables::TableView OverlayTable {};
 
 // ---- native layout (Steam 3.3.93787 / 94995) ----
 
@@ -146,9 +156,18 @@ void Log(bool warn, const char* format, ...) noexcept {
 	warn ? Context->LogWarn(line) : Context->LogInfo(line);
 }
 
+// Reads the game's own memory after checking it is committed and readable
+// (ReadProcessMemory made one antivirus heuristic call a DLL an injector).
 bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
-	SIZE_T copied = 0;
-	return address != 0 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), output, size, &copied) && copied == size;
+	if (address == 0) return false;
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	const std::uintptr_t end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+	if (address + size > end) return false;
+	std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	return true;
 }
 
 template <typename T>
@@ -170,6 +189,7 @@ int LevelOf(void* unit) noexcept {
 
 bool IsProtected(void* unit, bool& loading) noexcept {
 	loading = false;
+	if (!Config.enabled.load(std::memory_order_relaxed)) return false;
 	std::uint32_t type = NoId, id = NoId;
 	if (!ReadField(unit, UnitTypeOffset, type) || type != 0 || !ReadField(unit, UnitIdOffset, id)) return false;
 	if (id == NoId || id != PlayerId.load(std::memory_order_acquire)) return false;
@@ -217,19 +237,21 @@ bool Position(void* unit, int& x, int& y) noexcept {
 	return true;
 }
 
-void ShowIndicator(void* player) noexcept {
-	const int overlay = OverlayId.load();
-	if (!Config.indicator || overlay < 0 || (Ui.shownOn == player && Ui.shownId == overlay)) return;
-	CreateOverlay(player, overlay, OverlayType, 0, 0, 0, 0);
-	Ui.shownOn = player;
-	Ui.shownId = overlay;
-}
-
 void HideIndicator(void* player) noexcept {
 	// Only on the unit it was put on, while that unit is still the player.
 	if (Ui.shownOn && Ui.shownOn == player && Ui.shownId >= 0) RemoveOverlay(player, 0, Ui.shownId);
 	Ui.shownOn = nullptr;
 	Ui.shownId = -1;
+}
+
+void ShowIndicator(void* player) noexcept {
+	const int overlay = OverlayId.load();
+	if (Ui.shownOn == player && Ui.shownId == overlay) return;
+	HideIndicator(player); // another indicator was chosen
+	if (!Config.indicator || overlay < 0) return;
+	CreateOverlay(player, overlay, OverlayType, 0, 0, 0, 0);
+	Ui.shownOn = player;
+	Ui.shownId = overlay;
 }
 
 void Start(void* player, int level, ULONGLONG now) noexcept {
@@ -240,7 +262,7 @@ void Start(void* player, int level, ULONGLONG now) noexcept {
 	}
 	Ui.since = now;
 	(void)Position(player, Ui.x, Ui.y);
-	Log(false, "level %d: protected until you move (at most %d s)%s", level, Config.seconds, again ? ", restarted" : "");
+	Log(false, "level %d: protected until you move (at most %d s)%s", level, Config.seconds.load(), again ? ", restarted" : "");
 }
 
 void End(void* player, ULONGLONG now, const char* why) noexcept {
@@ -280,21 +302,27 @@ void __cdecl Tick(const D2RL::PluginContext*, void*) noexcept {
 	const int level = LevelOf(player);
 	if (level <= 0) return; // still loading
 	ClientLevel.store(level, std::memory_order_release);
+	const bool enabled = Config.enabled.load();
 	if (level != Ui.level) {
 		Ui.level = level;
-		Start(player, level, now);
+		if (enabled) Start(player, level, now);
 	}
 	if (!Active.load()) return;
+	if (!enabled) {
+		End(player, now, "turned off");
+		return;
+	}
 	if (now - Ui.since < GraceMs) (void)Position(player, Ui.x, Ui.y);
 	else if (Moving(player)) {
 		End(player, now, "you moved");
 		return;
 	}
-	if (now - Ui.since >= static_cast<ULONGLONG>(Config.seconds) * 1000) {
+	if (now - Ui.since >= static_cast<ULONGLONG>(Config.seconds.load()) * 1000) {
 		End(player, now, "time up");
 		return;
 	}
-	ShowIndicator(player);
+	if (Config.indicator.load()) ShowIndicator(player);
+	else HideIndicator(player);
 }
 
 std::atomic<bool> Running {};
@@ -325,14 +353,22 @@ std::int32_t FindOverlay(const Tables::TableView& view, const char* filename) no
 	return -1;
 }
 
+// Finds Config.overlay in the cached table; TableLock held.
+void ResolveOverlay() noexcept {
+	if (!OverlayTable.rows) return; // tables not loaded yet: done when they are
+	const auto overlay = FindOverlay(OverlayTable, Config.overlay.c_str());
+	OverlayId.store(overlay);
+	if (overlay < 0) Log(true, "indicator: no overlay.txt row with Filename %s, no indicator", Config.overlay.c_str());
+	else Log(false, "indicator: overlay %s = row %d", Config.overlay.c_str(), overlay);
+}
+
 void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
 	for (const auto bank : { Tables::Bank::Rotw, Tables::Bank::Lod, Tables::Bank::Classic }) {
 		Tables::TableView view { .structSize = Tables::TableViewSize };
 		if (TablesApi->getTable(Context, bank, Tables::TableId::Overlay, &view) != Tables::Result::Success || !view.rows || !view.rowSize || !view.rowCount) continue;
-		const auto overlay = FindOverlay(view, Config.overlay.c_str());
-		OverlayId.store(overlay);
-		if (overlay < 0) Log(true, "indicator: no overlay.txt row with Filename %s, no indicator", Config.overlay.c_str());
-		else Log(false, "indicator: overlay %s = row %d", Config.overlay.c_str(), overlay);
+		std::lock_guard lock(TableLock);
+		OverlayTable = view;
+		ResolveOverlay();
 		return;
 	}
 	Log(true, "indicator: overlay table unavailable, no indicator");
@@ -390,6 +426,106 @@ std::string Unquote(std::string value) {
 	return value;
 }
 
+// Indicator choices offered in the menu: overlay.txt Filenames that float over
+// the head (shrine symbols) plus the Energy Shield orb. The TOML takes any Filename.
+constexpr std::array<std::pair<const char*, const char*>, 11> Indicators { {
+	{ "ShrineArmor", "Armor shrine shield" },
+	{ "ShrineCombat", "Combat shrine swords" },
+	{ "ShrineSkill", "Skill shrine" },
+	{ "ShrineExperience", "Experience shrine" },
+	{ "ShrineManaRegen", "Mana shrine" },
+	{ "ShrineStamina", "Stamina shrine" },
+	{ "ShrineResistFire", "Fire resist shrine" },
+	{ "ShrineResistCold", "Cold resist shrine" },
+	{ "ShrineResistLightning", "Lightning resist shrine" },
+	{ "ShrineResistPoison", "Poison resist shrine" },
+	{ "ManaShieldBall", "Energy Shield orb" },
+} };
+
+// Applies one setting from its TOML text (strings unquoted); false + reason when refused.
+bool Apply(const std::string& key, const std::string& value, std::string& error) {
+	const auto flag = [&](std::atomic<bool>& target) {
+		if (value != "true" && value != "false") return error = "true or false", false;
+		target = value == "true";
+		return true;
+	};
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "indicator") return flag(Config.indicator);
+	if (key == "duration_seconds") {
+		char*      end     = nullptr;
+		const long seconds = std::strtol(value.c_str(), &end, 10);
+		if (value.empty() || *end || seconds < 1 || seconds > 3600) return error = "1 to 3600", false;
+		Config.seconds = static_cast<int>(seconds);
+		return true;
+	}
+	if (key == "indicator_overlay") {
+		if (value.empty()) return error = "an overlay.txt Filename", false;
+		std::lock_guard lock(TableLock);
+		if (Config.overlay != value) {
+			Config.overlay = value;
+			ResolveOverlay();
+		}
+		return true;
+	}
+	return error = "unknown setting", false;
+}
+
+std::string ValueOf(const std::string& key) {
+	const auto flag = [](bool on) { return std::string(on ? "true" : "false"); };
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "indicator") return flag(Config.indicator);
+	if (key == "duration_seconds") return std::to_string(Config.seconds.load());
+	if (key == "indicator_overlay") {
+		std::lock_guard lock(TableLock);
+		return "\"" + Config.overlay + "\"";
+	}
+	return {};
+}
+
+std::string Render() {
+	return R"(# Transition Immunity
+#
+# After anything with a loading screen (portal, waypoint, entrance, stairs,
+# joining a game), monsters can't hurt or curse you until you move or the time
+# below runs out. A shield symbol floats over your head while it lasts.
+# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
+
+[transition-immunity]
+enabled = )" + ValueOf("enabled") + R"(
+
+# Seconds the protection lasts at most if you don't move.
+duration_seconds = )" + ValueOf("duration_seconds") + R"(
+
+# Show the indicator over your character while protected.
+indicator = )" + ValueOf("indicator") + R"(
+
+# The overlay.txt Filename drawn as the indicator. ShrineArmor = the armor
+# shrine's shield, floating over your head where no skill effect covers it.
+# Others: ShrineSkill, ShrineCombat, ManaShieldBall (the Energy Shield orb).
+indicator_overlay = )" + ValueOf("indicator_overlay") + "\n";
+}
+
+void SaveConfig() {
+	const std::string toml = Render();
+	if (!Context->WriteConfig(toml.c_str())) Log(true, "config: could not write the config file");
+}
+
+void ApplyText(std::string_view text) {
+	std::size_t lineStart = 0;
+	while (lineStart < text.size()) {
+		auto lineEnd = text.find('\n', lineStart);
+		if (lineEnd == std::string_view::npos) lineEnd = text.size();
+		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
+		lineStart              = lineEnd + 1;
+		const auto equals      = line.find('=');
+		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
+		const std::string key   = Trim(std::string_view(line).substr(0, equals));
+		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
+		std::string       error;
+		if (!Apply(key, value, error)) Log(true, "config: %s = %s ignored (%s)", key.c_str(), value.c_str(), error.c_str());
+	}
+}
+
 void LoadConfig() {
 	(void)Context->EnsureConfig();
 	std::uint32_t     required = 0;
@@ -402,27 +538,65 @@ void LoadConfig() {
 		buffer.resize(required);
 		if (!Context->ReadConfig(buffer.data(), static_cast<std::uint32_t>(buffer.size()), &required)) return;
 	}
-	const std::string_view text(buffer.data(), std::strlen(buffer.data()));
-	std::size_t            lineStart = 0;
-	while (lineStart < text.size()) {
-		auto lineEnd = text.find('\n', lineStart);
-		if (lineEnd == std::string_view::npos) lineEnd = text.size();
-		const std::string line = Trim(text.substr(lineStart, lineEnd - lineStart));
-		lineStart              = lineEnd + 1;
-		const auto equals      = line.find('=');
-		if (line.empty() || line[0] == '#' || line[0] == '[' || equals == std::string::npos) continue;
-		const std::string key   = Trim(std::string_view(line).substr(0, equals));
-		const std::string value = Unquote(Trim(std::string_view(line).substr(equals + 1)));
-		if (key == "enabled") Config.enabled = value != "false";
-		else if (key == "duration_seconds") {
-			const int seconds = std::atoi(value.c_str());
-			if (seconds > 0 && seconds <= 3600) Config.seconds = seconds;
-			else Log(true, "config: duration_seconds %s ignored (1-3600)", value.c_str());
-		} else if (key == "indicator") Config.indicator = value != "false";
-		else if (key == "indicator_overlay") {
-			if (!value.empty()) Config.overlay = value;
-		} else Log(true, "config: unknown key %s", key.c_str());
+	ApplyText(std::string_view(buffer.data(), std::strlen(buffer.data())));
+}
+
+// ---- I Hate TOMLs ----
+
+std::string Schema() {
+	std::string values, labels;
+	for (const auto& [file, label] : Indicators) {
+		values += std::string(values.empty() ? "" : ", ") + "\"" + file + "\"";
+		labels += std::string(labels.empty() ? "" : ", ") + "\"" + label + "\"";
 	}
+	return R"toml(title = "Transition Immunity"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Immune after loading screens"
+note = "Hits and curses do nothing until you move."
+[[setting]]
+key = "duration_seconds"
+type = "int"
+label = "Longest protection (seconds)"
+note = "If you don't move. 1 to 3600."
+min = 1
+max = 3600
+step = 1
+shift_step = 10
+ctrl_step = 60
+[[setting]]
+key = "indicator"
+type = "bool"
+label = "Show the indicator"
+note = "A symbol over your head while you're protected."
+[[setting]]
+key = "indicator_overlay"
+type = "enum"
+label = "Indicator"
+values = [)toml" + values + R"toml(]
+labels = [)toml" + labels + "]\n";
+}
+
+PluginMenu::Connection Menu;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	std::string reason;
+	if (!Apply(key, Unquote(Trim(value)), reason)) {
+		std::snprintf(error, size, "%s", reason.c_str());
+		return false;
+	}
+	SaveConfig();
+	return true;
 }
 
 template <typename Service>
@@ -445,10 +619,9 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
 	LoadConfig();
-	if (!Config.enabled) {
-		Log(false, "Transition Immunity %s: disabled in config", PluginVersion);
-		return true;
-	}
+	static const std::string schema = Schema();
+	(void)Menu.Start(context, schema.c_str(), MenuGet, MenuSet, nullptr);
+	// Everything is set up even when turned off: it can be turned on while playing.
 	Base = context->exeBase;
 	if (!Base || !Locate()) {
 		Log(true, "Transition Immunity %s: inactive, this game build isn't supported (Steam 3.3.93787 / 3.3.94995 are)", PluginVersion);
@@ -467,17 +640,15 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		CurseTarget = nullptr;
 		Log(true, "could not hook D2R+0x%llX: curses are not blocked", static_cast<unsigned long long>(CurseTargetRva));
 	}
-	if (Config.indicator) {
-		TablesApi            = Query<D2RL::DataTableService>("data table");
-		const auto* lifecycle = Query<D2RL::LifecycleService>("lifecycle");
-		const D2RL::Lifecycle::DataTablesLoadedListener listener {
-			.structSize = D2RL::Lifecycle::DataTablesLoadedListenerSize,
-			.callback   = OnTablesLoaded,
-		};
-		if (!D2RL::HasDataTableServiceField(TablesApi, D2RL::DataTableServiceRequiredSize) || !D2RL::HasLifecycleServiceField(lifecycle, D2RL::LifecycleServiceRequiredSize) ||
-		    lifecycle->registerDataTablesLoadedListener(context, &listener, &TablesListener) != D2RL::Lifecycle::Result::Success)
-			Log(true, "indicator: data tables unavailable, no indicator");
-	}
+	TablesApi             = Query<D2RL::DataTableService>("data table");
+	const auto* lifecycle = Query<D2RL::LifecycleService>("lifecycle");
+	const D2RL::Lifecycle::DataTablesLoadedListener listener {
+		.structSize = D2RL::Lifecycle::DataTablesLoadedListenerSize,
+		.callback   = OnTablesLoaded,
+	};
+	if (!D2RL::HasDataTableServiceField(TablesApi, D2RL::DataTableServiceRequiredSize) || !D2RL::HasLifecycleServiceField(lifecycle, D2RL::LifecycleServiceRequiredSize) ||
+	    lifecycle->registerDataTablesLoadedListener(context, &listener, &TablesListener) != D2RL::Lifecycle::Result::Success)
+		Log(true, "indicator: data tables unavailable, no indicator");
 	Running.store(true);
 	if (HANDLE poller = CreateThread(nullptr, 0, Poll, nullptr, 0, nullptr)) CloseHandle(poller);
 	else {
@@ -485,10 +656,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "Transition Immunity %s: inactive, could not start its timer", PluginVersion);
 		return true;
 	}
-	Log(false, "Transition Immunity %s: active, %d s after each loading screen or until you move%s", PluginVersion, Config.seconds, CurseTarget ? "" : " (hits only)");
+	Log(false, "Transition Immunity %s: %s, %d s after each loading screen or until you move%s", PluginVersion, Config.enabled ? "active" : "loaded but turned off", Config.seconds.load(),
+	    CurseTarget ? "" : " (hits only)");
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
 	Running.store(false);
+	Menu.Stop();
 }
