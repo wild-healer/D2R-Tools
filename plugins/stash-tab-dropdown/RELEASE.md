@@ -1,3 +1,32 @@
+# Stash Tab Dropdown 1.4.2: patch notes
+
+## GitHub release
+
+- Tag: `stash-tab-dropdown-v1.4.2`
+- Title: `Stash Tab Dropdown 1.4.2`
+- Asset: `stash-tab-dropdown.zip`
+
+Body:
+
+```markdown
+### New
+- Every setting can be changed in game with I Hate TOMLs and applies at once, enabled included: the page list and the list button are rebuilt with the new settings.
+- The shared page count is followed while you play: after moving the Options slider, the list shows the new pages without a restart.
+- The download is now named `stash-tab-dropdown.zip`, without a version.
+```
+
+## Nexus Mods changelog (1.4.2)
+
+```
+**Stash Tab Dropdown 1.4.2**
+
+**New**
+
+* Every setting can be changed in game with I Hate TOMLs and applies at once, enabled included.
+* The page list follows the shared page count while you play: after moving the Options slider, no restart is needed.
+* The download is now named stash-tab-dropdown.zip, without a version.
+```
+
 # Stash Tab Dropdown 1.4.1: patch notes
 
 ## GitHub release
@@ -59,7 +88,7 @@ Body:
 * button_width, button_height, button_scale and font_size settings: list_scale replaces them.
 ```
 
-# Stash Tab Dropdown 1.4.0: description (GitHub README / Nexus)
+# Stash Tab Dropdown: description (GitHub README / Nexus)
 
 ```markdown
 **Stash Tab Dropdown** is a D2RLoader plugin that jumps straight to any shared stash page instead of clicking the arrows one page at a time.
@@ -73,6 +102,7 @@ Body:
 * **On every stash tab** if you like (`stash_button_all_tabs`): picking a page from the personal or materials tab switches to the shared tab and goes straight to it.
 * **Resize the list** with `list_scale`, and choose how many pages per row with `columns`.
 * **Escape closes the stash** instead of only the list if you prefer (`escape_closes_list = false`).
+* **Every setting in game** with I Hate TOMLs, applied at once.
 * **Page names and colours** from Shared Stash Page Text: each number shows in its page's colour and the page name is its tooltip. You can also name pages in this plugin's own config.
 
 ### Requirements
@@ -81,7 +111,7 @@ Body:
 
 ### Install
 
-Load `stash-tab-dropdown-1.4.0.zip` in D2RMM, or copy `d2rl-stash-tab-dropdown.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/stash-tab-dropdown.toml`, written on first launch. Edit that copy, not the one in the zip, and restart the game after changing it.
+Load `stash-tab-dropdown.zip` in D2RMM, or copy `d2rl-stash-tab-dropdown.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/stash-tab-dropdown.toml`, written on first launch, and can all be changed in game with I Hate TOMLs. After editing the file by hand, restart the game.
 
 ### Console
 

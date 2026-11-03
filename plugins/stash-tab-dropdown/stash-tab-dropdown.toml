@@ -2,7 +2,8 @@
 #
 # Adds a button by the shared stash page arrows that opens a list of pages and
 # jumps straight to the one you pick. D2RLoader copies this file to d2rloader/config/stash-tab-dropdown.toml
-# on first launch; edit that copy. Layout settings apply after a game restart.
+# on first launch; edit that copy. Every setting can also be changed in game
+# with I Hate TOMLs, and applies at once.
 
 [stash-tab-dropdown]
 enabled = true
@@ -29,8 +30,7 @@ stash_button_scale = 0.67
 stash_button_all_tabs = false
 
 # The number of shared stash pages is not set here: it is RotW's 5 plus
-# D2RLoader's add_shared_tabs (the Options slider), read each time the list
-# opens.
+# D2RLoader's add_shared_tabs (the Options slider), followed while you play.
 
 # Use the page names from Shared Stash Page Text (shared-stash-page-text.toml,
 # same folder) when that plugin is installed. Names set below win over them.

@@ -15,9 +15,7 @@ x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s \
   -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" \
   -o "$out/d2rl-stash-tab-dropdown.dll"
 cp "$out/d2rl-stash-tab-dropdown.dll" "$here/"
-# D2RMM package: the DLL and its config at the zip root.
-version=$(sed -n 's/.*PluginVersion = "\(.*\)";/\1/p' "$here/src/plugin.cpp")
-zip=stash-tab-dropdown-$version.zip
+# Package: the DLL alone (its config is built in; D2RLoader writes it on first launch).
 rm -f "$here"/stash-tab-dropdown*.zip
-(cd "$here" && zip -q -X "$zip" d2rl-stash-tab-dropdown.dll stash-tab-dropdown.toml)
-echo "built $here/d2rl-stash-tab-dropdown.dll and $here/$zip"
+(cd "$here" && zip -q -X stash-tab-dropdown.zip d2rl-stash-tab-dropdown.dll)
+echo "built $here/d2rl-stash-tab-dropdown.dll and $here/stash-tab-dropdown.zip"

@@ -12,8 +12,9 @@
 //     the stash's page arrows, opened while the game shows the shared tab. It
 //     opens the "PageList" panel through the stock
 //     "PanelManager:TogglePanel" message.
-//   - PageList is a small panel under that button, built when the plugin loads
-//     with one small square button per page showing the page number in the
+//   - PageList is a small panel under that button, built with one small
+//     square button per page (rebuilt when a setting or the page count
+//     changes: every setting applies at once, also from I Hate TOMLs) showing the page number in the
 //     page's colour; the page's name (from this plugin's config, or from Shared
 //     Stash Page Text's config) is the button's tooltip.
 //   - A page button sends "PanelManager:ClosePanel:stash-tab-dropdown/Page<n>".
@@ -29,6 +30,8 @@
 
 #include <D2RLPlugin/api.h>
 #include <windows.h>
+
+#include "i_hate_tomls_client.h"
 
 #include <algorithm>
 #include <atomic>
@@ -50,13 +53,15 @@ namespace Panels  = D2RL::Panels;
 namespace Events  = D2RL::SharedEvents;
 
 constexpr const char* PluginId      = "stash-tab-dropdown";
-constexpr const char* PluginVersion = "1.4.1";
-constexpr const char* ListPanelName = "stash-tab-dropdown/PageList";
+constexpr const char* PluginVersion = "1.4.2";
 // Button messages. Neither may be a prefix of a panel name ("stash-tab-dropdown/
 // PageList..."): the listener would take that panel's open message for a click.
 constexpr const char* PagePrefix    = "stash-tab-dropdown/GoTo";
 constexpr const char* GroupPrefix   = "stash-tab-dropdown/Screen";
-constexpr int         MaxGroups     = 60; // D2RLoader allows 64 panels per plugin
+// D2RLoader allows 64 panels per plugin: the list button, and this many
+// screens of pages twice, with and without CloseOnEscape (escape_closes_list),
+// since a panel's flags are set when it is registered at load.
+constexpr int         MaxGroups     = 31;
 constexpr int         MaxPages      = 1000; // D2RLoader's limit for the shared stash
 constexpr int         VanillaPages  = 5;    // RotW's shared pages before D2RLoader adds more
 constexpr const char* StashPanel    = "BankExpansionLayout";
@@ -80,9 +85,22 @@ const D2RL::PanelService*       PanelApi {};
 const D2RL::WidgetService*      WidgetApi {};
 const D2RL::SharedEventService* EventApi {};
 
+const D2RL::ResourceService* ResourceApi {};
+
 // One panel per screen of pages ("group"). The first is the one the stash
 // button toggles ("PageList"); the others are "PageList2", "PageList3", ...
-std::vector<Panels::RegistrationHandle> GroupHandles;
+// The same again as "KeepList", "KeepList2", ... without CloseOnEscape, used
+// when escape_closes_list is off. All are registered at load (the game only
+// finds a panel's layout if one was there at load); their layouts are
+// replaced when the settings or the page count change (Rebuild).
+struct Slot {
+	Panels::RegistrationHandle          panel  = Panels::InvalidHandle;
+	D2RL::Resources::RegistrationHandle layout = D2RL::Resources::InvalidHandle;
+	std::string                         json;          // the layout registered now
+	bool                                loaded = false; // opened since its layout was registered: unload it before replacing it
+	ULONGLONG                           openedAt = 0;
+};
+std::vector<Slot> Slots[2];
 
 // ---- config ----
 
@@ -101,12 +119,8 @@ struct Settings {
 	int                   rows          = 12;  // rows per screen; more pages get < and > buttons
 	int                   listX         = 20; // stash panel coordinates: < button, then the pages, then >, right-aligned under the page arrows
 	int                   listY         = 196;
-	int                   columnWidth   = 132;
+	int                   columnWidth   = 132; // as set, before list_scale
 	int                   rowHeight     = 104;
-	float                 buttonScale   = 1.0f;
-	int                   buttonWidth   = 124; // size of the plugin's own button sprite
-	int                   buttonHeight  = 96;
-	int                   fontSize      = 32;
 	std::string           buttonSprite;  // empty = the plugin's own sprite (OwnSprite), 124 x 96 scaled by list_scale
 	int                   normalFrame   = 0;
 	int                   hoveredFrame  = 1;
@@ -123,6 +137,26 @@ struct Settings {
 	float                 stashButtonScale = 0.67f;
 	std::map<int, Page>   pages;         // from this plugin's own config
 } Config;
+
+// The list's sizes with list_scale applied (ComputeMetrics).
+struct Metrics {
+	int   columnWidth  = 132;
+	int   rowHeight    = 104;
+	int   buttonWidth  = 124; // size of the plugin's own button sprite
+	int   buttonHeight = 96;
+	int   fontSize     = 32;
+	float buttonScale  = 1.0f; // a game sprite has one size: the button is scaled instead
+} M;
+
+void ComputeMetrics() {
+	const auto scaled = [](int value, int least) { return std::max(least, static_cast<int>(value * Config.listScale + 0.5f)); };
+	M.columnWidth  = scaled(Config.columnWidth, 16);
+	M.rowHeight    = scaled(Config.rowHeight, 16);
+	M.buttonWidth  = scaled(124, 8);
+	M.buttonHeight = scaled(96, 8);
+	M.fontSize     = scaled(32, 8);
+	M.buttonScale  = Config.buttonSprite.empty() ? 1.0f : Config.listScale;
+}
 
 std::map<int, Page> PageTextPages; // from Shared Stash Page Text's config
 
@@ -286,6 +320,220 @@ void LoadConfig() {
 	});
 }
 
+// keep_open's remember_open only counts with keep_open on.
+bool RememberOn() {
+	return Config.keepOpen && Config.rememberOpen;
+}
+
+// A setting changed in game (I Hate TOMLs), as TOML writes the value: true,
+// 3, 0.75, "text", [x, y]. Values are clamped to the same ranges as the
+// config file's. False with a reason when the value cannot be read.
+bool SetSetting(const std::string& key, const std::string& value, std::string& error) {
+	const auto flag = [&](bool& field) {
+		if (value != "true" && value != "false") return error = "not true or false", false;
+		return field = value == "true", true;
+	};
+	const auto number = [&](int& field, int low, int high) {
+		char*      end    = nullptr;
+		const long parsed = std::strtol(value.c_str(), &end, 10);
+		if (value.empty() || *end) return error = "not a whole number", false;
+		return field = static_cast<int>(std::clamp<long>(parsed, low, high)), true;
+	};
+	const auto decimal = [&](float& field, float low, float high) {
+		char*       end    = nullptr;
+		const float parsed = std::strtof(value.c_str(), &end);
+		if (value.empty() || *end) return error = "not a number", false;
+		return field = std::clamp(parsed, low, high), true;
+	};
+	const auto point = [&](int& x, int& y) {
+		int px = 0, py = 0;
+		if (std::sscanf(value.c_str(), " [ %d , %d ]", &px, &py) != 2) return error = "not [x, y]", false;
+		x = std::clamp(px, -2000, 4000);
+		y = std::clamp(py, -2000, 4000);
+		return true;
+	};
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "read_game_page") return flag(Config.readGamePage);
+	if (key == "instant_jump") return flag(Config.instantJump);
+	if (key == "keep_open") return flag(Config.keepOpen);
+	if (key == "remember_open") return flag(Config.rememberOpen);
+	if (key == "escape_closes_list") return flag(Config.escapeCloses);
+	if (key == "stash_button") return flag(Config.stashButton);
+	if (key == "stash_button_all_tabs") return flag(Config.buttonAllTabs);
+	if (key == "use_page_text_names") return flag(Config.usePageText);
+	if (key == "stash_button_position") return point(Config.stashButtonX, Config.stashButtonY);
+	if (key == "stash_button_scale") return decimal(Config.stashButtonScale, 0.2f, 4.0f);
+	if (key == "list_position") return point(Config.listX, Config.listY);
+	if (key == "list_scale") return decimal(Config.listScale, 0.2f, 4.0f);
+	if (key == "columns") return number(Config.columns, 1, 20);
+	if (key == "rows") return number(Config.rows, 1, 20);
+	if (key == "column_width") return number(Config.columnWidth, 50, 2000);
+	if (key == "row_height") return number(Config.rowHeight, 20, 1000);
+	if (key == "normal_frame") return number(Config.normalFrame, 0, 63);
+	if (key == "hovered_frame") return number(Config.hoveredFrame, 0, 63);
+	if (key == "pressed_frame") return number(Config.pressedFrame, 0, 63);
+	if (key == "steps_per_frame") return number(Config.stepsPerFrame, 0, 1000);
+	if (key == "button_sprite") {
+		std::size_t at = 0;
+		std::string parsed;
+		if (!ParseString(value, at, parsed)) return error = "not a quoted text", false;
+		return Config.buttonSprite = parsed, true;
+	}
+	return error = "unknown setting", false;
+}
+
+std::string Quoted(const std::string& text) {
+	std::string out = "\"";
+	for (const char c : text) {
+		if (c == '"' || c == '\\') out += '\\';
+		if (c == '\n') out += "\\n";
+		else if (static_cast<unsigned char>(c) >= 0x20) out += c;
+	}
+	return out + "\"";
+}
+
+std::string Decimal(float value) {
+	char text[32];
+	std::snprintf(text, sizeof(text), "%.2f", value);
+	std::string out = text;
+	while (out.size() > 3 && out.back() == '0') out.pop_back(); // 0.67, 1.0
+	return out;
+}
+
+// A setting's value as TOML writes it; empty for an unknown key.
+std::string ValueOf(const std::string& key) {
+	const auto flag  = [](bool value) { return std::string(value ? "true" : "false"); };
+	const auto point = [](int x, int y) { return "[" + std::to_string(x) + ", " + std::to_string(y) + "]"; };
+	if (key == "enabled") return flag(Config.enabled);
+	if (key == "read_game_page") return flag(Config.readGamePage);
+	if (key == "instant_jump") return flag(Config.instantJump);
+	if (key == "keep_open") return flag(Config.keepOpen);
+	if (key == "remember_open") return flag(Config.rememberOpen);
+	if (key == "escape_closes_list") return flag(Config.escapeCloses);
+	if (key == "stash_button") return flag(Config.stashButton);
+	if (key == "stash_button_all_tabs") return flag(Config.buttonAllTabs);
+	if (key == "use_page_text_names") return flag(Config.usePageText);
+	if (key == "stash_button_position") return point(Config.stashButtonX, Config.stashButtonY);
+	if (key == "stash_button_x") return std::to_string(Config.stashButtonX);
+	if (key == "stash_button_y") return std::to_string(Config.stashButtonY);
+	if (key == "stash_button_scale") return Decimal(Config.stashButtonScale);
+	if (key == "list_position") return point(Config.listX, Config.listY);
+	if (key == "list_x") return std::to_string(Config.listX);
+	if (key == "list_y") return std::to_string(Config.listY);
+	if (key == "list_scale") return Decimal(Config.listScale);
+	if (key == "columns") return std::to_string(Config.columns);
+	if (key == "rows") return std::to_string(Config.rows);
+	if (key == "column_width") return std::to_string(Config.columnWidth);
+	if (key == "row_height") return std::to_string(Config.rowHeight);
+	if (key == "button_sprite") return Quoted(Config.buttonSprite);
+	if (key == "normal_frame") return std::to_string(Config.normalFrame);
+	if (key == "hovered_frame") return std::to_string(Config.hoveredFrame);
+	if (key == "pressed_frame") return std::to_string(Config.pressedFrame);
+	if (key == "steps_per_frame") return std::to_string(Config.stepsPerFrame);
+	return {};
+}
+
+// The config file as stash-tab-dropdown.toml ships it, with the current
+// values and the page names of its [pages.N] tables.
+std::string Render() {
+	std::string text = R"(# Stash Tab Dropdown
+#
+# Adds a button by the shared stash page arrows that opens a list of pages and
+# jumps straight to the one you pick. D2RLoader copies this file to d2rloader/config/stash-tab-dropdown.toml
+# on first launch; edit that copy. Every setting can also be changed in game
+# with I Hate TOMLs, and applies at once.
+
+[stash-tab-dropdown]
+enabled = )" + ValueOf("enabled") + R"(
+
+# Read the stash's current page from the game (Steam 3.3.93787 and Battle.net
+# 3.3.93847), so pages turned with keybinds are followed. Elsewhere, or when
+# false, the plugin counts the arrow clicks.
+read_game_page = )" + ValueOf("read_game_page") + R"(
+
+# Switch straight to the picked page, the way Stash Search does, instead of
+# clicking the page arrows (needs read_game_page and D2RLoader 1.3.1; otherwise,
+# or when false, the arrows are clicked).
+instant_jump = )" + ValueOf("instant_jump") + R"(
+
+# The list button, shown over the stash's shared tab where the plugin can read
+# the stash from the game (see read_game_page). Position in stash panel units
+# (the right page arrow ends at 1564,110).
+stash_button = )" + ValueOf("stash_button") + R"(
+stash_button_x = )" + ValueOf("stash_button_x") + R"(
+stash_button_y = )" + ValueOf("stash_button_y") + R"(
+stash_button_scale = )" + ValueOf("stash_button_scale") + R"(
+# Show the list button on the personal and materials tabs too. Picking a page
+# there switches to the shared tab first (needs instant_jump to work).
+stash_button_all_tabs = )" + ValueOf("stash_button_all_tabs") + R"(
+
+# The number of shared stash pages is not set here: it is RotW's 5 plus
+# D2RLoader's add_shared_tabs (the Options slider), followed while you play.
+
+# Use the page names from Shared Stash Page Text (shared-stash-page-text.toml,
+# same folder) when that plugin is installed. Names set below win over them.
+use_page_text_names = )" + ValueOf("use_page_text_names") + R"(
+
+# Keep the page list open after picking a page, to hop between a few pages
+# (Escape, switching tabs or the list button still close it).
+keep_open = )" + ValueOf("keep_open") + R"(
+# Escape closes the page list. When false, Escape closes the stash instead (the
+# list closes with it, and remember_open still opens it again next time).
+escape_closes_list = )" + ValueOf("escape_closes_list") + R"(
+# With keep_open: if the list was left open, open it again whenever the shared
+# tab shows, also after restarting the game.
+remember_open = )" + ValueOf("remember_open") + R"(
+
+# ---- Page list look ----
+# One button per page showing its number in the page's colour; hover it for
+# the page's name (pages without a name have no tooltip). Positions are in the
+# stash panel's own layout units (the page arrows sit at 1173,97 and are 420
+# wide; the grid starts at 58,177). The page you are on gets a gold highlight.
+layout_version = 9
+columns = )" + ValueOf("columns") + R"(
+# Rows of pages per screen. With more pages than columns x rows, the list gets
+# < and > buttons on each side of the first row to go to the previous and next
+# screen, and opens on the screen with the page you are on.
+rows = )" + ValueOf("rows") + R"(
+list_x = )" + ValueOf("list_x") + R"(
+list_y = )" + ValueOf("list_y") + R"(
+# Scales the whole page list (squares, spacing and numbers) from its top-left
+# corner, e.g. 0.75 for a smaller list.
+list_scale = )" + ValueOf("list_scale") + R"(
+column_width = )" + ValueOf("column_width") + R"(
+row_height = )" + ValueOf("row_height") + R"(
+# A game sprite to use instead of the plugin's own image (e.g.
+# "PANEL\\Loot_Filter\\LootFilter_Large_List_Btn_Checkbox" for squares), and
+# which of its frames are normal, hovered and pressed.
+button_sprite = )" + ValueOf("button_sprite") + R"(
+normal_frame = )" + ValueOf("normal_frame") + R"(
+hovered_frame = )" + ValueOf("hovered_frame") + R"(
+pressed_frame = )" + ValueOf("pressed_frame") + R"(
+
+# Page arrows sent per frame while walking to the chosen page. 0 = automatic:
+# one per frame for short jumps, more for long ones so any jump takes about 40
+# frames. Set 1 if long jumps land on the wrong page. Jumps to the first or
+# last page send a full page count of steps, which also fixes a wrong count.
+steps_per_frame = )" + ValueOf("steps_per_frame") + R"(
+
+# ---- Page names ----
+# Same format as Shared Stash Page Text. Colour is optional ("#RRGGBB").
+# [pages.1]
+# text = "Runes"
+# color = "#FFA500"
+)";
+	for (const auto& [page, names] : Config.pages) {
+		text += "\n[pages." + std::to_string(page) + "]\n";
+		if (!names.text.empty()) text += "text = " + Quoted(names.text) + "\n";
+		if (!names.color.empty()) text += "color = " + Quoted(names.color) + "\n";
+	}
+	return text;
+}
+
+void SaveConfig() {
+	if (!Context->WriteConfig(Render().c_str())) Log(true, "config: could not write the config file");
+}
+
 std::string ReadTextFile(const std::wstring& path) {
 	FILE* file = _wfopen(path.c_str(), L"rb");
 	if (!file) return {};
@@ -360,7 +608,9 @@ int ReadPageCount() {
 	return 0;
 }
 
-int BuiltPages = MaxPages; // pages the registered panels hold: the page count at load
+int  BuiltPages = 0; // pages the registered layouts hold (Rebuild)
+int  WantedPages();
+void RequestRebuild(bool settings);
 
 void RefreshPageCount() {
 	static bool warned = false;
@@ -372,9 +622,9 @@ void RefreshPageCount() {
 	}
 	if (count == Config.pageCount) return;
 	Log(false, "page count: %d (was %d)", count, Config.pageCount);
-	if (count > BuiltPages && BuiltPages >= Config.pageCount) Log(true, "page list: restart the game to list the pages past %d", BuiltPages);
 	Config.pageCount = count;
 	CurrentPage      = std::min(CurrentPage, count);
+	if (WantedPages() != BuiltPages) RequestRebuild(false); // the list is rebuilt once it is closed
 }
 
 Page PageFor(int page) {
@@ -456,19 +706,42 @@ int GroupOf(int page) {
 	return std::clamp((page - 1) / PerGroup(), 0, GroupCount() - 1);
 }
 
-std::string GroupLocalId(int group) {
-	return group == 0 ? "PageList" : "PageList" + std::to_string(group + 1);
+// The pages the layouts should hold: the pages the stash has, and no more
+// (hidden widgets would still block the mouse).
+int WantedPages() {
+	return std::min({ MaxPages, MaxGroups * PerGroup(), std::max(1, Config.pageCount) });
 }
 
-std::string GroupPanelName(int group) {
-	return std::string(PluginId) + "/" + GroupLocalId(group);
+// Screens with pages in the registered layouts.
+int Screens() {
+	return (BuiltPages + PerGroup() - 1) / PerGroup();
 }
 
-// The plugin's own button sprite, registered as a resource at load. Layouts
-// cannot stretch a sprite one way (there is only "scale"), so the page buttons
-// are drawn here at the size they should be.
-constexpr const char* OwnSprite     = "d2rloader\\stash-tab-dropdown\\pagebutton";
-constexpr const char* OwnSpritePath = "data/hd/global/ui/d2rloader/stash-tab-dropdown/pagebutton";
+// 0: the panels Escape closes, 1: the ones it leaves to the game (see Slots).
+int Mode() {
+	return Config.escapeCloses ? 0 : 1;
+}
+
+std::vector<Slot>& Current() {
+	return Slots[Mode()];
+}
+
+std::string GroupLocalId(int group, int mode = Mode()) {
+	const std::string base = mode == 0 ? "PageList" : "KeepList";
+	return group == 0 ? base : base + std::to_string(group + 1);
+}
+
+std::string GroupPanelName(int group, int mode = Mode()) {
+	return std::string(PluginId) + "/" + GroupLocalId(group, mode);
+}
+
+// The plugin's own button sprite, registered as a resource. Layouts cannot
+// stretch a sprite one way (there is only "scale"), so the page buttons are
+// drawn here at the size they should be, one sprite per size (named by it, so
+// a new list_scale never meets a picture the game already loaded).
+std::string OwnSprite() {
+	return "d2rloader\\stash-tab-dropdown\\pagebutton" + std::to_string(M.buttonWidth) + "x" + std::to_string(M.buttonHeight);
+}
 
 // A D2R HD sprite: "SpA1", version 31, frame width, total width, height, 0,
 // frame count, then 32-bit RGBA rows across all frames side by side. Frames:
@@ -518,22 +791,22 @@ int Scaled(int units) {
 // four black copies of it, 2 units (about a screen pixel) off each way.
 std::string Label(const std::string& name, int x, int y, const std::string& text, const std::string& colorJson) {
 	char rect[128];
-	std::snprintf(rect, sizeof(rect), R"({"x": %d, "y": %d, "width": %d, "height": %d})", x, y, Config.columnWidth - Scaled(8), Config.rowHeight - Scaled(8));
+	std::snprintf(rect, sizeof(rect), R"({"x": %d, "y": %d, "width": %d, "height": %d})", x, y, M.columnWidth - Scaled(8), M.rowHeight - Scaled(8));
 	return R"(, {"type": "TextBoxWidget", "name": ")" + name + R"(", "fields": {"rect": )" + rect + R"(, "text": )" + Json(text) +
-	       R"(, "style": {"fontColor": )" + colorJson + R"(, "pointSize": )" + std::to_string(Config.fontSize) + R"(, "alignment": {"h": "center", "v": "center"}}}})";
+	       R"(, "style": {"fontColor": )" + colorJson + R"(, "pointSize": )" + std::to_string(M.fontSize) + R"(, "alignment": {"h": "center", "v": "center"}}}})";
 }
 
 std::string SquareButton(const std::string& name, int x, int y, const std::string& text, const std::string& color, const std::string& tooltip, const std::string& message) {
 	char button[320];
 	std::snprintf(button, sizeof(button), R"(, {"type": "ButtonWidget", "name": "%s", "fields": {"rect": {"x": %d, "y": %d, "scale": %.3f}, "normalFrame": %d, "hoveredFrame": %d, "pressedFrame": %d, "filename": )",
-	              name.c_str(), x, y, Config.buttonScale, Config.normalFrame, Config.hoveredFrame, Config.pressedFrame);
+	              name.c_str(), x, y, M.buttonScale, Config.normalFrame, Config.hoveredFrame, Config.pressedFrame);
 	std::string json = button;
-	json += Json(Config.buttonSprite.empty() ? OwnSprite : Config.buttonSprite);
+	json += Json(Config.buttonSprite.empty() ? OwnSprite() : Config.buttonSprite);
 	if (!text.empty()) {
 		json += R"(, "textString": )" + Json(text);
 		// The button's scale also scales its text, so divide it out: font_size
 		// is the size the text shows at, whatever the button's size.
-		json += R"(, "pointSize": )" + std::to_string(std::max(1, static_cast<int>(Config.fontSize / Config.buttonScale + 0.5f)));
+		json += R"(, "pointSize": )" + std::to_string(std::max(1, static_cast<int>(M.fontSize / M.buttonScale + 0.5f)));
 		json += R"(, "textColor": )" + ColorJson(color);
 	}
 	if (!tooltip.empty()) json += R"(, "tooltipString": )" + Json(TooltipColor(color) + tooltip);
@@ -569,10 +842,10 @@ std::string Box(const std::string& name, const std::string& children) {
 std::string BuildListLayout(int group) {
 	const int   first = group * PerGroup() + 1;
 	const int   last  = std::min(first + PerGroup() - 1, BuiltPages);
-	const int   navW  = Config.columnWidth;
+	const int   navW  = M.columnWidth;
 	const int   gridX = Config.listX + navW;
 	const int   rows  = (last - first + Config.columns) / Config.columns;
-	const int   nextX = gridX + Config.columns * Config.columnWidth;
+	const int   nextX = gridX + Config.columns * M.columnWidth;
 	// Backdrops start 8 units (scaled) above and left of their squares and tile exactly.
 	const int   gap   = Scaled(8);
 	// Only the widgets a screen uses: hidden widgets still take the mouse, so
@@ -580,22 +853,22 @@ std::string BuildListLayout(int group) {
 	// screen, no > on the last.
 	std::string json;
 	if (group > 0)
-		json += Box("PreviousBox", Backdrop("Previous", Config.listX - gap, Config.listY - gap, navW, Config.rowHeight) +
+		json += Box("PreviousBox", Backdrop("Previous", Config.listX - gap, Config.listY - gap, navW, M.rowHeight) +
 		                               SquareButton("Previous", Config.listX, Config.listY, "<", "", "", std::string(GroupPrefix) + "Previous"));
 	if (last < BuiltPages)
-		json += Box("NextBox", Backdrop("Next", nextX - gap, Config.listY - gap, navW, Config.rowHeight) +
+		json += Box("NextBox", Backdrop("Next", nextX - gap, Config.listY - gap, navW, M.rowHeight) +
 		                           SquareButton("Next", nextX, Config.listY, ">", "", "", std::string(GroupPrefix) + "Next"));
 	for (int row = 0; row < rows; ++row) {
-		const int   y        = Config.listY + row * Config.rowHeight;
+		const int   y        = Config.listY + row * M.rowHeight;
 		std::string backdrops, marks, pages;
 		for (int page = first + row * Config.columns; page <= std::min(first + (row + 1) * Config.columns - 1, last); ++page) {
-			const int x = gridX + ((page - first) % Config.columns) * Config.columnWidth;
-			backdrops += Backdrop("P" + std::to_string(page), x - gap, y - gap, Config.columnWidth, Config.rowHeight);
+			const int x = gridX + ((page - first) % Config.columns) * M.columnWidth;
+			backdrops += Backdrop("P" + std::to_string(page), x - gap, y - gap, M.columnWidth, M.rowHeight);
 			// "Mark<n>", shown for the current page: the gold highlight and the
 			// number's outline.
 			char rect[256];
 			std::snprintf(rect, sizeof(rect), R"(, {"type": "RectangleWidget", "name": "Highlight%d", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "color": [0.78, 0.70, 0.47, 0.55]}})",
-			              page, x - Scaled(3), y - Scaled(3), Config.columnWidth - Scaled(2), Config.rowHeight - Scaled(2));
+			              page, x - Scaled(3), y - Scaled(3), M.columnWidth - Scaled(2), M.rowHeight - Scaled(2));
 			std::string mark   = rect;
 			const auto  number = std::to_string(page);
 			for (const auto& [dx, dy] : { std::pair { -2, 0 }, { 2, 0 }, { 0, -2 }, { 0, 2 } })
@@ -636,7 +909,8 @@ int ReadNativePage() {
 constexpr std::uint64_t StashPanelRva    = 0x846190; // void* (uint32 panel id), stash = 0x18
 constexpr std::uint64_t SharedTabRva     = 0x23af50; // bool (stash panel): shared tab selected
 constexpr std::uint64_t PageFieldRva     = 0x23b910; // bool (stash panel): page index at +0x170, else +0x168
-bool                    GamePageKnown    = false;    // set at load from the build
+bool                    GameCodeOk       = false;    // the stash code is the known one (checked at load)
+bool                    GamePageKnown    = false;    // GameCodeOk and read_game_page
 
 // Each function's first bytes on both builds (RIP-relative offsets included,
 // so the data they reach is laid out the same too).
@@ -708,7 +982,14 @@ constexpr std::pair<std::uint64_t, std::uint64_t> CoreTable[] {
 	{ 0x700df0, PageCountRva }, { 0x700e08, PageRecordRva }, { 0x700e20, ReloadRva },
 };
 std::uint8_t* CoreBase    = nullptr;
-bool          InstantJump = false; // set at load
+bool          CoreOk      = false; // D2RCore.dll is the known D2RLoader 1.3.1 one (checked at load)
+bool          InstantJump = false; // GamePageKnown, CoreOk and instant_jump
+
+// Follows read_game_page and instant_jump.
+void UpdateModes() {
+	GamePageKnown = Config.readGamePage && GameCodeOk;
+	InstantJump   = GamePageKnown && Config.instantJump && CoreOk;
+}
 
 bool CoreMatches() {
 	CoreBase = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(L"D2RCore.dll"));
@@ -925,15 +1206,35 @@ void ConfigureLater(int group) {
 	OnConfigure(Context, nullptr);
 }
 
-bool IsOpen(int group) {
+bool PanelOpen(Panels::RegistrationHandle handle) {
 	Panels::PanelInfo info {};
 	info.structSize = Panels::PanelInfoSize;
-	return PanelApi->getPanelInfo(Context, GroupHandles[group], &info) == Panels::Result::Success && info.presentationState == Panels::PresentationState::Open;
+	return handle != Panels::InvalidHandle && PanelApi->getPanelInfo(Context, handle, &info) == Panels::Result::Success &&
+	       info.presentationState == Panels::PresentationState::Open;
 }
 
+bool IsOpen(int group) {
+	return group >= 0 && group < static_cast<int>(Current().size()) && PanelOpen(Current()[group].panel);
+}
+
+// A screen of the list is open.
+bool AnyOpen() {
+	for (int group = 0; group < Screens(); ++group)
+		if (IsOpen(group)) return true;
+	return false;
+}
+
+// Marks a panel as loaded by the game: its layout is unloaded before being replaced.
+void Opened(Slot& slot) {
+	slot.loaded   = true;
+	slot.openedAt = GetTickCount64();
+}
+
+// Closes every screen, in both modes (escape_closes_list may just have changed).
 void CloseList() {
 	if (!PanelApi) return;
-	for (const auto handle : GroupHandles) (void)PanelApi->closePanel(Context, handle);
+	for (auto& slots : Slots)
+		for (const auto& slot : slots) (void)PanelApi->closePanel(Context, slot.panel);
 }
 
 int MarkPasses = 0; // polls left that re-apply the open screen's highlight
@@ -941,9 +1242,10 @@ int MarkPasses = 0; // polls left that re-apply the open screen's highlight
 void ShowGroup(int group) {
 	MarkPasses = 3;
 	CloseList();
-	if (group < 0 || group >= static_cast<int>(GroupHandles.size())) return;
-	if (const auto result = PanelApi->openPanel(Context, GroupHandles[group]); result != Panels::Result::Success)
+	if (group < 0 || group >= Screens() || group >= static_cast<int>(Current().size())) return;
+	if (const auto result = PanelApi->openPanel(Context, Current()[group].panel); result != Panels::Result::Success)
 		Log(true, "page list: could not open %s (result %u)", GroupPanelName(group).c_str(), static_cast<unsigned>(result));
+	else Opened(Current()[group]);
 	ConfigureLater(group);
 }
 
@@ -952,13 +1254,15 @@ int ReopenPolls = 0;
 
 // The stash button toggled the first screen of pages. Runs after the toggle.
 void OnListToggled(const D2RL::PluginContext*, void*) noexcept {
+	if (!Config.enabled) return CloseList();
 	ReopenPolls = 0; // the list button closes it for good
 	bool otherOpen = false;
-	for (int group = 1; group < static_cast<int>(GroupHandles.size()); ++group) otherOpen = otherOpen || IsOpen(group);
+	for (int group = 1; group < Screens(); ++group) otherOpen = otherOpen || IsOpen(group);
 	if (otherOpen || !IsOpen(0)) {
 		CloseList(); // the button closes whichever screen is open
 		return;
 	}
+	if (!Current().empty()) Opened(Current()[0]);
 	RefreshPageCount();
 	Resync();
 	if (const int group = GroupOf(CurrentPage); group != 0) ShowGroup(group); // open on the screen with the current page
@@ -976,16 +1280,135 @@ HANDLE            PollThread {};
 
 // The plugin's own list button: a panel of its own over the stash, opened
 // while the stash shows the shared tab, where the game page can be read.
-Panels::RegistrationHandle ButtonHandle = Panels::InvalidHandle;
+Slot ButtonSlot;
+
+std::string ButtonLayout() {
+	char button[640];
+	std::snprintf(button, sizeof(button),
+	              R"({"type": "Panel", "name": "stash-tab-dropdown/StashButton", "fields": {"priority": 110, "rect": "$LeftPanelRect_ExpandedStash", "anchor": "$LeftPanelAnchor"}, )"
+	              R"("children": [{"type": "ButtonWidget", "name": "ListButton", "fields": {"rect": {"x": %d, "y": %d, "scale": %.3f}, "filename": "PANEL\\Chronicle\\Btn_collapse", )"
+	              R"("normalFrame": 0, "pressedFrame": 2, "hoveredFrame": 1, "disabledFrame": 3, "sound": "cursor_menu_select_hd", "onClickMessage": "PanelManager:TogglePanel:%s"}}]})",
+	              Config.stashButtonX, Config.stashButtonY, Config.stashButtonScale, GroupPanelName(0).c_str());
+	return button;
+}
 
 void SyncButton() {
-	if (ButtonHandle == Panels::InvalidHandle) return;
-	const bool        want = ListPlace();
-	Panels::PanelInfo info {};
-	info.structSize   = Panels::PanelInfoSize;
-	const bool open   = PanelApi->getPanelInfo(Context, ButtonHandle, &info) == Panels::Result::Success && info.presentationState == Panels::PresentationState::Open;
-	if (want && !open) (void)PanelApi->openPanel(Context, ButtonHandle);
-	else if (!want && open) (void)PanelApi->closePanel(Context, ButtonHandle);
+	if (ButtonSlot.panel == Panels::InvalidHandle) return;
+	const bool want = Config.enabled && Config.stashButton && GamePageKnown && ListPlace();
+	const bool open = PanelOpen(ButtonSlot.panel);
+	if (want && !open) {
+		if (PanelApi->openPanel(Context, ButtonSlot.panel) == Panels::Result::Success) Opened(ButtonSlot);
+	} else if (!want && open) (void)PanelApi->closePanel(Context, ButtonSlot.panel);
+}
+
+// ---- live settings: layouts replaced while playing ----
+
+// A screen's layout with nothing in it, for the screens the stash has no pages for.
+std::string Placeholder(int group, int mode) {
+	return R"({"type": "Panel", "name": ")" + GroupPanelName(group, mode) + R"(", "fields": {"priority": 120, "rect": "$LeftPanelRect_ExpandedStash", "anchor": "$LeftPanelAnchor"}, "children": []})";
+}
+
+std::string LayoutPath(const std::string& localId) {
+	return "data/global/ui/layouts/stash-tab-dropdown/" + localId + "hd.json";
+}
+
+// Registers json as the slot's layout, replacing the one it had. A layout the
+// game has loaded is unloaded first, so the panel's next open reads the new
+// one (as Grail On! and I Hate TOMLs do).
+bool SetLayout(Slot& slot, const std::string& localId, const std::string& json) {
+	if (json == slot.json && slot.layout != D2RL::Resources::InvalidHandle) return true;
+	if (slot.loaded && WidgetApi) {
+		const std::string             name = std::string(PluginId) + "/" + localId;
+		const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = name.c_str() };
+		(void)WidgetApi->dispatchUiAction(Context, &unload);
+	}
+	slot.loaded = false;
+	if (slot.layout != D2RL::Resources::InvalidHandle) (void)ResourceApi->unregisterResource(Context, slot.layout);
+	slot.layout = D2RL::Resources::InvalidHandle;
+	slot.json.clear();
+	const std::string path = LayoutPath(localId);
+	const D2RL::Resources::ResourceRegistration resource {
+		.structSize = D2RL::Resources::ResourceRegistrationSize,
+		.path       = path.c_str(),
+		.bytes      = json.data(),
+		.byteCount  = json.size(),
+	};
+	if (const auto result = ResourceApi->registerResource(Context, &resource, &slot.layout); result != D2RL::Resources::Result::Success) {
+		Log(true, "layout %s: could not register it (result %u)", localId.c_str(), static_cast<unsigned>(result));
+		slot.layout = D2RL::Resources::InvalidHandle;
+		return false;
+	}
+	slot.json = json;
+	return true;
+}
+
+// The plugin's own button sprite at the list's current size, registered once
+// per size. Low-end graphics read a half-size .lowend.sprite next to the HD one.
+void RegisterSprite() {
+	if (!Config.buttonSprite.empty() || !ResourceApi) return;
+	static std::vector<std::string> done;
+	const std::string               name = OwnSprite();
+	if (std::find(done.begin(), done.end(), name) != done.end()) return;
+	done.push_back(name);
+	std::string path = "data/hd/global/ui/" + name;
+	std::replace(path.begin(), path.end(), '\\', '/');
+	const std::string bytes[] { BuildButtonSprite(M.buttonWidth, M.buttonHeight), BuildButtonSprite(std::max(8, M.buttonWidth / 2), std::max(8, M.buttonHeight / 2)) };
+	const std::string paths[] { path + ".sprite", path + ".lowend.sprite" };
+	for (int i = 0; i < 2; ++i) {
+		const D2RL::Resources::ResourceRegistration resource {
+			.structSize = D2RL::Resources::ResourceRegistrationSize,
+			.path       = paths[i].c_str(),
+			.bytes      = bytes[i].data(),
+			.byteCount  = bytes[i].size(),
+		};
+		D2RL::Resources::RegistrationHandle handle = D2RL::Resources::InvalidHandle;
+		if (ResourceApi->registerResource(Context, &resource, &handle) != D2RL::Resources::Result::Success) Log(true, "could not register the button sprite %s", paths[i].c_str());
+	}
+}
+
+bool      RebuildWanted   = false;
+bool      RebuildSettings = false; // a setting changed: an open list is closed to rebuild it at once
+ULONGLONG RebuildAt       = 0;
+
+void RequestRebuild(bool settings) {
+	RebuildWanted   = true;
+	RebuildSettings = RebuildSettings || settings;
+	// A short wait gathers the steps of a setting clicked several times.
+	RebuildAt = GetTickCount64() + (settings ? 250 : 0);
+}
+
+// Builds the current mode's screens and the list button again from the
+// settings and the page count; only changed layouts are replaced. UI thread.
+void Rebuild() {
+	const ULONGLONG now = GetTickCount64();
+	if (!RebuildSettings && (AnyOpen() || Pending != 0 || Walking)) return; // a new page count waits for the list to close
+	// Unloading a layout the game loaded a moment ago crashed its layout loader
+	// (Grail On!): wait until every panel opened at least 1.5 s ago.
+	const auto settled = [&](const Slot& slot) { return !slot.loaded || now - slot.openedAt >= 1500; };
+	if (!settled(ButtonSlot) || !std::all_of(Current().begin(), Current().end(), settled)) {
+		RebuildAt = now + 300;
+		return;
+	}
+	RebuildWanted = RebuildSettings = false;
+	CloseList();
+	ComputeMetrics();
+	RegisterSprite();
+	auto& slots = Current();
+	BuiltPages  = std::min(WantedPages(), static_cast<int>(slots.size()) * PerGroup());
+	for (int group = 0; group < static_cast<int>(slots.size()); ++group)
+		(void)SetLayout(slots[group], GroupLocalId(group), group < Screens() ? BuildListLayout(group) : Placeholder(group, Mode()));
+	HandleCache.clear();
+	Shown.clear();
+	HiddenFrom.clear();
+	ConfigureTarget = -1;
+	if (ButtonSlot.panel != Panels::InvalidHandle) {
+		const std::string json = ButtonLayout();
+		if (json != ButtonSlot.json) {
+			(void)PanelApi->closePanel(Context, ButtonSlot.panel); // SyncButton opens it again
+			(void)SetLayout(ButtonSlot, "StashButton", json);
+		}
+	}
+	Log(false, "page list: rebuilt for %d pages, %d screen(s), %s", BuiltPages, Screens(), Config.escapeCloses ? "Escape closes it" : "Escape left to the game");
 }
 
 // remember_open: follows the player opening and closing the list on the shared
@@ -1007,8 +1430,7 @@ void TrackOpen() {
 		openPolls = closedPolls = retryIn = tries = 0;
 		return;
 	}
-	bool open = false;
-	for (int group = 0; group < static_cast<int>(GroupHandles.size()); ++group) open = open || IsOpen(group);
+	bool open = AnyOpen();
 	if (Pending != 0 || Walking || ReopenPolls > 0) {
 		wasOpen = open;
 		return;
@@ -1050,7 +1472,19 @@ int  TabPolls  = 0;
 
 void OnPoll(const D2RL::PluginContext*, void*) noexcept {
 	PollQueued = false;
+	if (RebuildWanted && GetTickCount64() >= RebuildAt) Rebuild();
 	SyncButton();
+	if (!Config.enabled) {
+		if (AnyOpen()) CloseList();
+		TabGoTo = ReopenPolls = 0;
+		return;
+	}
+	// The shared page count (the Options slider) is followed while playing.
+	static int countPolls = 0;
+	if (++countPolls >= 40) {
+		countPolls = 0;
+		if (!AnyOpen()) RefreshPageCount();
+	}
 	if (TabGoTo != 0) {
 		if (ReadGamePage() != 0) {
 			const int page = std::exchange(TabGoTo, 0);
@@ -1060,11 +1494,10 @@ void OnPoll(const D2RL::PluginContext*, void*) noexcept {
 			TabGoTo = 0;
 		}
 	}
-	if (Config.rememberOpen && ConfigureTarget < 0) TrackOpen();
+	if (RememberOn() && ConfigureTarget < 0) TrackOpen();
 	if (ReopenPolls > 0 && Pending == 0 && !Walking) {
 		--ReopenPolls;
-		bool open = false;
-		for (int group = 0; group < static_cast<int>(GroupHandles.size()); ++group) open = open || IsOpen(group);
+		const bool open = AnyOpen();
 		if (!open && ListPlace()) {
 			Log(false, "keep_open: the list closed after a pick, reopening it");
 			ReopenPolls = 0;
@@ -1081,7 +1514,7 @@ void OnPoll(const D2RL::PluginContext*, void*) noexcept {
 		}
 	if (MarkPasses > 0 && ConfigureTarget < 0) {
 		--MarkPasses;
-		for (int group = 0; group < static_cast<int>(GroupHandles.size()); ++group)
+		for (int group = 0; group < Screens(); ++group)
 			if (IsOpen(group)) {
 				ApplyMarks(group);
 				HideAgain(group);
@@ -1100,7 +1533,7 @@ DWORD WINAPI PollLoop(void*) {
 int GroupStep = 0; // +1 for >, -1 for <; < and > are hidden at the ends
 void OnGroupStep(const D2RL::PluginContext*, void*) noexcept {
 	int open = 0;
-	for (int group = 0; group < static_cast<int>(GroupHandles.size()); ++group)
+	for (int group = 0; group < Screens(); ++group)
 		if (IsOpen(group)) open = group;
 	ShowGroup(std::clamp(open + GroupStep, 0, GroupCount() - 1));
 }
@@ -1230,7 +1663,7 @@ auto OnUiMessage(const D2RL::PluginContext*, const Events::UiMessageEvent* event
 		}
 		return Events::UiMessageAction::Continue;
 	}
-	if (Is(event->text, ListPanelName)) {
+	if (Is(event->text, GroupPanelName(0).c_str())) {
 		static ULONGLONG lastToggleMs = 0; // D2R reports the message twice
 		const ULONGLONG  now          = GetTickCount64();
 		// Only the stash button's TogglePanel: OpenPanel also comes from the
@@ -1295,8 +1728,8 @@ auto PageCommand(D2R::Game::Client*, const D2RL::ConsoleCommandContext* command,
 // The "Open/close the page list" action in D2R's Controls menu (unbound by
 // default). Opens the list when the stash shows the shared tab.
 void OnListKey(const D2RL::PluginContext*, void*) noexcept {
-	bool open = false;
-	for (int group = 0; group < static_cast<int>(GroupHandles.size()); ++group) open = open || IsOpen(group);
+	if (!Config.enabled) return;
+	bool open = AnyOpen();
 	if (open) {
 		ReopenPolls = 0;
 		CloseList();
@@ -1313,6 +1746,196 @@ auto OnListAction(const D2RL::PluginContext*, const D2RL::Input::ActionEvent* ev
 		return D2RL::Input::ActionResult::Ignored;
 	Queue(OnListKey);
 	return D2RL::Input::ActionResult::Handled;
+}
+
+// ---- I Hate TOMLs ----
+
+constexpr const char* Schema = R"(title = "Stash Tab Dropdown"
+[[setting]]
+key = "enabled"
+type = "bool"
+label = "Page list"
+hint = "The list button and the page list."
+[[setting]]
+type = "header"
+label = "Behaviour"
+[[setting]]
+key = "keep_open"
+type = "bool"
+label = "Keep open"
+note = "The list stays open after picking a page."
+[[setting]]
+key = "remember_open"
+type = "bool"
+label = "Remember open"
+note = "With Keep open: a list left open opens again with the shared tab, also after a restart."
+[[setting]]
+key = "escape_closes_list"
+type = "bool"
+label = "Escape closes the list"
+note = "Off: Escape closes the stash, and the list with it."
+[[setting]]
+key = "instant_jump"
+type = "bool"
+label = "Instant jumps"
+note = "Off: the page arrows are clicked through to the page."
+[[setting]]
+key = "read_game_page"
+type = "bool"
+label = "Read the page from the game"
+note = "Off: no list button, the page is counted from arrow clicks."
+[[setting]]
+key = "steps_per_frame"
+type = "int"
+label = "Arrow clicks per frame"
+note = "Without instant jumps. 0 picks it from the distance."
+min = 0
+max = 1000
+step = 1
+[[setting]]
+type = "header"
+label = "List button"
+[[setting]]
+key = "stash_button"
+type = "bool"
+label = "List button"
+[[setting]]
+key = "stash_button_all_tabs"
+type = "bool"
+label = "On every stash tab"
+note = "Picking a page from the personal or materials tab switches to the shared tab."
+[[setting]]
+key = "stash_button_position"
+type = "position"
+label = "Button position"
+hint = "In stash panel units: the right page arrow ends at 1564, 110."
+min = -2000
+max = 4000
+default = [1568, 110]
+[[setting]]
+key = "stash_button_scale"
+type = "float"
+label = "Button scale"
+min = 0.2
+max = 4.0
+step = 0.01
+decimals = 2
+shift_step = 0.1
+ctrl_step = 1.0
+[[setting]]
+type = "header"
+label = "Page list"
+[[setting]]
+key = "columns"
+type = "int"
+label = "Pages per row"
+min = 1
+max = 20
+step = 1
+[[setting]]
+key = "rows"
+type = "int"
+label = "Rows per screen"
+note = "More pages get < and > to the next screens."
+min = 1
+max = 20
+step = 1
+[[setting]]
+key = "list_scale"
+type = "float"
+label = "Scale"
+min = 0.2
+max = 4.0
+step = 0.05
+decimals = 2
+shift_step = 0.1
+ctrl_step = 1.0
+[[setting]]
+key = "list_position"
+type = "position"
+label = "List position"
+hint = "Top-left corner, in stash panel units."
+min = -2000
+max = 4000
+default = [20, 196]
+[[setting]]
+key = "column_width"
+type = "int"
+label = "Column width"
+min = 50
+max = 2000
+step = 1
+[[setting]]
+key = "row_height"
+type = "int"
+label = "Row height"
+min = 20
+max = 1000
+step = 1
+[[setting]]
+key = "use_page_text_names"
+type = "bool"
+label = "Shared Stash Page Text names"
+note = "Page names and colours from shared-stash-page-text.toml."
+[[setting]]
+key = "button_sprite"
+type = "string"
+label = "Button sprite"
+note = "A game sprite for the page buttons; empty for the plugin's own."
+[[setting]]
+key = "normal_frame"
+type = "int"
+label = "Sprite frame: normal"
+min = 0
+max = 63
+step = 1
+[[setting]]
+key = "hovered_frame"
+type = "int"
+label = "Sprite frame: hovered"
+min = 0
+max = 63
+step = 1
+[[setting]]
+key = "pressed_frame"
+type = "int"
+label = "Sprite frame: pressed"
+min = 0
+max = 63
+step = 1
+)";
+
+PluginMenu::Connection Menu;
+
+bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noexcept {
+	if (!key) return false;
+	const std::string value = ValueOf(key);
+	if (value.empty()) return false;
+	std::snprintf(out, size, "%s", value.c_str());
+	return true;
+}
+
+bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
+	if (!key || !value) return false;
+	std::string reason;
+	if (!SetSetting(key, Trim(value), reason)) {
+		std::snprintf(error, size, "%s", reason.c_str());
+		return false;
+	}
+	SaveConfig();
+	const std::string_view name = key;
+	UpdateModes();
+	if (name == "use_page_text_names") {
+		PageTextPages.clear();
+		if (Config.usePageText) LoadPageTextNames();
+	}
+	if (name == "enabled" && Config.enabled) RefreshPageCount();
+	if (name == "keep_open" && !Config.keepOpen) ReopenPolls = 0;
+	// Settings the layouts are built from; the others are read where they are used.
+	static constexpr std::string_view layout[] { "escape_closes_list", "stash_button_position", "stash_button_scale", "columns", "rows", "list_scale", "list_position",
+		                                         "column_width", "row_height", "use_page_text_names", "button_sprite", "normal_frame", "hovered_frame", "pressed_frame" };
+	if (std::find(std::begin(layout), std::end(layout), name) != std::end(layout)) RequestRebuild(true);
+	return true;
 }
 
 template <typename Service>
@@ -1336,128 +1959,85 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	Context = context;
 
 	LoadConfig();
-	if (!Config.enabled) {
-		Log(false, "Stash Tab Dropdown %s: disabled in config", PluginVersion);
-		return true;
-	}
+	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
+	// Set up even when turned off, so it can be turned on while playing.
+	if (!Config.enabled) Log(false, "Stash Tab Dropdown %s: turned off in config (until turned on)", PluginVersion);
 	if (Config.usePageText) LoadPageTextNames();
-	Config.rememberOpen = Config.rememberOpen && Config.keepOpen;
-	if (Config.listScale != 1.0f) {
-		const auto scaled = [](int value, int least) { return std::max(least, static_cast<int>(value * Config.listScale + 0.5f)); };
-		Config.columnWidth  = scaled(Config.columnWidth, 16);
-		Config.rowHeight    = scaled(Config.rowHeight, 16);
-		Config.buttonWidth  = scaled(Config.buttonWidth, 8);
-		Config.buttonHeight = scaled(Config.buttonHeight, 8);
-		Config.fontSize     = scaled(Config.fontSize, 8);
-		if (!Config.buttonSprite.empty()) Config.buttonScale = Config.listScale; // a game sprite has one size: scale the button
-	}
 	Log(false, "config: keep_open %s, remember_open %s", Config.keepOpen ? "on" : "off", Config.rememberOpen ? "on" : "off");
-	if (Config.rememberOpen) LoadOpenState();
+	LoadOpenState();
 
-	const auto* resources = Query<D2RL::ResourceService>("resource");
-	Threads               = Query<D2RL::ThreadService>("thread");
-	PanelApi              = Query<D2RL::PanelService>("panel");
-	WidgetApi             = Query<D2RL::WidgetService>("widget");
-	EventApi              = Query<D2RL::SharedEventService>("shared event");
-	if (resources && !D2RL::HasResourceServiceField(resources, D2RL::ResourceServiceRequiredSize)) resources = nullptr;
+	ResourceApi = Query<D2RL::ResourceService>("resource");
+	Threads     = Query<D2RL::ThreadService>("thread");
+	PanelApi    = Query<D2RL::PanelService>("panel");
+	WidgetApi   = Query<D2RL::WidgetService>("widget");
+	EventApi    = Query<D2RL::SharedEventService>("shared event");
+	if (ResourceApi && !D2RL::HasResourceServiceField(ResourceApi, D2RL::ResourceServiceRequiredSize)) ResourceApi = nullptr;
 	if (Threads && !D2RL::HasThreadServiceField(Threads, D2RL::ThreadServiceRequiredSize)) Threads = nullptr;
 	if (PanelApi && !D2RL::HasPanelServiceField(PanelApi, D2RL::PanelServiceTogglePanelFieldEnd)) PanelApi = nullptr;
 	if (WidgetApi && !D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceRequiredSize)) WidgetApi = nullptr;
 	if (EventApi && !D2RL::HasSharedEventServiceField(EventApi, D2RL::SharedEventServiceRequiredSize)) EventApi = nullptr;
-	if (!resources || !Threads || !PanelApi || !WidgetApi || !EventApi) {
-		Log(true, "inactive: missing services (resource %s, thread %s, panel %s, widget %s, events %s)", resources ? "ok" : "missing", Threads ? "ok" : "missing",
+	if (!ResourceApi || !Threads || !PanelApi || !WidgetApi || !EventApi) {
+		Log(true, "inactive: missing services (resource %s, thread %s, panel %s, widget %s, events %s)", ResourceApi ? "ok" : "missing", Threads ? "ok" : "missing",
 		    PanelApi ? "ok" : "missing", WidgetApi ? "ok" : "missing", EventApi ? "ok" : "missing");
 		return true;
 	}
 
-	RefreshPageCount();
-	if (Config.buttonSprite.empty()) {
-		// Low-end graphics read a half-size .lowend.sprite next to the HD one.
-		static const std::string sprite = BuildButtonSprite(Config.buttonWidth, Config.buttonHeight);
-		static const std::string lowend = BuildButtonSprite(std::max(8, Config.buttonWidth / 2), std::max(8, Config.buttonHeight / 2));
-		static const std::string paths[] { std::string(OwnSpritePath) + ".sprite", std::string(OwnSpritePath) + ".lowend.sprite" };
-		for (int i = 0; i < 2; ++i) {
-			const std::string& bytes = i == 0 ? sprite : lowend;
-			const D2RL::Resources::ResourceRegistration resource {
-				.structSize = D2RL::Resources::ResourceRegistrationSize,
-				.path       = paths[i].c_str(),
-				.bytes      = bytes.data(),
-				.byteCount  = bytes.size(),
-			};
-			D2RL::Resources::RegistrationHandle handle = D2RL::Resources::InvalidHandle;
-			if (resources->registerResource(context, &resource, &handle) != D2RL::Resources::Result::Success) Log(true, "could not register the button sprite %s", paths[i].c_str());
-		}
-	}
-	// Only the pages the stash has (hidden widgets would block the mouse); a
-	// page count raised while the game runs needs a restart to be listed.
-	BuiltPages = std::min({ MaxPages, MaxGroups * PerGroup(), std::max(1, Config.pageCount) });
-	static std::vector<std::string> layouts;
-	static std::vector<std::string> paths, localIds;
-	const int                       groups = (BuiltPages + PerGroup() - 1) / PerGroup();
-	layouts.reserve(groups), paths.reserve(groups), localIds.reserve(groups);
-	std::size_t layoutBytes = 0;
-	for (int group = 0; group < groups; ++group) {
-		layouts.push_back(BuildListLayout(group));
-		localIds.push_back(GroupLocalId(group));
-		paths.push_back("data/global/ui/layouts/stash-tab-dropdown/" + localIds.back() + "hd.json");
-		layoutBytes += layouts.back().size();
-		const D2RL::Resources::ResourceRegistration resource {
-			.structSize = D2RL::Resources::ResourceRegistrationSize,
-			.path       = paths.back().c_str(),
-			.bytes      = layouts.back().data(),
-			.byteCount  = layouts.back().size(),
-		};
-		D2RL::Resources::RegistrationHandle resourceHandle = D2RL::Resources::InvalidHandle;
-		const D2RL::Panels::PanelRegistration registration {
-			.structSize = D2RL::Panels::PanelRegistrationSize,
-			.flags      = Config.escapeCloses ? D2RL::Panels::PanelFlags::CloseOnEscape : D2RL::Panels::PanelFlags::None,
-			.localId    = localIds.back().c_str(),
-		};
-		Panels::RegistrationHandle handle = Panels::InvalidHandle;
-		if (resources->registerResource(context, &resource, &resourceHandle) != D2RL::Resources::Result::Success ||
-		    PanelApi->registerPanel(context, &registration, &handle) != D2RL::Panels::Result::Success) {
-			Log(true, "%s: could not register the page list panel %s", group == 0 ? "inactive" : "page list cut short", localIds.back().c_str());
-			if (group == 0) return true;
-			BuiltPages = group * PerGroup();
-			break;
-		}
-		GroupHandles.push_back(handle);
-	}
-	if (BuiltPages < Config.pageCount) Log(true, "page list: holds the first %d pages; raise columns or rows for more", BuiltPages);
-
-	GamePageKnown = Config.readGamePage && GameCodeMatches();
-	if (Config.readGamePage && !GamePageKnown) {
+	GameCodeOk = GameCodeMatches();
+	if (!GameCodeOk) {
 		Log(true, "this game build's stash code is not the known one: no list button, page tracked from the arrows");
 		LogGameCode();
 	}
-	InstantJump = GamePageKnown && Config.instantJump && CoreMatches();
-	if (GamePageKnown && Config.instantJump && !InstantJump) Log(true, "instant jumps: D2RCore.dll is not the known D2RLoader 1.3.1 one, pages are reached with the arrows");
-	if (GamePageKnown && Config.stashButton) {
-		char button[640];
-		std::snprintf(button, sizeof(button),
-		              R"({"type": "Panel", "name": "stash-tab-dropdown/StashButton", "fields": {"priority": 110, "rect": "$LeftPanelRect_ExpandedStash", "anchor": "$LeftPanelAnchor"}, )"
-		              R"("children": [{"type": "ButtonWidget", "name": "ListButton", "fields": {"rect": {"x": %d, "y": %d, "scale": %.3f}, "filename": "PANEL\\Chronicle\\Btn_collapse", )"
-		              R"("normalFrame": 0, "pressedFrame": 2, "hoveredFrame": 1, "disabledFrame": 3, "sound": "cursor_menu_select_hd", "onClickMessage": "PanelManager:TogglePanel:%s"}}]})",
-		              Config.stashButtonX, Config.stashButtonY, Config.stashButtonScale, ListPanelName);
-		static const std::string layout = button;
-		const D2RL::Resources::ResourceRegistration resource {
-			.structSize = D2RL::Resources::ResourceRegistrationSize,
-			.path       = "data/global/ui/layouts/stash-tab-dropdown/StashButtonhd.json",
-			.bytes      = layout.data(),
-			.byteCount  = layout.size(),
-		};
-		D2RL::Resources::RegistrationHandle resourceHandle = D2RL::Resources::InvalidHandle;
+	CoreOk = GameCodeOk && CoreMatches();
+	if (GameCodeOk && !CoreOk) Log(true, "instant jumps: D2RCore.dll is not the known D2RLoader 1.3.1 one, pages are reached with the arrows");
+	UpdateModes();
+
+	// Every panel is registered now, with its layout: the game only finds a
+	// panel's layout if one was registered at load. The screens of the other
+	// Escape mode, and screens past the pages, get an empty layout until a
+	// change needs them (Rebuild).
+	RefreshPageCount();
+	RebuildWanted = false; // the layouts below are built from this count
+	ComputeMetrics();
+	RegisterSprite();
+	BuiltPages = WantedPages();
+	{
 		const D2RL::Panels::PanelRegistration registration {
 			.structSize = D2RL::Panels::PanelRegistrationSize,
 			.flags      = D2RL::Panels::PanelFlags::None,
 			.localId    = "StashButton",
 		};
-		if (resources->registerResource(context, &resource, &resourceHandle) != D2RL::Resources::Result::Success ||
-		    PanelApi->registerPanel(context, &registration, &ButtonHandle) != D2RL::Panels::Result::Success) {
+		if (!SetLayout(ButtonSlot, "StashButton", ButtonLayout()) || PanelApi->registerPanel(context, &registration, &ButtonSlot.panel) != D2RL::Panels::Result::Success) {
 			Log(true, "stash button: could not register the list button");
-			ButtonHandle = Panels::InvalidHandle;
+			ButtonSlot.panel = Panels::InvalidHandle;
 		}
 	}
+
+	for (int mode = 0; mode < 2; ++mode)
+		for (int group = 0; group < MaxGroups; ++group) {
+			Slot              slot;
+			const std::string localId = GroupLocalId(group, mode);
+			const bool        used    = mode == Mode() && group < Screens();
+			const D2RL::Panels::PanelRegistration registration {
+				.structSize = D2RL::Panels::PanelRegistrationSize,
+				.flags      = mode == 0 ? D2RL::Panels::PanelFlags::CloseOnEscape : D2RL::Panels::PanelFlags::None,
+				.localId    = localId.c_str(),
+			};
+			if (!SetLayout(slot, localId, used ? BuildListLayout(group) : Placeholder(group, mode)) ||
+			    PanelApi->registerPanel(context, &registration, &slot.panel) != D2RL::Panels::Result::Success) {
+				Log(true, "page list: could not register the panel %s", localId.c_str());
+				break;
+			}
+			Slots[mode].push_back(std::move(slot));
+		}
+	if (Current().empty()) {
+		Log(true, "inactive: no page list panel could be registered");
+		return true;
+	}
+	if (const int most = static_cast<int>(Current().size()) * PerGroup(); BuiltPages > most) {
+		BuiltPages = most; // the screens past the registered ones are not listed
+		for (int group = 0; group < static_cast<int>(Current().size()); ++group) (void)SetLayout(Current()[group], GroupLocalId(group), BuildListLayout(group));
+	}
+	if (BuiltPages < Config.pageCount) Log(true, "page list: holds the first %d pages; raise columns or rows for more", BuiltPages);
 
 	const Events::UiMessageListener listener {
 		.structSize = Events::UiMessageListenerSize,
@@ -1491,17 +2071,18 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	(void)context->RegisterConsoleCommand("stash-goto", GoCommand, "Go to a shared stash page: stash-goto <n>.");
 	(void)context->RegisterConsoleCommand("stash-page", PageCommand, "Show the tracked shared stash page, or correct it: stash-page <n>.");
 
-	Log(false, "Stash Tab Dropdown %s: active on %s %s; %d pages (%zu screens built), %zu named, current page %s, %s jumps (layout %zu bytes)", PluginVersion,
-	    Context->buildVersion ? Context->buildVersion : "?", Context->buildName ? Context->buildName : "?", Config.pageCount, GroupHandles.size(),
+	Log(false, "Stash Tab Dropdown %s: active on %s %s; %d pages (%zu screens built), %zu named, current page %s, %s jumps", PluginVersion,
+	    Context->buildVersion ? Context->buildVersion : "?", Context->buildName ? Context->buildName : "?", Config.pageCount, static_cast<std::size_t>(Screens()),
 	    static_cast<std::size_t>(std::count_if(PageTextPages.begin(), PageTextPages.end(), [](const auto& p) { return !p.second.text.empty(); })) + Config.pages.size(),
 	    GamePageKnown                                                                 ? "read from the game"
 	    : D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceGetTextFieldEnd) ? "read from the stash label"
 	                                                                                  : "tracked from the arrows (keybinds are missed on this build)",
-	    InstantJump ? "instant" : "arrow", layoutBytes);
+	    InstantJump ? "instant" : "arrow");
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	Menu.Stop();
 	Pending = 0;
 	Polling = false;
 	if (PollThread) {

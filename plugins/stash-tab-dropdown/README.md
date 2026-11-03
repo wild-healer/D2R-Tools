@@ -24,7 +24,7 @@ Console commands:
 
 ## Many pages
 
-The page count is read from D2RLoader's own config: RotW's 5 shared pages plus `add_shared_tabs` (the Options slider), read when the game starts: the list only holds the pages the stash has, so after changing the slider, restart the game. With more pages than fit on one screen (120 by default), the list shows one screen at a time, opens on the screen holding your current page, and has < and > buttons beside the first row to move between screens. Jumps are instant where the plugin reads the page from the game and D2RLoader is 1.3.1: it sets the stash page directly and has the game reload the grid, the way Stash Search does. Elsewhere it clicks the arrows for you, several per frame, so even a jump across 400 pages takes well under a second.
+The page count is read from D2RLoader's own config: RotW's 5 shared pages plus `add_shared_tabs` (the Options slider), followed while you play: the list only holds the pages the stash has, and is rebuilt when the count changes (once the list is closed). With more pages than fit on one screen (120 by default), the list shows one screen at a time, opens on the screen holding your current page, and has < and > buttons beside the first row to move between screens. Jumps are instant where the plugin reads the page from the game and D2RLoader is 1.3.1: it sets the stash page directly and has the game reload the grid, the way Stash Search does. Elsewhere it clicks the arrows for you, several per frame, so even a jump across 400 pages takes well under a second.
 
 ## How the current page is known
 
@@ -34,10 +34,11 @@ On other builds the plugin counts the arrow messages instead, starting at page 1
 
 ## Config
 
-`d2rloader/config/stash-tab-dropdown.toml` (created on first launch). Layout settings take effect after a game restart.
+`d2rloader/config/stash-tab-dropdown.toml` (created on first launch). With I Hate TOMLs installed, every setting can also be changed in game and applies at once; the page list and the list button are rebuilt with the new settings.
 
 | Key | Default | |
 | --- | --- | --- |
+| `enabled` | true | The list button and the page list |
 | `use_page_text_names` | true | Read names from `shared-stash-page-text.toml` |
 | `keep_open` | false | Keep the list open after picking a page |
 | `remember_open` | false | With `keep_open`: if the list was left open, open it again with the shared tab, also after a restart |
@@ -68,4 +69,4 @@ color = "#FFA500"
 
 ## Build
 
-`./build.sh` cross-builds the DLL with MinGW-w64 on Linux against the pinned PluginSDK commit and writes `stash-tab-dropdown-<version>.zip`.
+`./build.sh` cross-builds the DLL with MinGW-w64 on Linux against the pinned PluginSDK commit and writes `stash-tab-dropdown.zip` (the DLL alone; its config is built in and written on first launch).
