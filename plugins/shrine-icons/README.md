@@ -1,9 +1,6 @@
 # Shrine Icons
 
-Tells shrines apart before you walk up to them. Two parts, both needed, both on the [D2RLoader Hub](https://d2rloader.net/hub/plugins/shrine-icons):
-
-- The D2RLoader plugin (DLL + `shrine-icons.toml`).
-- The "Shrine Icons" D2RMM mod with the art.
+Tells shrines apart before you walk up to them. One D2RLoader plugin, no mod needed, on the [D2RLoader Hub](https://d2rloader.net/hub/plugins/shrine-icons): `shrine-icons.zip` holds the DLL, with its config and minimap art built in.
 
 ## What it does
 
@@ -22,30 +19,42 @@ Tells shrines apart before you walk up to them. Two parts, both needed, both on 
 
 ## How
 
-- The plugin fills the empty entries of the game's per-shrine-type symbol table
-  (0x1CDA280) with the booster shrine function and the mod's overlay rows, found
-  by their Filename once the data tables load.
-- The symbols are the Skill Shrine effect with its mesh swapped for an item
-  model. The renderer culls a model missing from `data/hd/model_lod_desc.bin`,
-  so the plugin hooks its lookup (0xF75AF0) and answers for the copies with the
-  bounds of the models they copy.
-- The plugin hooks the automap's add-cell function (0xD52B0) and hands out a
-  cell per shrine type instead of 310. The mod paints those cells into automap
-  cells no data file uses (default13 1332-1389, default07 700-716); the number of
-  automap tiles stays the same, so saved maps stay valid. The game fits each
-  cell's visible art to the cell width, so the pictures fill the cell.
+- The plugin points the empty entries of the game's per-shrine-type symbol table
+  (0x1CDA280) at a function of its own that does what the booster shrine
+  function does, as the settings say. A setting change runs it again on every
+  shrine the client knows, so it shows at once.
+- The symbols are overlay rows the plugin appends to the game's overlay table
+  (copies of shrine_skill). The HD client asks 0x662A90 for an overlay's file;
+  the plugin answers its rows with OverlayDefinitions of its own, served as
+  D2RLoader resources under `.../d2rloader/shrine-icons/`. They float the Skill
+  Shrine effect with its mesh swapped for an item model; the effect, meshes and
+  textures are the game's own files, read at startup and served under new
+  names.
+- The renderer culls a model missing from `data/hd/model_lod_desc.bin`, so the
+  plugin hooks its lookup (0xF75AF0) and answers for the copies with the bounds
+  of the models they copy.
+- The automap tileset loader's sprite load (call at 0xD4724) goes through the
+  plugin, which answers `default13` and `default07` with copies of the game's
+  sheets that have the minimap icons painted into cells no data file uses
+  (default13 1332-1389, default07 700-716). The plugin hooks the automap's
+  add-cell function (0xD52B0) and hands out those cells instead of 310; the
+  number of automap tiles stays the same, so saved maps stay valid. The game fits
+  each cell's visible art to the cell width, so the pictures fill the cell.
+- The automap draw reads each tile's cell at 0xD717E; a jump there to a small
+  stub maps it through a table that shows a shrine's own cell or the gold ring,
+  so minimap setting changes apply to shrines already on the map too.
 - Every native address is checked byte for byte before anything is written; a
-  mismatch leaves the game untouched and says so in the log.
+  mismatch leaves that part of the game untouched and says so in the log.
 
 ## Settings
 
-Plugin (`d2rloader/config/shrine-icons.toml`): `symbols`, `minimap`, `boosters`,
-`shimmer`, one switch per shrine type, `enabled`. Mod (D2RMM): symbol size and
-height.
+`d2rloader/config/shrine-icons.toml`, or in game with I Hate TOMLs, where every
+setting applies at once: `symbols`, `minimap`, `boosters`, `shimmer`, `size`,
+`height`, one switch per shrine type, `enabled`.
 
 ## Build
 
-`sh build.sh` (MinGW-w64) builds the DLL and both zips. `mod/files` is not in
-the repo: `python3 tools_make_mod_files.py <extracted game data folder>`
-regenerates it (item models and textures, effects, automap sheets; the classic
-symbols are decoded by `tools_dcc.py`).
+`sh build.sh` (MinGW-w64) builds the DLL and `shrine-icons.zip`. The minimap art
+is `src/minimap_cells.bin`, built into the DLL;
+`python3 tools_make_minimap.py <extracted game data folder>` regenerates it (the
+classic symbols are decoded by `tools_dcc.py`).

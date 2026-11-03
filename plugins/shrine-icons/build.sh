@@ -15,15 +15,8 @@ x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s \
   -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion \
   -o "$out/d2rl-shrine-icons.dll"
 cp "$out/d2rl-shrine-icons.dll" "$here/"
-# D2RMM package: the DLL and its config at the zip root.
-version=$(sed -n 's/.*PluginVersion = "\(.*\)";/\1/p' "$here/src/plugin.cpp")
-zip=shrine-icons-$version.zip
+# Package: the DLL alone (its config and minimap art are built in; D2RLoader
+# writes the config on first launch).
 rm -f "$here"/shrine-icons*.zip
-(cd "$here" && zip -q -X "$zip" d2rl-shrine-icons.dll shrine-icons.toml)
-# D2RMM data mod: overlay rows, HD overlay files, effects and models.
-# Unzips to a "Shrine Icons" folder for D2RMM's mods folder.
-stage=$out/mod
-rm -rf "$stage" && mkdir -p "$stage/Shrine Icons"
-cp -r "$here/mod/mod.js" "$here/mod/mod.json" "$here/mod/files" "$stage/Shrine Icons/"
-(cd "$stage" && zip -q -X -r "$here/shrine-icons-mod-$version.zip" "Shrine Icons")
-echo "built $here/d2rl-shrine-icons.dll, $here/$zip and $here/shrine-icons-mod-$version.zip"
+(cd "$here" && zip -q -X shrine-icons.zip d2rl-shrine-icons.dll)
+echo "built $here/d2rl-shrine-icons.dll and $here/shrine-icons.zip"

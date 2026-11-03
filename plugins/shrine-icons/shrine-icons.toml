@@ -2,10 +2,9 @@
 #
 # Shows a floating symbol over the shrines the game leaves bare, the way booster
 # shrines (armor, combat, resists, skill, mana regen, stamina, experience)
-# already show one, and gives every shrine type its own minimap icon. The art
-# comes from the "Shrine Icons" D2RMM mod, which must be installed too.
-# D2RLoader copies this file to d2rloader/config/shrine-icons.toml on first
-# launch; edit that copy. Changes apply the next time the game starts.
+# already show one, and gives every shrine type its own minimap icon. No mod
+# needed: the plugin makes the art from the game's own files.
+# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
 
 [shrine-icons]
 enabled = true
@@ -15,8 +14,6 @@ symbols = true
 
 # Minimap / automap icon of the shrine's type (an item picture with a gold
 # outline) instead of the shared gold ring.
-# Shrines already on the map keep their old icon until the area is revealed
-# again (next game).
 minimap = true
 
 # Minimap icons for the booster shrines too (armor, combat, the four resists,
@@ -26,6 +23,14 @@ boosters = true
 # Also give the shrines with a new symbol the faint shimmer booster shrines
 # have.
 shimmer = true
+
+# Size of the new symbols, 1 = the size of the booster shrine symbols
+# (0.25 to 4).
+size = 1
+
+# How high above the shrine the symbol floats, 14 = the height of the booster
+# shrine symbols (0 to 120).
+height = 14
 
 # Which shrines get a symbol and a minimap icon (minimap picture in brackets;
 # fire, exploding and poison all float a burning skull).

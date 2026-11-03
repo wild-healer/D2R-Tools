@@ -1,4 +1,87 @@
-# Shrine Icons 1.0.0: release texts
+# Shrine Icons 1.0.1: release texts
+
+## Patch notes
+
+```
+**Shrine Icons 1.0.1**
+
+**New**
+
+* No mod needed anymore: the plugin makes the symbols and minimap icons from the game's own files.
+* Every setting can be changed in game with I Hate TOMLs and applies at once, enabled included.
+* Shrines already on screen and on the map change as soon as a setting does.
+* size and height settings: symbol size and how high it floats, now in the plugin.
+* The download is now named shrine-icons.zip, without a version. It holds the DLL alone: the default settings are built in and written on first launch.
+
+**Fixed**
+
+* The plugin no longer reads the game's code through ReadProcessMemory, which can make an antivirus flag the DLL.
+
+**Removed**
+
+* The Shrine Icons D2RMM mod. Uninstall it from D2RMM.
+```
+
+## GitHub release
+
+- Tag: `shrine-icons-v1.0.1`
+- Title: `Shrine Icons 1.0.1`
+- Asset: `shrine-icons.zip`
+
+Body:
+
+```markdown
+**Shrine Icons** 1.0.1
+
+### New
+- No mod needed anymore: the plugin makes the symbols and minimap icons from the game's own files.
+- Every setting can be changed in game with I Hate TOMLs and applies at once, enabled included.
+- Shrines already on screen and on the map change as soon as a setting does.
+- `size` and `height` settings: symbol size and how high it floats, now in the plugin.
+- The download is now named `shrine-icons.zip`, without a version. It holds the DLL alone: the default settings are built in and written on first launch.
+
+### Fixed
+- The plugin no longer reads the game's code through ReadProcessMemory, which can make an antivirus flag the DLL.
+
+### Removed
+- The Shrine Icons D2RMM mod. Uninstall it from D2RMM.
+
+### Install
+Load `shrine-icons.zip` in D2RMM, or copy `d2rl-shrine-icons.dll` to `<game>/d2rloader/plugins/`.
+```
+
+## D2RLoader Hub
+
+Name: `Shrine Icons`
+
+Summary:
+
+> Floating symbols over the shrines that have none and a minimap icon for every shrine type.
+
+Description:
+
+```markdown
+**Shrine Icons**: tell shrines apart before you walk up to them.
+
+### Features
+- **Floating symbols on the shrines that have none**, like booster shrines: rejuvenation potion (Refilling), town portal scroll (Portal), amethyst (Gem), skull (Monster), and a burning skull on the dangerous Fire, Exploding and Poison shrines. Health and Mana shrines get none, their pool already shows them.
+- **Behaves like the booster symbols:** gone when the shrine is used, back when it recharges, with the same faint shimmer.
+- **A minimap icon for every shrine type** instead of the same gold ring: item pictures for the shrines above, the classic floating symbol for booster shrines (armor, combat, resists, skill, mana recharge, stamina, experience).
+- **No mod needed.** The plugin makes the art from the game's own files.
+- **I Hate TOMLs support.** Turn off the symbols, the minimap icons, the booster icons, the shimmer or any shrine type, or change the symbol size and height, in game; it applies at once, to shrines already on the map too.
+
+### Requirements
+- D2RLoader.
+- Steam 3.3.93787 / 3.3.94995. On another game build the plugin checks every address first and stays inactive, saying so in its log.
+
+### Install
+Load `shrine-icons.zip` in D2RMM, or copy `d2rl-shrine-icons.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/shrine-icons.toml`, written on first launch, or in I Hate TOMLs.
+
+### Known limits
+- Legacy (classic) graphics show the Skill Shrine animation for the new symbols.
+```
+
+# Shrine Icons 1.0.0
 
 ## GitHub release
 
@@ -44,60 +127,4 @@ Settings are in `d2rloader/config/shrine-icons.toml`, written on first launch. E
 
 ### Log
 `d2rloader/logs/shrine-icons.log` says which symbols were set and whether the mod was found.
-```
-
-## Nexus Mods
-
-Name: `Shrine Icons (D2RLoader plugin + D2RMM mod)`
-
-Summary (short description):
-
-> Plugin + mod: floating symbols over the shrines that have none (refill, portal, gem, monster, and a burning skull on fire/exploding/poison) and a minimap icon for every shrine type.
-
-Description (BBCode):
-
-```bbcode
-[size=5][b]Shrine Icons[/b][/size]
-[b]Two parts, both needed:[/b] a D2RLoader plugin ([i]shrine-icons-1.0.0.zip[/i]) and a D2RMM mod ([i]shrine-icons-mod-1.0.0.zip[/i]). The mod holds the art; the plugin puts it on the shrines.
-
-Tell shrines apart before you walk up to them.
-
-[size=4][b]Features[/b][/size]
-[list]
-[*][b]Floating symbols on the shrines that have none[/b], like booster shrines: rejuvenation potion (Refilling), town portal scroll (Portal), amethyst (Gem), skull (Monster), and a burning skull on the dangerous Fire, Exploding and Poison shrines. Health and Mana shrines get none, their pool already shows them.
-[*][b]Behaves like the booster symbols:[/b] gone when the shrine is used, back when it recharges, with the same faint shimmer.
-[*][b]A minimap icon for every shrine type[/b] instead of the same gold ring: item pictures for the shrines above, the classic floating symbol for booster shrines (armor, combat, resists, skill, mana recharge, stamina, experience).
-[*][b]Settings[/b] to turn off symbols, minimap icons, booster icons, shimmer or any shrine type; symbol size and height in the mod.
-[/list]
-
-[size=4][b]Requirements[/b][/size]
-[list]
-[*]D2RLoader and D2RMM
-[*]Steam 3.3.93787 / 3.3.94995 (on other builds the plugin stays inactive and logs why)
-[/list]
-
-[size=4][b]Installation[/b][/size]
-[list=1]
-[*]Load [i]shrine-icons-1.0.0.zip[/i] in D2RMM, or copy [i]d2rl-shrine-icons.dll[/i] to [i]<game>/d2rloader/plugins/[/i].
-[*]Extract [i]shrine-icons-mod-1.0.0.zip[/i] into D2RMM's [i]mods[/i] folder, enable [i]Shrine Icons[/i] and apply.
-[/list]
-Settings are in [i]d2rloader/config/shrine-icons.toml[/i], written on first launch.
-
-[size=4][b]Settings[/b][/size]
-[list]
-[*][b]symbols[/b]: floating symbols (default true)
-[*][b]minimap[/b]: minimap icon per shrine type (default true)
-[*][b]boosters[/b]: minimap icons for booster shrines too (default true)
-[*][b]shimmer[/b]: booster shimmer on the shrines with a new symbol (default true)
-[*][b]refill, health, mana, portal, gem, fire, monster, exploding, poison[/b]: per shrine type (default true)
-[*][b]enabled[/b]: false turns the plugin off
-[*]Mod (D2RMM): [b]Symbol size[/b] (1 = booster symbol size), [b]Symbol height[/b] (14 = booster height)
-[/list]
-
-[size=4][b]Known limits[/b][/size]
-[list]
-[*]The mod replaces the HD automap sheets default07 and default13; another mod replacing them conflicts.
-[*]Shrines already revealed on the map keep their old icon until the next game.
-[*]Legacy graphics show the Skill Shrine animation for the new symbols.
-[/list]
 ```
