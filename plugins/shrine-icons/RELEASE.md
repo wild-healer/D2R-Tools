@@ -16,6 +16,7 @@
 **Fixed**
 
 * The plugin no longer reads the game's code through ReadProcessMemory, which can make an antivirus flag the DLL.
+* The gem shrine symbol faces the camera instead of being seen edge-on.
 
 **Removed**
 
