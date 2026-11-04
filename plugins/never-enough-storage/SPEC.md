@@ -12,7 +12,7 @@ It should fit every way people play: a collector who keeps everything, a trader 
 
 ### Non-goals
 
-- Not a grail tracker. Grail On! stays the grail; NES can read and show grail status (section 14).
+- Not a grail tracker. NES stores any kind of item, grail items included; Grail On! is an independent plugin (section 14).
 - No trading with other players, no online services, no cloud sync of its own (a vault folder can sit in a synced folder if the player wants).
 - No item creation or editing. Every item that comes out of a vault is an item that went in.
 
@@ -272,7 +272,7 @@ An overview page: items per quality and type, materials totals, vault value, ite
 ## 14. Compatibility
 
 - **Player Page Host**: NES takes a staging area from the host (3x4 by default, a setting); without the host it uses the custom page alone.
-- **Grail On!**: grail items can be stored in either. NES shows grail status (found, stored in the grail, perfect) as columns and filters, offers "send to grail" for items the grail lacks, and never stores the same fingerprint as the grail (one of them refuses it). Import from the grail file is a copy.
+- **Grail On!**: independent. NES takes any item, grail items included, and neither plugin depends on the other. When Grail On! runs, NES can show grail status (found, perfect) as columns and filters. Import from the grail file is a copy. An item has one home at a time: if it sits in one plugin's storage, it is not in the other's.
 - **Cube Overflow**: when both would take a pickup, the order is a setting (vault first, or cube first).
 - **Charm Inventory, Inventory Slots, Stash Tab Dropdown, Visual Clutter, Compare Indicators, Perfect Frame**: no shared hooks; NES uses Perfect Frame's colours when it is present.
 - **Loot filter**: an optional NES loot rule hides ground items the vault already has enough of (by count per base, per unique, or per search), with an "only unidentified" switch like Grail On!.
@@ -382,7 +382,6 @@ All are in IHT and on the NES settings page, grouped as below, and all take effe
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `grail_columns` | `true` | Show grail status columns and filters when Grail On! runs. |
-| `grail_priority` | `grail` | Which plugin takes a grail item that both could: `grail` or `vault`. |
 
 ## 16. Keybinds and console
 
@@ -415,8 +414,8 @@ All plugin texts in every game language, using the game's own strings first (ite
 - `Saved Games\Diablo II Resurrected\mods\<mod>\nes\*.nes` vaults, `backups\`, `exports\`, `verify-report.txt`.
 - `<game>\d2rloader\logs\never-enough-storage.log` log.
 
-## 20. Open questions for Théo
+## 20. Decisions
 
-1. Should one vault per mode (global) stay the default, as Grail On!'s grail does, or per character?
-2. Virtual cubing and deletion are in the spec but off by default. Keep them, or leave them out entirely?
-3. Should NES be able to take grail items, or leave every grail item to Grail On!?
+- Default vault scope stays `global` (one vault per mode and game version, per mod).
+- Virtual cubing and deletion stay in, both off by default.
+- NES takes any kind of item. Grail On! is independent.
