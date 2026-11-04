@@ -11,7 +11,7 @@ fi
 out=$here/build
 mkdir -p "$out"
 x86_64-w64-mingw32-windres -I"$sdk/include" -I"$here" "$here/src/plugin.rc" -O coff -o "$out/plugin.res"
-x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s \
+x86_64-w64-mingw32-g++-win32 -std=c++20 -Os -Wall -shared -static -s \
   -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion \
   -o "$out/d2rl-shrine-icons.dll"
 cp "$out/d2rl-shrine-icons.dll" "$here/"

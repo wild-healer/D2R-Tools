@@ -73,7 +73,6 @@
 #include <string>
 #include <string_view>
 #include <map>
-#include <mutex>
 #include <vector>
 
 namespace {
@@ -611,7 +610,11 @@ struct PendingResource {
 	std::string                          path, bytes;
 	D2RL::Resources::RegistrationHandle* handle;
 };
-std::mutex                   PendingLock;
+SRWLOCK                      PendingLock = SRWLOCK_INIT;
+struct Guard {
+	Guard() noexcept { AcquireSRWLockExclusive(&PendingLock); }
+	~Guard() { ReleaseSRWLockExclusive(&PendingLock); }
+};
 std::vector<PendingResource> Pending;
 bool                         FlushQueued = false;
 // Live registration per path. D2RLoader activates only what is registered
@@ -622,7 +625,7 @@ std::map<std::string, D2RL::Resources::RegistrationHandle> Live;
 void __cdecl FlushResources(const D2RL::PluginContext*, void*) noexcept {
 	std::vector<PendingResource> work;
 	{
-		std::lock_guard<std::mutex> lock(PendingLock);
+		Guard lock;
 		work.swap(Pending);
 		FlushQueued = false;
 	}
@@ -655,7 +658,7 @@ void __cdecl FlushResources(const D2RL::PluginContext*, void*) noexcept {
 
 // Queues the UI-thread task that registers what Register queued.
 void QueueFlush() noexcept {
-	std::lock_guard<std::mutex> lock(PendingLock);
+	Guard lock;
 	if (Pending.empty() || FlushQueued) return;
 	FlushQueued = Threads && Threads->runOnUiThread(Context, FlushResources, nullptr) == D2RL::Threads::Result::Success;
 	if (!FlushQueued) Log(true, "could not queue the resource registrations");
@@ -685,7 +688,7 @@ bool Register(const std::string& path, const std::string& bytes, D2RL::Resources
 		return true;
 	}
 	if (!Threads) return false;
-	std::lock_guard<std::mutex> lock(PendingLock);
+	Guard lock;
 	Pending.push_back({ path, bytes, out });
 	return true;
 }
