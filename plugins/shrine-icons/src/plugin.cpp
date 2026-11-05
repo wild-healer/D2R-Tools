@@ -79,7 +79,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shrine-icons";
-constexpr const char* PluginVersion = "1.0.1-dev-4";
+constexpr const char* PluginVersion = "1.0.1-dev-5";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -193,7 +193,7 @@ std::array<Icon, 9> Icons { {
 	{ "refill", 1, 1332, "data/hd/items/misc/potion/full_rejuv_potion/full_rejuv_potion.model", "full_rejuv_potion_lod0.model", "misc_full_rejuv_potion_alb.texture", 1.1, false, true },
 	{ "health", 2, 1335, "data/hd/items/misc/potion/full_healing_potion/full_healing_potion.model", "full_healing_potion_lod0.model", "misc_full_healing_potion_alb.texture", 1.1, false, false },
 	{ "mana", 3, 1358, "data/hd/items/misc/potion/full_mana_potion/full_mana_potion.model", "full_mana_potion_lod0.model", "misc_full_mana_potion_alb.texture", 1.1, false, false },
-	{ "portal", 17, 1359, "data/hd/items/misc/scroll/town_portal_scroll/town_portal_scroll.model", "town_portal_scroll_lod0.model", "misc_town_portal_scroll_alb.texture", 0.8, false, true },
+	{ "portal", 17, 1359, "data/hd/items/misc/scroll/town_portal_scroll/town_portal_scroll.model", "town_portal_scroll_lod0.model", "misc_town_portal_scroll_alb.texture", 0.6, true, true },
 	{ "gem", 18, 1369, "data/hd/items/misc/gem/perfect_amethyst/perfect_amethyst.model", "perfect_amethyst_lod0.model", "misc_perfect_amethyst_alb.texture", 1.85, true, true },
 	{ "fire", 19, 1386, "data/hd/vfx/meshes/missiles/firehead/firehead.model", "firehead_lod0.model", "firehead_alb.texture", 1.0, false, true },
 	{ "monster", 20, 1387, "data/hd/items/misc/gem/perfect_skull/perfect_skull.model", "perfect_skull_lod0.model", "misc_perfect_skull_alb.texture", 1.6, false, true },
@@ -941,7 +941,7 @@ std::string Definition(const Icon& icon, double size, double height) {
 	double move[3] {};
 	if (icon.upright) {
 		q = Quat { 0.5, 0.5, -0.5, 0.5 };
-		for (int i = 0; i < 3; ++i) {
+		for (int i = 0; i < 3 && std::strcmp(icon.key, "gem") == 0; ++i) {
 			q       = mul(axis(i, Config.gemTurn[i]), q);
 			move[i] = Config.gemMove[i];
 		}
