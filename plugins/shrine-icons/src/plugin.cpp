@@ -79,7 +79,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shrine-icons";
-constexpr const char* PluginVersion = "1.0.2-dev-11";
+constexpr const char* PluginVersion = "1.0.1-dev-11";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
