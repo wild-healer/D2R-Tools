@@ -1,3 +1,35 @@
+# Visual Clutter 1.0.2: release texts
+
+## Patch notes
+
+```
+**Visual Clutter 1.0.2**
+
+**Fixed**
+
+* Hiding Firestorm now hides Hellfire Torch's Firestorm, which the game makes with Diablo's fire wall missiles, not the druid skill's.
+* Plugins that check the start of the game's overlay function before using it, like LTBL, now load next to Visual Clutter.
+```
+
+## GitHub release
+
+- Tag: `visual-clutter-v1.0.2`
+- Title: `Visual Clutter 1.0.2`
+- Asset: `visual-clutter.zip`
+
+Body:
+
+```markdown
+**Visual Clutter** 1.0.2
+
+### Fixed
+- Hiding Firestorm now hides Hellfire Torch's Firestorm, which the game makes with Diablo's fire wall missiles, not the druid skill's.
+- Plugins that check the start of the game's overlay function before using it, like LTBL, now load next to Visual Clutter.
+
+### Install
+Load `visual-clutter.zip` in D2RMM, or copy `d2rl-visual-clutter.dll` to `<game>/d2rloader/plugins/`. Settings are unchanged.
+```
+
 # Visual Clutter 1.0.1: release texts
 
 ## Patch notes
