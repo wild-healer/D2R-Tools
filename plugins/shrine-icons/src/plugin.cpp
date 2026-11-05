@@ -62,6 +62,7 @@
 
 #include "i_hate_tomls_client.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdarg>
@@ -78,7 +79,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shrine-icons";
-constexpr const char* PluginVersion = "1.0.1-dev-3";
+constexpr const char* PluginVersion = "1.0.1-dev-4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -357,7 +358,21 @@ void ShowSymbol(void* unit, std::size_t i) noexcept {
 	const auto mode   = reinterpret_cast<ModeFn>(Base + ModeRva);
 	remove(unit, 0, overlay);
 	remove(unit, 0, Shimmer00);
-	if (!SymbolShown(i) || mode(unit) != 0 || !EnsureOverlayFiles()) return;
+	const bool shown = SymbolShown(i);
+	const auto now   = mode(unit);
+	const bool files = shown && now == 0 && EnsureOverlayFiles();
+	{
+		// Each shrine's symbol decision, once per unit and outcome (test builds).
+		static std::uint64_t last[64] {};
+		static std::uint32_t next = 0;
+		const auto id  = *reinterpret_cast<const std::uint32_t*>(static_cast<const std::uint8_t*>(unit) + 8);
+		const auto tag = (std::uint64_t { id } << 32) | (std::uint64_t { Icons[i].code } << 8) | (shown ? 4u : 0u) | (now == 0 ? 2u : 0u) | (files ? 1u : 0u);
+		if (std::find(std::begin(last), std::end(last), tag) == std::end(last)) {
+			last[next++ % 64] = tag;
+			Log(false, "shrine %u (%s): symbol %s (setting %s, mode %d, overlay %d)", id, Icons[i].key, files ? "added" : "not added", shown ? "on" : "off", now, overlay);
+		}
+	}
+	if (!files) return;
 	create(unit, overlay, 3, 0, 0, 0, 0);
 	if (Config.shimmer) create(unit, Shimmer00, 3, 0, 0, 0, 0);
 }
