@@ -33,6 +33,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "i_hate_tomls_client.h"
@@ -40,7 +41,7 @@
 namespace {
 
 constexpr const char* PluginId      = "hud-cast";
-constexpr const char* PluginVersion = "0.0.3";
+constexpr const char* PluginVersion = "0.0.4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -265,7 +266,7 @@ bool HookUiRightDown(void* message) noexcept { return LogClick("right", UiRightD
 // wrapped to log what each handler answers; the first returning true stops the rest.
 constexpr std::uint64_t HandlerListRva = 0x229BD00;
 constexpr std::size_t   HandlerListSize = 0x400;
-constexpr int           MaxWrapped = 12;
+constexpr int           MaxWrapped = 32;
 using HandlerFn = bool (*)(void* message) noexcept;
 struct Wrapped { std::uint32_t message; std::uint64_t rva; HandlerFn original; std::atomic<int> logs; };
 Wrapped Wraps[MaxWrapped] {};
@@ -275,8 +276,8 @@ std::atomic<bool> ListWrapped {};
 bool CallWrapped(int i, void* message) noexcept {
 	Wrapped& w = Wraps[i];
 	const bool taken = w.original(message);
-	if (Config.logParts.load(std::memory_order_relaxed) && w.logs.fetch_add(1) < 12) {
-		void* const hovered = HoveredWidget();
+	void* const hovered = Config.logParts.load(std::memory_order_relaxed) ? HoveredWidget() : nullptr;
+	if (hovered && InHud(hovered) && w.logs.fetch_add(1) < 12) {
 		try {
 			const std::string name = hovered ? NameOf(hovered) : std::string("nothing");
 			const char* where = w.rva < 0x3000000 ? "D2R" : "outside D2R";
@@ -287,7 +288,8 @@ bool CallWrapped(int i, void* message) noexcept {
 	return taken;
 }
 template <int I> bool WrapFn(void* message) noexcept { return CallWrapped(I, message); }
-constexpr HandlerFn WrapFns[MaxWrapped] { &WrapFn<0>, &WrapFn<1>, &WrapFn<2>, &WrapFn<3>, &WrapFn<4>, &WrapFn<5>, &WrapFn<6>, &WrapFn<7>, &WrapFn<8>, &WrapFn<9>, &WrapFn<10>, &WrapFn<11> };
+template <int... I> constexpr std::array<HandlerFn, sizeof...(I)> MakeWraps(std::integer_sequence<int, I...>) { return { &WrapFn<I>... }; }
+constexpr auto WrapFns = MakeWraps(std::make_integer_sequence<int, MaxWrapped> {});
 
 void WrapHandlerList() noexcept {
 	if (ListWrapped.exchange(true)) return;
@@ -299,7 +301,7 @@ void WrapHandlerList() noexcept {
 		std::uint64_t fn = 0;
 		std::memcpy(&message, copy.data() + at, 4);
 		std::memcpy(&fn, copy.data() + at + 8, 8);
-		if ((message != 0x10005 && message != 0x10009) || fn < Base) continue;
+		if ((message != 0x10005 && message != 0x10009 && (message < 0x10010 || message > 0x10013)) || fn < Base) continue;
 		Wrapped& w = Wraps[WrapCount];
 		w.message  = message;
 		w.rva      = fn - Base;
@@ -315,6 +317,45 @@ void WrapHandlerList() noexcept {
 	if (!WrapCount) Log(true, "diag: no down handlers found in the list");
 }
 
+// Quick cast: keybind action 0x144AC0 (mgr, slot, bind, bool skipGate) -> bool;
+// cast at the cursor 0x145380 (mgr, slot).
+constexpr std::uint64_t BindActionRva = 0x144AC0;
+constexpr std::array<std::uint8_t, 19> BindActionBytes { 0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0xD0, 0xFD, 0xFF, 0xFF };
+constexpr std::uint64_t CastAtCursorRva = 0x145380;
+constexpr std::array<std::uint8_t, 14> CastAtCursorBytes { 0x40, 0x53, 0x56, 0x48, 0x83, 0xEC, 0x48, 0x48, 0x8B, 0xD9, 0x8B, 0xF2, 0x8B, 0xCA };
+using BindActionFn   = bool (*)(void* mgr, int slot, int bind, bool skipGate) noexcept;
+using CastAtCursorFn = void (*)(void* mgr, int slot) noexcept;
+BindActionFn   BindAction {};
+CastAtCursorFn CastAtCursor {};
+std::atomic<int> QcLogs {};
+
+bool QcLogNow() noexcept {
+	if (!Config.logParts.load(std::memory_order_relaxed) || QcLogs.load() >= 60) return false;
+	static std::atomic<int> anywhere {};
+	void* const hovered = HoveredWidget();
+	if (hovered && InHud(hovered)) return true;
+	return anywhere.fetch_add(1) < 10;
+}
+std::string HoveredName() {
+	void* const hovered = HoveredWidget();
+	return hovered ? NameOf(hovered) : std::string("nothing");
+}
+bool HookBindAction(void* mgr, int slot, int bind, bool skipGate) noexcept {
+	const bool result = BindAction(mgr, slot, bind, skipGate);
+	if (QcLogNow()) {
+		++QcLogs;
+		try { Log(false, "bind action %d (slot %d, skip gate %d): %d, hovered %s", bind, slot, skipGate ? 1 : 0, result ? 1 : 0, HoveredName().c_str()); } catch (...) {}
+	}
+	return result;
+}
+void HookCastAtCursor(void* mgr, int slot) noexcept {
+	if (QcLogNow()) {
+		++QcLogs;
+		try { Log(false, "cast at cursor (slot %d), hovered %s", slot, HoveredName().c_str()); } catch (...) {}
+	}
+	CastAtCursor(mgr, slot);
+}
+
 void InstallDiagnostics() noexcept {
 	if (CodeMatches(SetHandledRva, SetHandledBytes)) {
 		std::array<std::uint8_t, 12> jump { 0x48, 0xB8 };
@@ -324,6 +365,8 @@ void InstallDiagnostics() noexcept {
 		if (!Context->PatchBytes(SetHandledRva, SetHandledBytes.data(), 12, jump.data(), 12)) Log(true, "diag: could not patch SetHandled");
 	}
 	if (!Context->InstallInlineHook(UiLeftDownRva, UiDownBytes.data(), 14, &HookUiLeftDown, &UiLeftDown) || !UiLeftDown) Log(true, "diag: no left click hook");
+	if (CodeMatches(BindActionRva, BindActionBytes) && (!Context->InstallInlineHook(BindActionRva, BindActionBytes.data(), 19, &HookBindAction, &BindAction) || !BindAction)) Log(true, "diag: no bind action hook");
+	if (CodeMatches(CastAtCursorRva, CastAtCursorBytes) && (!Context->InstallInlineHook(CastAtCursorRva, CastAtCursorBytes.data(), 14, &HookCastAtCursor, &CastAtCursor) || !CastAtCursor)) Log(true, "diag: no cast hook");
 	if (!Context->InstallInlineHook(UiRightDownRva, UiDownBytes.data(), 14, &HookUiRightDown, &UiRightDown) || !UiRightDown) Log(true, "diag: no right click hook");
 }
 
