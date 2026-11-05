@@ -28,6 +28,7 @@ Every plugin, mod and patch is downloaded from its page on the D2RLoader Hub, li
 | [Perfect Frame](https://d2rloader.net/hub/plugins/perfect-frame) | A golden frame around the tooltip of perfect uniques, set items and runewords, a red one when every roll is at its worst. |
 | [Player Page Host](https://d2rloader.net/hub/plugins/aaa-player-page-host) | Shares the custom player page between plugins: each one reserves an area of it, and the host packs them. Used by other plugins, nothing visible on its own. |
 | [Quest Rewards](https://d2rloader.net/hub/plugins/quest-rewards) | Flags characters on the character select screen that still have a quest reward waiting (imbue, socket, personalize...). Needs its D2RMM mod too. |
+| [Quickcast over HUD](https://d2rloader.net/hub/plugins/quickcast-over-hud) | With keyboard quick cast on, skill keys cast while the cursor is over the bottom bar's art. |
 | [Quickcast Save Fix](https://d2rloader.net/hub/plugins/quickcast-save-fix-1-0-0) | Saving during or right after a quick cast keeps your own left and right skills. |
 | [Run Counter](https://d2rloader.net/hub/plugins/run-counter) | Counts and times your runs, logs what you find in each, with an in-game panel and a stats window. |
 | [Shrine Icons](https://d2rloader.net/hub/plugins/shrine-icons) | Floating symbols over shrines that have none, and distinct shrine icons on the minimap. Needs its D2RMM mod too. |
