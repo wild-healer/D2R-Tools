@@ -43,7 +43,7 @@
 namespace {
 
 constexpr const char* PluginId      = "cube-fill";
-constexpr const char* PluginVersion = "1.0.2-dev-1";
+constexpr const char* PluginVersion = "1.0.2-dev-2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -238,6 +238,53 @@ void __cdecl LookupSizes(const D2RL::PluginContext*, void* userData) noexcept {
 	}
 	delete classes;
 	LookupQueued.store(false);
+}
+
+// ---- cube size from inventory.txt ----
+// The cube's grid comes from inventory.txt "Transmogrify Box Page 1" (row 9)
+// and "Transmogrify Box2" (row 25, HD); compiled rows keep gridX, gridY as
+// bytes at +0x10, +0x11 (after the 16-byte panel rect), as in the classic
+// D2InventoryTxt. Both rows must agree and the class rows must read sensibly.
+constexpr std::uint32_t CubeInventoryRows[] { 9, 25 };
+constexpr std::uint32_t InventoryGridXOffset = 0x10;
+std::atomic<int>        TableCubeW {}, TableCubeH {}; // 0: not read
+std::atomic<bool>       TableReadQueued {}, TableReadDone {};
+
+void __cdecl ReadCubeTable(const D2RL::PluginContext*, void*) noexcept {
+	bool logged = false;
+	for (const auto bank : { Tables::Bank::Rotw, Tables::Bank::Lod }) {
+		int  w = 0, h = 0;
+		bool ok = true;
+		for (const auto index : CubeInventoryRows) {
+			Tables::RowView view { .structSize = Tables::RowViewSize };
+			if (TableApi->getRow(Context, bank, Tables::TableId::Inventory, index, &view) != Tables::Result::Success || !view.row ||
+			    view.rowSize < InventoryGridXOffset + 2) {
+				ok = false;
+				break;
+			}
+			const auto* row = static_cast<const std::uint8_t*>(view.row);
+			if (!logged) {
+				char bytes[3 * 0x20 + 1] {};
+				for (std::uint32_t i = 0; i < 0x20 && i < view.rowSize; ++i) std::snprintf(bytes + 3 * i, 4, "%02X ", row[i]);
+				Log(false, "cube size: inventory.txt row %u (row size %u): %s", index, view.rowSize, bytes);
+				logged = true;
+			}
+			const int rw = row[InventoryGridXOffset], rh = row[InventoryGridXOffset + 1];
+			if (rw < 1 || rh < 1 || rw > MaxCubeSide || rh > MaxCubeSide || (w && (rw != w || rh != h))) {
+				ok = false;
+				break;
+			}
+			w = rw, h = rh;
+		}
+		if (!ok) continue;
+		TableCubeW = w, TableCubeH = h;
+		Log(false, "cube size: %dx%d from inventory.txt", w, h);
+		TableReadDone = true;
+		break;
+	}
+	if (!TableReadDone) Log(true, "cube size: inventory.txt could not be read; the cube's grid is looked up instead");
+	TableReadDone = true;
+	TableReadQueued = false;
 }
 
 // UI thread. Missing game sizes are added to wanted.
@@ -510,7 +557,13 @@ std::atomic<bool> Running {};
 HANDLE            Poller {};
 
 DWORD WINAPI Poll(void*) noexcept {
+	std::uint64_t lastTry = 0;
 	while (Running.load()) {
+		// The cube's size from inventory.txt, once the game thread runs (retried every 2 s).
+		if (TableApi && !TableReadDone.load() && GetTickCount64() - lastTry >= 2000 && !TableReadQueued.exchange(true)) {
+			lastTry = GetTickCount64();
+			if (Threads->runOnGameThread(Context, ReadCubeTable, nullptr) != D2RL::Threads::Result::Success) TableReadQueued = false;
+		}
 		if (!TickQueued.exchange(true) && Threads->runOnUiThread(Context, Tick, nullptr) != D2RL::Threads::Result::Success) TickQueued.store(false);
 		Sleep(50);
 	}
@@ -679,6 +732,18 @@ GridSize CubeGridSize(void* inventory, const std::vector<void*>& inside) noexcep
 		CubeGridIndex = index;
 		return size;
 	}
+	static bool described = false;
+	if (!inside.empty() && !described) {
+		described = true;
+		std::string list;
+		for (std::size_t index = 0; index < count && index < 16; ++index) {
+			const std::uint8_t* grid = grids + index * GridStride;
+			char                one[48];
+			std::snprintf(one, sizeof(one), " %zu:%dx%d%s", index, grid[GridWidth], grid[GridHeight], *reinterpret_cast<void* const*>(grid + GridCells) ? "" : "(no cells)");
+			list += one;
+		}
+		Log(true, "cube grid: none of %llu inventory grids holds the cube's items:%s", static_cast<unsigned long long>(count), list.c_str());
+	}
 	if (CubeGridIndex < count) return GridAt(grids, CubeGridIndex);
 	return CubeGridGuess < count ? GridAt(grids, CubeGridGuess) : GridSize {};
 }
@@ -701,7 +766,8 @@ void DrawCubePictures(void* grid) noexcept {
 		else if (page == 0 && !cube && CodeOf(item) == CubeCode) cube = item;
 	}
 	if (!cube) return;
-	GridSize size = CubeGridSize(inventory, inside);
+	GridSize size { TableCubeW.load(), TableCubeH.load() };
+	if (!size.w) size = CubeGridSize(inventory, inside);
 	if (!size.w) size = { CubeW.load() ? CubeW.load() : CubeWidth, CubeH.load() ? CubeH.load() : CubeHeight };
 	if (CubeW.exchange(size.w) != size.w || CubeH.exchange(size.h) != size.h) ForceUntil.store(GetTickCount64() + 500);
 	if (!PicturesOn() || (inside.empty() && !Config.showEmpty)) return;
