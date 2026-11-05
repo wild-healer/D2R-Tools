@@ -1,34 +1,34 @@
-# Cube Fill 1.0.1: release texts
+# Cube Fill 1.1.0: release texts
 
 ## Patch notes
 
 ```
-**Cube Fill 1.0.1**
+**Cube Fill 1.1.0**
 
 **New**
 
-* Every setting can be changed in game with I Hate TOMLs. Display, picture background, show empty and show full apply at once; show, corner and font size apply after a restart.
-* The zip holds the DLL alone, named cube-fill.zip. The default settings are built in and written on first launch.
+* The item pictures follow the cube's real size, read from the game's inventory.txt, so cube mods that resize the cube (6x4 and others) just work. A bigger cube gets smaller cells so it still fits on the icon.
 
 **Fixed**
 
-* The game code check no longer uses ReadProcessMemory, which made one antivirus flag the DLL.
+* With a cube that isn't 3x4, the badge and the mini map no longer show wrong counts; the item pictures show in their place.
 ```
 
 ## GitHub release
 
-- Tag: `cube-fill-v1.0.1`
-- Title: `Cube Fill 1.0.1`
+- Tag: `cube-fill-v1.1.0`
+- Title: `Cube Fill 1.1.0`
 - Asset: `cube-fill.zip`
 
 Body:
 
 ```markdown
-**Cube Fill** 1.0.1: what is in your Horadric Cube, right on the cube in your inventory.
+**Cube Fill** 1.1.0: what is in your Horadric Cube, right on the cube in your inventory.
 
 ### Features
 - **See inside the Cube.** The items in the Cube are drawn small over its icon, with their real pictures, in their exact cube spots. Free cells show as dim tiles.
 - **Or a count.** A small "7/12" badge (cells used out of 12) in a corner of the icon, red when the Cube is full. Pictures and badge can be shown together.
+- **Any cube size.** The pictures follow the cube's real size, so mods that resize the cube just work.
 - **Or a mini map.** A 3x4 tile map with each item's shape, with or without the badge.
 - **Adjustable.** Darkness of the box behind the pictures, badge corner, size, used or free cells.
 - **I Hate TOMLs support.** Change the settings in game; the display and background apply at once.

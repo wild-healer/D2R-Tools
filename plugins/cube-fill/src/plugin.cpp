@@ -43,7 +43,7 @@
 namespace {
 
 constexpr const char* PluginId      = "cube-fill";
-constexpr const char* PluginVersion = "1.0.2-dev-2";
+constexpr const char* PluginVersion = "1.1.0";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -241,49 +241,36 @@ void __cdecl LookupSizes(const D2RL::PluginContext*, void* userData) noexcept {
 }
 
 // ---- cube size from inventory.txt ----
-// The cube's grid comes from inventory.txt "Transmogrify Box Page 1" (row 9)
-// and "Transmogrify Box2" (row 25, HD); compiled rows keep gridX, gridY as
-// bytes at +0x10, +0x11 (after the 16-byte panel rect), as in the classic
-// D2InventoryTxt. Both rows must agree and the class rows must read sensibly.
-constexpr std::uint32_t CubeInventoryRows[] { 9, 25 };
+// The cube's grid comes from inventory.txt "Transmogrify Box Page 1" (row 9);
+// compiled rows keep gridX, gridY as bytes at +0x10, +0x11, after the 16-byte
+// panel rect (checked on a 6x4 cube mod: row size 240, 06 04 at +0x10).
+// "Transmogrify Box2" (row 25) is checked too when it can be read.
+constexpr std::uint32_t CubeInventoryRow = 9, CubeInventoryRowHd = 25;
 constexpr std::uint32_t InventoryGridXOffset = 0x10;
 std::atomic<int>        TableCubeW {}, TableCubeH {}; // 0: not read
 std::atomic<bool>       TableReadQueued {}, TableReadDone {};
 
+bool GridOfRow(Tables::Bank bank, std::uint32_t index, int& w, int& h) noexcept {
+	Tables::RowView view { .structSize = Tables::RowViewSize };
+	if (TableApi->getRow(Context, bank, Tables::TableId::Inventory, index, &view) != Tables::Result::Success || !view.row || view.rowSize < InventoryGridXOffset + 2)
+		return false;
+	const auto* row = static_cast<const std::uint8_t*>(view.row);
+	w = row[InventoryGridXOffset], h = row[InventoryGridXOffset + 1];
+	return w >= 1 && h >= 1 && w <= MaxCubeSide && h <= MaxCubeSide;
+}
+
 void __cdecl ReadCubeTable(const D2RL::PluginContext*, void*) noexcept {
-	bool logged = false;
 	for (const auto bank : { Tables::Bank::Rotw, Tables::Bank::Lod }) {
-		int  w = 0, h = 0;
-		bool ok = true;
-		for (const auto index : CubeInventoryRows) {
-			Tables::RowView view { .structSize = Tables::RowViewSize };
-			if (TableApi->getRow(Context, bank, Tables::TableId::Inventory, index, &view) != Tables::Result::Success || !view.row ||
-			    view.rowSize < InventoryGridXOffset + 2) {
-				ok = false;
-				break;
-			}
-			const auto* row = static_cast<const std::uint8_t*>(view.row);
-			if (!logged) {
-				char bytes[3 * 0x20 + 1] {};
-				for (std::uint32_t i = 0; i < 0x20 && i < view.rowSize; ++i) std::snprintf(bytes + 3 * i, 4, "%02X ", row[i]);
-				Log(false, "cube size: inventory.txt row %u (row size %u): %s", index, view.rowSize, bytes);
-				logged = true;
-			}
-			const int rw = row[InventoryGridXOffset], rh = row[InventoryGridXOffset + 1];
-			if (rw < 1 || rh < 1 || rw > MaxCubeSide || rh > MaxCubeSide || (w && (rw != w || rh != h))) {
-				ok = false;
-				break;
-			}
-			w = rw, h = rh;
-		}
-		if (!ok) continue;
+		int w = 0, h = 0, hdW = 0, hdH = 0;
+		if (!GridOfRow(bank, CubeInventoryRow, w, h)) continue;
+		if (GridOfRow(bank, CubeInventoryRowHd, hdW, hdH) && (hdW != w || hdH != h))
+			Log(true, "cube size: inventory.txt cube rows differ (%dx%d and %dx%d); using %dx%d", w, h, hdW, hdH, w, h);
 		TableCubeW = w, TableCubeH = h;
 		Log(false, "cube size: %dx%d from inventory.txt", w, h);
-		TableReadDone = true;
 		break;
 	}
-	if (!TableReadDone) Log(true, "cube size: inventory.txt could not be read; the cube's grid is looked up instead");
-	TableReadDone = true;
+	if (!TableCubeW.load()) Log(true, "cube size: inventory.txt could not be read; the cube's grid is looked up instead");
+	TableReadDone   = true;
 	TableReadQueued = false;
 }
 
