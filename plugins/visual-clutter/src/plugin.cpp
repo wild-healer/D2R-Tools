@@ -70,7 +70,7 @@
 namespace {
 
 constexpr const char* PluginId      = "visual-clutter";
-constexpr const char* PluginVersion = "1.0.1-dev-1";
+constexpr const char* PluginVersion = "1.0.1-dev-2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -251,7 +251,9 @@ struct Settings {
 } Config;
 
 // missiles.txt rows (RotW, same in 93787 and 94995).
-constexpr std::array<int, 2> FirestormMissiles { 457, 458 };              // firestorm, firestormmaker
+// Hellfire Torch's "Firestorm" is skill 197 DiabWall (diabwallmaker 179, diabwall 180);
+// the druid's Firestorm is firestorm 457, firestormmaker 458.
+constexpr std::array<int, 4> FirestormMissiles { 179, 180, 457, 458 };
 constexpr std::array<int, 5> ThunderStormMissiles { 166, 167, 168, 169, 741 }; // thunderstorm1-4, colossal thunderstorm
 // Overlay files of the martial arts charge orbs (progressive_* 1-3, tiger and cobra strike), matched by file
 // name because overlay ids shift around the "Expansion" row of overlay.txt.
