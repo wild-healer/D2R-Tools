@@ -13,11 +13,11 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Cube Fill D2RLoader plugin"
-      VALUE "FileVersion", "1.0.1"
+      VALUE "FileVersion", "1.0.2-dev-1"
       VALUE "InternalName", "cube-fill"
       VALUE "OriginalFilename", "d2rl-cube-fill.dll"
       VALUE "ProductName", "Cube Fill"
-      VALUE "ProductVersion", "1.0.1"
+      VALUE "ProductVersion", "1.0.2-dev-1"
     END
   END
   BLOCK "VarFileInfo"

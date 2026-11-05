@@ -43,7 +43,7 @@
 namespace {
 
 constexpr const char* PluginId      = "cube-fill";
-constexpr const char* PluginVersion = "1.0.1";
+constexpr const char* PluginVersion = "1.0.2-dev-1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
