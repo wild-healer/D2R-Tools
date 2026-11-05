@@ -1,4 +1,80 @@
-# Shrine Icons 1.0.1: release texts
+# Shrine Icons 1.1.0: release texts
+
+## Patch notes
+
+```
+**Shrine Icons 1.1.0**
+
+**New**
+
+* Booster shrines get a minimap icon drawn from their HD floating symbol, so they are easier to tell apart.
+* classic_boosters setting: shows the classic symbols on the minimap for booster shrines instead.
+
+**Fixed**
+
+* The gem shrine symbol stands up with its tip down instead of lying flat.
+* The floating symbols no longer conflict with other plugins that check the same game code.
+* Changing the symbol size or height in game now always applies.
+* Minimap shrine icons follow the shrines of the current game instead of an earlier game on the same map.
+```
+
+## GitHub release
+
+- Tag: `shrine-icons-v1.1.0`
+- Title: `Shrine Icons 1.1.0`
+- Asset: `shrine-icons.zip`
+
+Body:
+
+```markdown
+**Shrine Icons** 1.1.0
+
+### New
+- Booster shrines get a minimap icon drawn from their HD floating symbol, so they are easier to tell apart.
+- `classic_boosters` setting: shows the classic symbols on the minimap for booster shrines instead.
+
+### Fixed
+- The gem shrine symbol stands up with its tip down instead of lying flat.
+- The floating symbols no longer conflict with other plugins that check the same game code.
+- Changing the symbol size or height in game now always applies.
+- Minimap shrine icons follow the shrines of the current game instead of an earlier game on the same map.
+
+### Install
+Load `shrine-icons.zip` in D2RMM, or copy `d2rl-shrine-icons.dll` to `<game>/d2rloader/plugins/`.
+```
+
+## D2RLoader Hub
+
+Name: `Shrine Icons`
+
+Summary:
+
+> Floating symbols over the shrines that have none and a minimap icon for every shrine type.
+
+Description:
+
+```markdown
+**Shrine Icons**: tell shrines apart before you walk up to them.
+
+### Features
+- **Floating symbols on the shrines that have none**, like booster shrines: rejuvenation potion (Refilling), town portal scroll (Portal), amethyst (Gem), skull (Monster), and a burning skull on the dangerous Fire, Exploding and Poison shrines. Health and Mana shrines get none, their pool already shows them.
+- **Behaves like the booster symbols:** gone when the shrine is used, back when it recharges, with the same faint shimmer.
+- **A minimap icon for every shrine type** instead of the same gold ring: item pictures for the shrines above, the HD floating symbol for booster shrines (armor, combat, resists, skill, mana recharge, stamina, experience), or their classic symbol if you prefer.
+- **No mod needed.** The plugin makes the art from the game's own files.
+- **I Hate TOMLs support.** Turn off the symbols, the minimap icons, the booster icons, the shimmer or any shrine type, pick HD or classic booster icons, or change the symbol size and height, in game; it applies at once, to shrines already on the map too.
+
+### Requirements
+- D2RLoader.
+- Steam 3.3.93787 / 3.3.94995. On another game build the plugin checks every address first and stays inactive, saying so in its log.
+
+### Install
+Load `shrine-icons.zip` in D2RMM, or copy `d2rl-shrine-icons.dll` to `<game>/d2rloader/plugins/`. Settings are in `d2rloader/config/shrine-icons.toml`, written on first launch, or in I Hate TOMLs.
+
+### Known limits
+- Legacy (classic) graphics show the Skill Shrine animation for the new symbols.
+```
+
+# Shrine Icons 1.0.1
 
 ## Patch notes
 
