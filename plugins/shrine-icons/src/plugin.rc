@@ -14,11 +14,11 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Shrine Icons D2RLoader plugin"
-      VALUE "FileVersion", "1.0.1-dev-1"
+      VALUE "FileVersion", "1.0.1-dev-2"
       VALUE "InternalName", "shrine-icons"
       VALUE "OriginalFilename", "d2rl-shrine-icons.dll"
       VALUE "ProductName", "Shrine Icons"
-      VALUE "ProductVersion", "1.0.1-dev-1"
+      VALUE "ProductVersion", "1.0.1-dev-2"
     END
   END
   BLOCK "VarFileInfo"

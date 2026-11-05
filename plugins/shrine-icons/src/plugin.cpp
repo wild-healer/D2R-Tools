@@ -78,7 +78,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shrine-icons";
-constexpr const char* PluginVersion = "1.0.1-dev-1";
+constexpr const char* PluginVersion = "1.0.1-dev-2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -204,6 +204,10 @@ struct Settings {
 	std::atomic<bool> boosters { true }; // minimap icons for booster shrines too
 	std::atomic<double> size { 1.0 };    // symbol size, 1 = booster symbols
 	std::atomic<double> height { 14.0 }; // how high the symbol floats
+	// Gem tuning (dev builds only, not saved): extra turn about the world
+	// axes (degrees, X then Y then Z, pivot = the symbol's origin) and a move.
+	std::atomic<double> gemTurn[3] { 0.0, 0.0, 0.0 };
+	std::atomic<double> gemMove[3] { 0.0, 0.0, 0.0 };
 } Config;
 
 std::array<std::atomic<bool>, Icons.size()> IconOn {};   // per-type setting
@@ -766,7 +770,7 @@ bool RegisterSymbolFiles() {
 
 // OverlayDefinitions are cached by path, so each size / height gets paths of
 // its own (generation), registered when it is first needed.
-constexpr std::uint32_t    DefinitionSlots = 8; // paths registered at load, reused in turn
+constexpr std::uint32_t    DefinitionSlots = 64; // paths registered at load, reused in turn
 std::atomic<std::uint32_t> Generation { 0 };
 std::uint32_t              Registered = ~0u;
 
@@ -778,7 +782,30 @@ std::string Definition(const Icon& icon, double size, double height) {
 	const double scale = size * icon.fit;
 	// Upright: a quarter turn about X stands it up, then a quarter turn about Y
 	// turns its face to the camera (the X turn alone shows it edge-on).
-	const char*  turn  = icon.upright ? R"("x": 0.5, "y": 0.5, "z": -0.5, "w": 0.5)" : R"("x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0)";
+	struct Quat {
+		double x, y, z, w;
+	};
+	const auto mul = [](Quat a, Quat b) {
+		return Quat { a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+			          a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z };
+	};
+	const auto axis = [](int which, double degrees) {
+		const double half = degrees * 3.14159265358979323846 / 360.0;
+		Quat q { 0.0, 0.0, 0.0, std::cos(half) };
+		(which == 0 ? q.x : which == 1 ? q.y : q.z) = std::sin(half);
+		return q;
+	};
+	Quat   q { 0.0, 0.0, 0.0, 1.0 };
+	double move[3] {};
+	if (icon.upright) {
+		q = Quat { 0.5, 0.5, -0.5, 0.5 };
+		for (int i = 0; i < 3; ++i) {
+			q       = mul(axis(i, Config.gemTurn[i]), q);
+			move[i] = Config.gemMove[i];
+		}
+	}
+	char turn[160] {};
+	std::snprintf(turn, sizeof(turn), R"("x": %.6f, "y": %.6f, "z": %.6f, "w": %.6f)", q.x, q.y, q.z, q.w);
 	const std::string particles = Format("data/hd/vfx/particles/overlays/%s/%s.particles", NameSpace, icon.key);
 	char text[2048] {};
 	std::snprintf(text, sizeof(text),
@@ -786,9 +813,9 @@ std::string Definition(const Icon& icon, double size, double height) {
 	              R"( "textures": [{"path": "data/hd/vfx/textures/gradient/T_FX_AlphaRemapCurve_blinkfix.texture"}], "physics": [], "json": [], "variantdata": [], "objecteffects": [], "other": []},)"
 	              R"( "type": "OverlayDefinition", "name": "shrine_icon_%s", "entities": [{"type": "Entity", "name": "entity_root", "id": %u, "components": [)"
 	              R"({"type": "VfxDefinitionComponent", "name": "entity_root_VfxDefinition", "filename": "%s", "hardKillOnDestroy": true},)"
-	              R"( {"type": "TransformDefinitionComponent", "name": "entity_root_TransformDefinition", "position": {"x": 0.0, "y": %.3f, "z": 0.0}, "orientation": {%s},)"
+	              R"( {"type": "TransformDefinitionComponent", "name": "entity_root_TransformDefinition", "position": {"x": %.3f, "y": %.3f, "z": %.3f}, "orientation": {%s},)"
 	              R"( "scale": {"x": %.4f, "y": %.4f, "z": %.4f}, "inheritOnlyPosition": false}]}]})",
-	              particles.c_str(), MeshPath(icon, ".model").c_str(), icon.key, 1907000000u + icon.code, particles.c_str(), height, turn, scale, scale, scale);
+	              particles.c_str(), MeshPath(icon, ".model").c_str(), icon.key, 1907000000u + icon.code, particles.c_str(), move[0], height + move[1], move[2], turn, scale, scale, scale);
 	return text;
 }
 
@@ -1228,6 +1255,10 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 	};
 	if (key == "size") return number(Config.size, 0.25, 4.0);
 	if (key == "height") return number(Config.height, 0.0, 120.0);
+	for (int i = 0; i < 3; ++i) {
+		if (key == Format("gem_turn_%c", "xyz"[i])) return number(Config.gemTurn[i], -180.0, 180.0);
+		if (key == Format("gem_move_%c", "xyz"[i])) return number(Config.gemMove[i], -60.0, 60.0);
+	}
 	for (std::size_t i = 0; i < Icons.size(); ++i)
 		if (key == Icons[i].key) return flag(IconOn[i]);
 	return error = "unknown setting", false;
@@ -1242,6 +1273,10 @@ std::string ValueOf(const std::string& key) {
 	if (key == "shimmer") return flag(Config.shimmer);
 	if (key == "size") return Format("%g", Config.size.load());
 	if (key == "height") return Format("%g", Config.height.load());
+	for (int i = 0; i < 3; ++i) {
+		if (key == Format("gem_turn_%c", "xyz"[i])) return Format("%g", Config.gemTurn[i].load());
+		if (key == Format("gem_move_%c", "xyz"[i])) return Format("%g", Config.gemMove[i].load());
+	}
 	for (std::size_t i = 0; i < Icons.size(); ++i)
 		if (key == Icons[i].key) return flag(IconOn[i]);
 	return {};
@@ -1390,6 +1425,66 @@ max = 120
 step = 1
 decimals = 0
 shift_step = 10
+[[setting]]
+type = "header"
+label = "Gem tuning (test build, not saved)"
+[[setting]]
+key = "gem_turn_x"
+type = "float"
+label = "Gem turn X"
+note = "Degrees about the world X axis."
+min = -180
+max = 180
+step = 15
+decimals = 0
+shift_step = 90
+[[setting]]
+key = "gem_turn_y"
+type = "float"
+label = "Gem turn Y (vertical)"
+note = "Degrees about the vertical axis."
+min = -180
+max = 180
+step = 15
+decimals = 0
+shift_step = 90
+[[setting]]
+key = "gem_turn_z"
+type = "float"
+label = "Gem turn Z"
+note = "Degrees about the world Z axis."
+min = -180
+max = 180
+step = 15
+decimals = 0
+shift_step = 90
+[[setting]]
+key = "gem_move_x"
+type = "float"
+label = "Gem move X"
+min = -60
+max = 60
+step = 1
+decimals = 0
+shift_step = 5
+[[setting]]
+key = "gem_move_y"
+type = "float"
+label = "Gem move Y (up)"
+min = -60
+max = 60
+step = 1
+decimals = 0
+shift_step = 5
+[[setting]]
+key = "gem_move_z"
+type = "float"
+label = "Gem move Z"
+min = -60
+max = 60
+step = 1
+decimals = 0
+shift_step = 5
 [[setting]]
 type = "header"
 label = "Shrines"
