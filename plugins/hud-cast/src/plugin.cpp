@@ -41,7 +41,7 @@
 namespace {
 
 constexpr const char* PluginId      = "hud-cast";
-constexpr const char* PluginVersion = "0.0.4";
+constexpr const char* PluginVersion = "0.0.5";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -238,10 +238,37 @@ UiDownFn UiLeftDown {}, UiRightDown {};
 thread_local std::uintptr_t HandledBy {};
 std::atomic<int> ClickLogs {};
 
+SRWLOCK                     CallerLock = SRWLOCK_INIT;
+std::vector<std::uintptr_t> Callers;
+
 void SetHandledHook() noexcept {
 	HandledBy = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
 	std::uint8_t* manager = *reinterpret_cast<std::uint8_t**>(Base + UiManagerGlobalRva);
 	if (manager) manager[0xB8] = 1;
+	if (!Config.logParts.load(std::memory_order_relaxed)) return;
+	void* const hovered = HoveredWidget();
+	if (!hovered || !InHud(hovered)) return;
+	bool fresh = false;
+	AcquireSRWLockExclusive(&CallerLock);
+	try {
+		fresh = std::find(Callers.begin(), Callers.end(), HandledBy) == Callers.end() && Callers.size() < 40;
+		if (fresh) Callers.push_back(HandledBy);
+	} catch (...) {
+	}
+	ReleaseSRWLockExclusive(&CallerLock);
+	if (!fresh) return;
+	try {
+		void* frames[6] {};
+		const USHORT count = RtlCaptureStackBackTrace(1, 6, frames, nullptr);
+		std::string stack;
+		for (USHORT i = 0; i < count; ++i) {
+			char item[32];
+			std::snprintf(item, sizeof(item), " 0x%llX", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(frames[i]) - Base));
+			stack += item;
+		}
+		Log(false, "handled at D2R+0x%llX, hovered %s, stack%s", static_cast<unsigned long long>(HandledBy - Base), NameOf(hovered).c_str(), stack.c_str());
+	} catch (...) {
+	}
 }
 
 bool LogClick(const char* side, UiDownFn original, void* message) noexcept {
