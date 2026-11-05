@@ -1,23 +1,19 @@
-// HUD Cast: skills cast (and clicks walk) while the cursor is over the bottom
-// bar's art, as anywhere else in the game.
+// HUD Cast: quick cast works while the cursor is over the bottom bar's art, as
+// anywhere else in the game.
 //
-// Why the bar stops them (Steam 3.3.94995 / 93787 RVAs):
-// 1. A click goes to the UI first (0x840120 for a right click, 0x83FCC0 for a
-//    left one). The HUD panel (HUDPanelHD, vtable D2R+0x1FDF990) holds click
-//    catchers (ClickCatcherWidget, vtable D2R+0x1D80390): their message handler
-//    0x8E1920 marks a mouse message handled (0x843FC0) when the catcher is the
-//    hovered widget (0x876180, call at 0x8E1B34), and a handled click never
-//    reaches the world handlers (0x83B00 right, 0x839E0 left).
-// 2. Each frame the game asks 0xF2670 `int (int* x, int* y)` whether the cursor
-//    is over the UI: it fills the cursor position and returns 1 when any widget
-//    is hovered (UI manager 0x846020, +0x178) or the cursor is in the bottom 49
-//    pixels. The unit under the cursor (0xF1250) and held clicks (0xF1DB2) stop
-//    then, so holding a skill stops as soon as the cursor reaches the bar.
-// The plugin points the catcher's hover call at a stub that answers "not
-// hovered" for catchers inside the HUD panel, and hooks 0xF2670 so a cursor over
-// such a catcher counts as over the world (the game's own tail then runs:
-// 0x846210, 0x8F270). Buttons, belt, orbs and skill buttons are their own
-// widgets: hovering them still stops the click, as before.
+// Why the bar stops it (Steam 3.3.94995 / 93787 RVAs):
+// A key goes to the UI first. With keyboard quick cast on, the click catchers of
+// the HUD panel (HUDPanelHD, vtable D2R+0x1FDF990; ClickCatcherWidget, vtable
+// D2R+0x1D80390, message handler 0x8E1920) mark a skill key handled (0x843FC0)
+// when the cursor is inside them: the handler asks the catcher's "point inside"
+// (vtable slot 8, calls returning to 0x8E1ADB / 0x8E1B02). The key binding
+// (0x1203A0) then sees the key handled (0x8460D0) and never starts the cast.
+// The plugin swaps that vtable slot and answers "outside" to those two calls for
+// catchers inside the HUD panel. Buttons, belt, orbs and skill buttons are their
+// own widgets and keep the key, as before. Clicks on the bar are left alone.
+// It also hooks 0xF2670 `int (int* x, int* y)` (1 = cursor over the UI) for the
+// hover search only (0xF1250, return 0xF1285): over the bar's art the monster
+// under the cursor is found, so the quick cast aims at it.
 // Widget: +0x08 name (char*), +0x30 parent. The code bytes are checked at load;
 // on a mismatch the plugin stays inactive.
 
@@ -41,7 +37,7 @@
 namespace {
 
 constexpr const char* PluginId      = "hud-cast";
-constexpr const char* PluginVersion = "0.0.5";
+constexpr const char* PluginVersion = "0.0.6";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -50,7 +46,7 @@ const D2RL::PluginInfo Info {
 	.name        = "HUD Cast",
 	.version     = PluginVersion,
 	.author      = "wild-healer",
-	.description = "Skills cast while the cursor is over the bottom bar.",
+	.description = "Quick cast works while the cursor is over the bottom bar.",
 	.flags       = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
 };
 
@@ -63,11 +59,6 @@ struct Settings {
 
 constexpr std::uint64_t OverUiRva = 0xF2670; // int (int* x, int* y): 1 = cursor over the UI
 constexpr std::array<std::uint8_t, 16> OverUiBytes { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xDA, 0x48, 0x8B, 0xF9 };
-// In the click catcher's handler: mov rcx, rsi; call Hovered; test al, al; je +5; call SetHandled
-constexpr std::uint64_t CatcherHoverRva = 0x8E1B31;
-constexpr std::array<std::uint8_t, 17> CatcherHoverBytes { 0x48, 0x8B, 0xCE, 0xE8, 0x47, 0x46, 0xF9, 0xFF, 0x84, 0xC0, 0x74, 0x05, 0xE8, 0x7E, 0x24, 0xF6, 0xFF };
-constexpr std::uint64_t CatcherHoverCallRva = 0x8E1B34;
-constexpr std::array<std::uint8_t, 5> CatcherHoverCallBytes { 0xE8, 0x47, 0x46, 0xF9, 0xFF };
 constexpr std::uint64_t HoveredRva = 0x876180; // bool (Widget*): the widget is the hovered one
 constexpr std::array<std::uint8_t, 16> HoveredBytes { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0xE8, 0x92, 0xFE, 0xFC, 0xFF, 0x48, 0x39 };
 constexpr std::uint64_t UiManagerRva = 0x846020; // UiManager* (), +0x178 hovered widget
@@ -100,7 +91,6 @@ BoolFn         UiReady {};
 CursorFn       CursorWorld {};
 BoolFn         MouseAllowed {};
 BoolFn         Controller {};
-bool           CatcherPatched {};
 
 const D2RL::PluginContext* Context {};
 
@@ -193,232 +183,66 @@ void LogPart(const void* widget, bool through) noexcept {
 		const void* at   = ParentOf(widget);
 		for (int depth = 0; at && depth < 6; ++depth, at = ParentOf(at)) path = NameOf(at) + "/" + path;
 		const std::uintptr_t vtable = VtableOf(widget);
-		Log(false, "cursor over %s (vtable D2R+0x%llX): %s", path.c_str(), static_cast<unsigned long long>(vtable ? vtable - Base : 0),
-		    through ? "casts go through" : "left alone (part of the UI)");
+		Log(false, "quick cast let through over %s (vtable D2R+0x%llX)", path.c_str(), static_cast<unsigned long long>(vtable ? vtable - Base : 0));
+		(void)through;
 	} catch (...) {
 	}
 }
 
 // ---- game threads ----
 
-// Called by the stub instead of Hovered from the click catcher's message handler.
-bool CatcherHovered(void* widget) noexcept {
-	const bool hovered = Hovered(widget);
-	if (!hovered || !Config.enabled.load(std::memory_order_relaxed) || !IsHudBackground(widget)) return hovered;
+// A click catcher's own "is this point inside me" (vtable slot 8, +0x40), swapped in
+// its vtable. Only the answers to its key branch are changed: there, with keyboard
+// quick cast on, a skill key pressed while the cursor is inside a catcher is marked
+// handled, and the key binding (0x1203A0) then never runs.
+using InsideFn = bool (*)(void* widget, std::uint64_t point) noexcept;
+constexpr std::size_t   CatcherInsideSlot = 8;
+constexpr std::uint64_t CatcherKeyReturn1 = 0x8E1ADB; // after call [rax+0x40] for the key 0x3B
+constexpr std::uint64_t CatcherKeyReturn2 = 0x8E1B02; // after call [rax+0x40] for skill keys
+constexpr std::array<std::uint8_t, 0x32> CatcherKeyBytes { 0x48, 0x8B, 0x06, 0x48, 0x8B, 0x54, 0x24, 0x20, 0xFF, 0x50, 0x40, 0xEB, 0x5C, 0xE8, 0x0E, 0xD7, 0x86, 0xFF,
+	0x89, 0x44, 0x24, 0x20, 0xE8, 0x15, 0xD7, 0x86, 0xFF, 0x89, 0x44, 0x24, 0x24, 0x40, 0x84, 0xED, 0x74, 0x4E, 0x48, 0x8B, 0x06, 0x48, 0x8B, 0xCE, 0x48, 0x8B, 0x54,
+	0x24, 0x20, 0xFF, 0x50, 0x40 }; // at 0x8E1AD0
+constexpr std::uint64_t CatcherKeyRva = 0x8E1AD0;
+InsideFn CatcherInside {}; // original
+
+bool HookCatcherInside(void* widget, std::uint64_t point) noexcept {
+	const bool inside = CatcherInside(widget, point);
+	if (!inside || !Config.enabled.load(std::memory_order_relaxed)) return inside;
+	const auto caller = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+	if (caller != Base + CatcherKeyReturn1 && caller != Base + CatcherKeyReturn2) return inside;
+	if (!InHud(widget)) return inside;
+	LogPart(widget, true);
 	return false;
 }
 
-void WrapHandlerList() noexcept;
+bool SwapCatcherInside() noexcept {
+	if (!CodeMatches(CatcherKeyRva, CatcherKeyBytes)) return false;
+	auto* const slot = reinterpret_cast<std::uintptr_t*>(Base + CatcherVtableRva + CatcherInsideSlot * 8);
+	std::uintptr_t original = 0;
+	if (!Read(reinterpret_cast<std::uintptr_t>(slot), &original, sizeof(original)) || original < Base || original >= Base + 0x2000000) return false;
+	CatcherInside = reinterpret_cast<InsideFn>(original);
+	DWORD old = 0;
+	if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &old)) return false;
+	*reinterpret_cast<std::uintptr_t volatile*>(slot) = reinterpret_cast<std::uintptr_t>(&HookCatcherInside);
+	DWORD ignored = 0;
+	VirtualProtect(slot, sizeof(*slot), old, &ignored);
+	return true;
+}
+
+// The unit under the cursor (hover search 0xF1250, call returning to 0xF1285) is
+// found over the bar's art too, so a quick cast there aims at the monster under it.
+// Held clicks (the other caller) stay stopped by the bar, as in the game.
+constexpr std::uint64_t HoverSearchReturn = 0xF1285;
+
 int HookOverUi(int* x, int* y) noexcept {
-	if (Config.logParts.load(std::memory_order_relaxed)) WrapHandlerList();
 	const int over = OverUi(x, y);
 	if (!over || !x || !y || !Config.enabled.load(std::memory_order_relaxed)) return over;
+	if (reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)) != Base + HoverSearchReturn) return over;
 	if (Controller() || !MouseAllowed()) return over;
 	void* const hovered = HoveredWidget();
-	if (!hovered || !InHud(hovered)) return over;
-	const bool through = IsHudBackground(hovered);
-	LogPart(hovered, through);
-	if (!through) return over;
+	if (!hovered || !IsHudBackground(hovered)) return over;
 	if (UiReady()) CursorWorld(x, y);
 	return 0;
-}
-
-// ---- diagnostics (0.0.2): who stops a click over the bar ----
-
-// SetHandled 0x843FC0: void (), sets UI manager (global D2R+0x3440170) +0xB8 = 1.
-constexpr std::uint64_t SetHandledRva = 0x843FC0;
-constexpr std::array<std::uint8_t, 20> SetHandledBytes { 0x48, 0x8B, 0x05, 0xA9, 0xC1, 0xBF, 0x02, 0x48, 0x85, 0xC0, 0x74, 0x07, 0xC6, 0x80, 0xB8, 0x00, 0x00, 0x00, 0x01, 0xC3 };
-constexpr std::uint64_t UiManagerGlobalRva = 0x3440170;
-// UI mouse-down handlers: bool (MouseMessage*), true = the UI took the click.
-constexpr std::uint64_t UiLeftDownRva  = 0x83FCC0;
-constexpr std::uint64_t UiRightDownRva = 0x840120;
-constexpr std::array<std::uint8_t, 14> UiDownBytes { 0x48, 0x89, 0x74, 0x24, 0x20, 0x55, 0x48, 0x8D, 0xAC, 0x24, 0xE0, 0xFD, 0xFF, 0xFF };
-using UiDownFn = bool (*)(void* message) noexcept;
-UiDownFn UiLeftDown {}, UiRightDown {};
-thread_local std::uintptr_t HandledBy {};
-std::atomic<int> ClickLogs {};
-
-SRWLOCK                     CallerLock = SRWLOCK_INIT;
-std::vector<std::uintptr_t> Callers;
-
-void SetHandledHook() noexcept {
-	HandledBy = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
-	std::uint8_t* manager = *reinterpret_cast<std::uint8_t**>(Base + UiManagerGlobalRva);
-	if (manager) manager[0xB8] = 1;
-	if (!Config.logParts.load(std::memory_order_relaxed)) return;
-	void* const hovered = HoveredWidget();
-	if (!hovered || !InHud(hovered)) return;
-	bool fresh = false;
-	AcquireSRWLockExclusive(&CallerLock);
-	try {
-		fresh = std::find(Callers.begin(), Callers.end(), HandledBy) == Callers.end() && Callers.size() < 40;
-		if (fresh) Callers.push_back(HandledBy);
-	} catch (...) {
-	}
-	ReleaseSRWLockExclusive(&CallerLock);
-	if (!fresh) return;
-	try {
-		void* frames[6] {};
-		const USHORT count = RtlCaptureStackBackTrace(1, 6, frames, nullptr);
-		std::string stack;
-		for (USHORT i = 0; i < count; ++i) {
-			char item[32];
-			std::snprintf(item, sizeof(item), " 0x%llX", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(frames[i]) - Base));
-			stack += item;
-		}
-		Log(false, "handled at D2R+0x%llX, hovered %s, stack%s", static_cast<unsigned long long>(HandledBy - Base), NameOf(hovered).c_str(), stack.c_str());
-	} catch (...) {
-	}
-}
-
-bool LogClick(const char* side, UiDownFn original, void* message) noexcept {
-	HandledBy = 0;
-	const bool taken = original(message);
-	if (!Config.logParts.load(std::memory_order_relaxed) || ClickLogs.load() >= 40) return taken;
-	void* const hovered = HoveredWidget();
-	++ClickLogs;
-	try {
-		const std::string name = hovered ? NameOf(hovered) : std::string("nothing");
-		Log(false, "%s click over %s: %s%s", side, name.c_str(), taken ? "taken by the UI" : "passed to the game",
-		    taken && HandledBy ? (" (set at D2R+0x" + [] (std::uintptr_t a) { char t[32]; std::snprintf(t, sizeof(t), "%llX", static_cast<unsigned long long>(a)); return std::string(t); }(HandledBy - Base) + ")").c_str() : "");
-	} catch (...) {
-	}
-	return taken;
-}
-bool HookUiLeftDown(void* message) noexcept { return LogClick("left", UiLeftDown, message); }
-bool HookUiRightDown(void* message) noexcept { return LogClick("right", UiRightDown, message); }
-
-// Mouse message handlers (runtime list in .data: {u32 message, u32 flags, fn}, game
-// handlers after the UI ones). Down messages 0x10005 (left) and 0x10009 (right) are
-// wrapped to log what each handler answers; the first returning true stops the rest.
-constexpr std::uint64_t HandlerListRva = 0x229BD00;
-constexpr std::size_t   HandlerListSize = 0x400;
-constexpr int           MaxWrapped = 32;
-using HandlerFn = bool (*)(void* message) noexcept;
-struct Wrapped { std::uint32_t message; std::uint64_t rva; HandlerFn original; std::atomic<int> logs; };
-Wrapped Wraps[MaxWrapped] {};
-int WrapCount {};
-std::atomic<bool> ListWrapped {};
-
-bool CallWrapped(int i, void* message) noexcept {
-	Wrapped& w = Wraps[i];
-	const bool taken = w.original(message);
-	void* const hovered = Config.logParts.load(std::memory_order_relaxed) ? HoveredWidget() : nullptr;
-	if (hovered && InHud(hovered) && w.logs.fetch_add(1) < 12) {
-		try {
-			const std::string name = hovered ? NameOf(hovered) : std::string("nothing");
-			const char* where = w.rva < 0x3000000 ? "D2R" : "outside D2R";
-			Log(false, "message 0x%X handler %d (%s+0x%llX): %s, hovered %s", w.message, i, where, static_cast<unsigned long long>(w.rva), taken ? "TAKEN" : "passed", name.c_str());
-		} catch (...) {
-		}
-	}
-	return taken;
-}
-template <int I> bool WrapFn(void* message) noexcept { return CallWrapped(I, message); }
-template <int... I> constexpr std::array<HandlerFn, sizeof...(I)> MakeWraps(std::integer_sequence<int, I...>) { return { &WrapFn<I>... }; }
-constexpr auto WrapFns = MakeWraps(std::make_integer_sequence<int, MaxWrapped> {});
-
-void WrapHandlerList() noexcept {
-	if (ListWrapped.exchange(true)) return;
-	std::uint8_t* const list = reinterpret_cast<std::uint8_t*>(Base + HandlerListRva);
-	std::array<std::uint8_t, HandlerListSize> copy {};
-	if (!Read(Base + HandlerListRva, copy.data(), copy.size())) { Log(true, "diag: handler list unreadable"); return; }
-	for (std::size_t at = 0; at + 16 <= copy.size() && WrapCount < MaxWrapped; at += 16) {
-		std::uint32_t message = 0;
-		std::uint64_t fn = 0;
-		std::memcpy(&message, copy.data() + at, 4);
-		std::memcpy(&fn, copy.data() + at + 8, 8);
-		if ((message != 0x10005 && message != 0x10009 && (message < 0x10010 || message > 0x10013)) || fn < Base) continue;
-		Wrapped& w = Wraps[WrapCount];
-		w.message  = message;
-		w.rva      = fn - Base;
-		w.original = reinterpret_cast<HandlerFn>(fn);
-		DWORD old = 0;
-		if (!VirtualProtect(list + at + 8, 8, PAGE_READWRITE, &old)) continue;
-		*reinterpret_cast<HandlerFn volatile*>(list + at + 8) = WrapFns[WrapCount];
-		DWORD ignored = 0;
-		VirtualProtect(list + at + 8, 8, old, &ignored);
-		Log(false, "diag: wrapped handler %d for message 0x%X at list +0x%llX: D2R+0x%llX", WrapCount, message, static_cast<unsigned long long>(at), static_cast<unsigned long long>(w.rva));
-		++WrapCount;
-	}
-	if (!WrapCount) Log(true, "diag: no down handlers found in the list");
-}
-
-// Quick cast: keybind action 0x144AC0 (mgr, slot, bind, bool skipGate) -> bool;
-// cast at the cursor 0x145380 (mgr, slot).
-constexpr std::uint64_t BindActionRva = 0x144AC0;
-constexpr std::array<std::uint8_t, 19> BindActionBytes { 0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0xD0, 0xFD, 0xFF, 0xFF };
-constexpr std::uint64_t CastAtCursorRva = 0x145380;
-constexpr std::array<std::uint8_t, 14> CastAtCursorBytes { 0x40, 0x53, 0x56, 0x48, 0x83, 0xEC, 0x48, 0x48, 0x8B, 0xD9, 0x8B, 0xF2, 0x8B, 0xCA };
-using BindActionFn   = bool (*)(void* mgr, int slot, int bind, bool skipGate) noexcept;
-using CastAtCursorFn = void (*)(void* mgr, int slot) noexcept;
-BindActionFn   BindAction {};
-CastAtCursorFn CastAtCursor {};
-std::atomic<int> QcLogs {};
-
-bool QcLogNow() noexcept {
-	if (!Config.logParts.load(std::memory_order_relaxed) || QcLogs.load() >= 60) return false;
-	static std::atomic<int> anywhere {};
-	void* const hovered = HoveredWidget();
-	if (hovered && InHud(hovered)) return true;
-	return anywhere.fetch_add(1) < 10;
-}
-std::string HoveredName() {
-	void* const hovered = HoveredWidget();
-	return hovered ? NameOf(hovered) : std::string("nothing");
-}
-bool HookBindAction(void* mgr, int slot, int bind, bool skipGate) noexcept {
-	const bool result = BindAction(mgr, slot, bind, skipGate);
-	if (QcLogNow()) {
-		++QcLogs;
-		try { Log(false, "bind action %d (slot %d, skip gate %d): %d, hovered %s", bind, slot, skipGate ? 1 : 0, result ? 1 : 0, HoveredName().c_str()); } catch (...) {}
-	}
-	return result;
-}
-void HookCastAtCursor(void* mgr, int slot) noexcept {
-	if (QcLogNow()) {
-		++QcLogs;
-		try { Log(false, "cast at cursor (slot %d), hovered %s", slot, HoveredName().c_str()); } catch (...) {}
-	}
-	CastAtCursor(mgr, slot);
-}
-
-void InstallDiagnostics() noexcept {
-	if (CodeMatches(SetHandledRva, SetHandledBytes)) {
-		std::array<std::uint8_t, 12> jump { 0x48, 0xB8 };
-		const auto target = reinterpret_cast<std::uint64_t>(&SetHandledHook);
-		std::memcpy(jump.data() + 2, &target, sizeof(target));
-		jump[10] = 0xFF, jump[11] = 0xE0;
-		if (!Context->PatchBytes(SetHandledRva, SetHandledBytes.data(), 12, jump.data(), 12)) Log(true, "diag: could not patch SetHandled");
-	}
-	if (!Context->InstallInlineHook(UiLeftDownRva, UiDownBytes.data(), 14, &HookUiLeftDown, &UiLeftDown) || !UiLeftDown) Log(true, "diag: no left click hook");
-	if (CodeMatches(BindActionRva, BindActionBytes) && (!Context->InstallInlineHook(BindActionRva, BindActionBytes.data(), 19, &HookBindAction, &BindAction) || !BindAction)) Log(true, "diag: no bind action hook");
-	if (CodeMatches(CastAtCursorRva, CastAtCursorBytes) && (!Context->InstallInlineHook(CastAtCursorRva, CastAtCursorBytes.data(), 14, &HookCastAtCursor, &CastAtCursor) || !CastAtCursor)) Log(true, "diag: no cast hook");
-	if (!Context->InstallInlineHook(UiRightDownRva, UiDownBytes.data(), 14, &HookUiRightDown, &UiRightDown) || !UiRightDown) Log(true, "diag: no right click hook");
-}
-
-// The rel32 call has to land in the game image: the stub goes in 16 bytes of int3 padding.
-bool RedirectCatcherHover() noexcept {
-	if (!CodeMatches(CatcherHoverRva, CatcherHoverBytes)) return false;
-	std::array<std::uint8_t, 12> stub { 0x48, 0xB8 }; // mov rax, imm64; jmp rax (rcx = the widget)
-	const auto target = reinterpret_cast<std::uint64_t>(&CatcherHovered);
-	std::memcpy(stub.data() + 2, &target, sizeof(target));
-	stub[10] = 0xFF, stub[11] = 0xE0;
-	std::array<std::uint8_t, 16> padding {};
-	padding.fill(0xCC);
-	std::array<std::uint8_t, 0x10000> chunk {};
-	int tries = 0;
-	for (std::uint64_t start = 0x1000; start < 0x1400000 && tries < 16; start += chunk.size()) {
-		if (!Read(Base + start, chunk.data(), chunk.size())) continue;
-		for (std::size_t at = 0; at + padding.size() <= chunk.size() && tries < 16; at += 16) {
-			if (std::memcmp(chunk.data() + at, padding.data(), padding.size()) != 0) continue;
-			++tries;
-			const std::uint64_t cave = start + at;
-			if (!Context->PatchBytes(cave + 2, padding.data(), static_cast<std::uint32_t>(stub.size()), stub.data(), static_cast<std::uint32_t>(stub.size()))) continue; // taken
-			return Context->PatchCallRel32(CatcherHoverCallRva, CatcherHoverCallBytes.data(), 5, cave + 2);
-		}
-	}
-	return false;
 }
 
 bool Locate() noexcept {
@@ -471,18 +295,18 @@ std::string ValueOf(const std::string& key) {
 std::string Render() {
 	return R"(# HUD Cast
 #
-# The bottom bar (the HUD with the orbs, belt and skill buttons) normally stops
-# your clicks and casts when the cursor is over it, even over its empty art.
-# With this plugin, clicking or holding a skill over the bar's art casts it, or
-# walks, at the spot under the cursor, as anywhere else in the game. The bar's
-# buttons, belt, orbs and skill buttons still work as usual.
+# With keyboard quick cast on, a skill key does nothing while the cursor is over
+# the bottom bar (the HUD with the orbs, belt and skill buttons), even over its
+# empty art. With this plugin, a quick cast over the bar's art casts at the spot
+# (or the monster) under the cursor, as anywhere else in the game. The bar's
+# buttons, belt, orbs and skill buttons, and mouse clicks, work as usual.
 # Every setting can also be changed in game with I Hate TOMLs, and applies at once.
 
 [hud-cast]
 enabled = )" + ValueOf("enabled") + R"(
 
-# Write what the cursor is over each time the bar would have stopped a click
-# (d2rloader/logs/hud-cast.log), once per part of the bar.
+# Write each part of the bar a quick cast was let through over
+# (d2rloader/logs/hud-cast.log), once per part.
 log_parts = )" + ValueOf("log_parts") + "\n";
 }
 
@@ -528,8 +352,8 @@ constexpr const char* Schema = R"toml(title = "HUD Cast"
 [[setting]]
 key = "enabled"
 type = "bool"
-label = "Cast over the bottom bar"
-note = "Clicks on the bar's art cast or walk; its buttons still work."
+label = "Quick cast over the bottom bar"
+note = "Over the bar's art; its buttons keep their keys."
 [[setting]]
 key = "log_parts"
 type = "bool"
@@ -575,14 +399,15 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "HUD Cast %s: inactive, this game build isn't supported (Steam 3.3.93787 / 3.3.94995 are)", PluginVersion);
 		return true;
 	}
-	CatcherPatched = RedirectCatcherHover();
-	InstallDiagnostics();
-	if (!CatcherPatched) Log(true, "could not patch D2R+0x%llX: clicks on the bar stay stopped", static_cast<unsigned long long>(CatcherHoverCallRva));
+	if (!SwapCatcherInside()) {
+		Log(true, "HUD Cast %s: inactive, the bar's key check differs on this build", PluginVersion);
+		return true;
+	}
 	if (!context->InstallInlineHook(OverUiRva, OverUiBytes.data(), static_cast<std::uint32_t>(OverUiBytes.size()), &HookOverUi, &OverUi) || !OverUi) {
-		Log(true, "could not hook D2R+0x%llX: held casts still stop over the bar", static_cast<unsigned long long>(OverUiRva));
+		Log(true, "could not hook D2R+0x%llX: monsters under the bar aren't targeted", static_cast<unsigned long long>(OverUiRva));
 		OverUi = nullptr;
 	}
-	Log(false, "HUD Cast %s: %s, skills cast over the bottom bar's art", PluginVersion, Config.enabled ? "active" : "loaded but turned off");
+	Log(false, "HUD Cast %s: %s, quick cast works over the bottom bar's art", PluginVersion, Config.enabled ? "active" : "loaded but turned off");
 	return true;
 }
 
