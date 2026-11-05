@@ -40,7 +40,7 @@
 namespace {
 
 constexpr const char* PluginId      = "hud-cast";
-constexpr const char* PluginVersion = "0.0.2";
+constexpr const char* PluginVersion = "0.0.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -207,7 +207,9 @@ bool CatcherHovered(void* widget) noexcept {
 	return false;
 }
 
+void WrapHandlerList() noexcept;
 int HookOverUi(int* x, int* y) noexcept {
+	if (Config.logParts.load(std::memory_order_relaxed)) WrapHandlerList();
 	const int over = OverUi(x, y);
 	if (!over || !x || !y || !Config.enabled.load(std::memory_order_relaxed)) return over;
 	if (Controller() || !MouseAllowed()) return over;
@@ -246,10 +248,9 @@ bool LogClick(const char* side, UiDownFn original, void* message) noexcept {
 	const bool taken = original(message);
 	if (!Config.logParts.load(std::memory_order_relaxed) || ClickLogs.load() >= 40) return taken;
 	void* const hovered = HoveredWidget();
-	if (!hovered || !InHud(hovered)) return taken;
 	++ClickLogs;
 	try {
-		const std::string name = NameOf(hovered);
+		const std::string name = hovered ? NameOf(hovered) : std::string("nothing");
 		Log(false, "%s click over %s: %s%s", side, name.c_str(), taken ? "taken by the UI" : "passed to the game",
 		    taken && HandledBy ? (" (set at D2R+0x" + [] (std::uintptr_t a) { char t[32]; std::snprintf(t, sizeof(t), "%llX", static_cast<unsigned long long>(a)); return std::string(t); }(HandledBy - Base) + ")").c_str() : "");
 	} catch (...) {
@@ -258,6 +259,61 @@ bool LogClick(const char* side, UiDownFn original, void* message) noexcept {
 }
 bool HookUiLeftDown(void* message) noexcept { return LogClick("left", UiLeftDown, message); }
 bool HookUiRightDown(void* message) noexcept { return LogClick("right", UiRightDown, message); }
+
+// Mouse message handlers (runtime list in .data: {u32 message, u32 flags, fn}, game
+// handlers after the UI ones). Down messages 0x10005 (left) and 0x10009 (right) are
+// wrapped to log what each handler answers; the first returning true stops the rest.
+constexpr std::uint64_t HandlerListRva = 0x229BD00;
+constexpr std::size_t   HandlerListSize = 0x400;
+constexpr int           MaxWrapped = 12;
+using HandlerFn = bool (*)(void* message) noexcept;
+struct Wrapped { std::uint32_t message; std::uint64_t rva; HandlerFn original; std::atomic<int> logs; };
+Wrapped Wraps[MaxWrapped] {};
+int WrapCount {};
+std::atomic<bool> ListWrapped {};
+
+bool CallWrapped(int i, void* message) noexcept {
+	Wrapped& w = Wraps[i];
+	const bool taken = w.original(message);
+	if (Config.logParts.load(std::memory_order_relaxed) && w.logs.fetch_add(1) < 12) {
+		void* const hovered = HoveredWidget();
+		try {
+			const std::string name = hovered ? NameOf(hovered) : std::string("nothing");
+			const char* where = w.rva < 0x3000000 ? "D2R" : "outside D2R";
+			Log(false, "message 0x%X handler %d (%s+0x%llX): %s, hovered %s", w.message, i, where, static_cast<unsigned long long>(w.rva), taken ? "TAKEN" : "passed", name.c_str());
+		} catch (...) {
+		}
+	}
+	return taken;
+}
+template <int I> bool WrapFn(void* message) noexcept { return CallWrapped(I, message); }
+constexpr HandlerFn WrapFns[MaxWrapped] { &WrapFn<0>, &WrapFn<1>, &WrapFn<2>, &WrapFn<3>, &WrapFn<4>, &WrapFn<5>, &WrapFn<6>, &WrapFn<7>, &WrapFn<8>, &WrapFn<9>, &WrapFn<10>, &WrapFn<11> };
+
+void WrapHandlerList() noexcept {
+	if (ListWrapped.exchange(true)) return;
+	std::uint8_t* const list = reinterpret_cast<std::uint8_t*>(Base + HandlerListRva);
+	std::array<std::uint8_t, HandlerListSize> copy {};
+	if (!Read(Base + HandlerListRva, copy.data(), copy.size())) { Log(true, "diag: handler list unreadable"); return; }
+	for (std::size_t at = 0; at + 16 <= copy.size() && WrapCount < MaxWrapped; at += 16) {
+		std::uint32_t message = 0;
+		std::uint64_t fn = 0;
+		std::memcpy(&message, copy.data() + at, 4);
+		std::memcpy(&fn, copy.data() + at + 8, 8);
+		if ((message != 0x10005 && message != 0x10009) || fn < Base) continue;
+		Wrapped& w = Wraps[WrapCount];
+		w.message  = message;
+		w.rva      = fn - Base;
+		w.original = reinterpret_cast<HandlerFn>(fn);
+		DWORD old = 0;
+		if (!VirtualProtect(list + at + 8, 8, PAGE_READWRITE, &old)) continue;
+		*reinterpret_cast<HandlerFn volatile*>(list + at + 8) = WrapFns[WrapCount];
+		DWORD ignored = 0;
+		VirtualProtect(list + at + 8, 8, old, &ignored);
+		Log(false, "diag: wrapped handler %d for message 0x%X at list +0x%llX: D2R+0x%llX", WrapCount, message, static_cast<unsigned long long>(at), static_cast<unsigned long long>(w.rva));
+		++WrapCount;
+	}
+	if (!WrapCount) Log(true, "diag: no down handlers found in the list");
+}
 
 void InstallDiagnostics() noexcept {
 	if (CodeMatches(SetHandledRva, SetHandledBytes)) {
