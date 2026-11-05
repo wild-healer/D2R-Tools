@@ -34,8 +34,11 @@
 //   - Missiles: the client's missile creation (0x1B7760) returns null for
 //     Firestorm (Hellfire Torch, druid) and Thunder Storm bolts from the chosen
 //     owners, so neither the bolt nor its light is ever drawn.
-//   - Martial arts charge orbs (kept up by Mosaic): the legacy overlay creation
-//     (0x150280) skips the charge overlays on the chosen units.
+//   - Martial arts charge orbs (kept up by Mosaic): inside the legacy overlay
+//     creation (0x150280), its overlay record lookup (call at 0x1502A4) gets
+//     no record for the charge overlays on the chosen units, so the function
+//     leaves at once. The function's start is left untouched: other plugins
+//     (e.g. LTBL) call it and check its first bytes.
 //   - Terror zone tint: QuestUpdateFX starts a screen tint when you enter a
 //     terror zone (call at 0x170499); the screen tint function (0xF3E40) skips
 //     that call.
@@ -101,9 +104,18 @@ constexpr std::uint64_t CreateMissileRva = 0x1B7760;
 constexpr std::array<std::uint8_t, 25> CreateMissileBytes { 0x89, 0x54, 0x24, 0x10, 0x55, 0x57, 0x41, 0x55, 0x41, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0xC1, 0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xF9 };
 constexpr std::uintptr_t MissileParamsOwner = 0x08;
 constexpr std::uintptr_t MissileParamsId    = 0x20;
-// Legacy overlay creation: void (Unit*, int overlay, int type, ...7 args); no caller uses a result.
-constexpr std::uint64_t CreateOverlayRva = 0x150280;
-constexpr std::array<std::uint8_t, 24> CreateOverlayBytes { 0x40, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x57, 0x48, 0x81, 0xEC, 0x30, 0x01, 0x00, 0x00, 0x45, 0x8B, 0xE1, 0x45, 0x8B, 0xF8, 0x8B, 0xFA, 0x48 };
+// Legacy overlay creation 0x150280: void (Unit*, int overlay, int type, ...7 args). Its start
+// (checked byte for byte by other plugins) is not patched. It keeps the unit in rsi
+// (mov rsi, rcx at 0x150297), then looks up the overlay record:
+//   0x1502A2 mov edx, edi; call OverlayRecord; mov rbp, rax; test rax, rax; je <return>
+// A null record makes it return at once, nothing created. That call is pointed at a
+// cave stub (mov r8, rsi; jmp ChargeRecordLookup) so the lookup also gets the unit.
+constexpr std::uint64_t OverlayUnitRva = 0x150297;
+constexpr std::array<std::uint8_t, 3> OverlayUnitBytes { 0x48, 0x8B, 0xF1 };
+constexpr std::uint64_t OverlayLookupRva = 0x1502A2;
+constexpr std::array<std::uint8_t, 19> OverlayLookupBytes { 0x8B, 0xD7, 0xE8, 0xF7, 0xFE, 0xFF, 0xFF, 0x48, 0x8B, 0xE8, 0x48, 0x85, 0xC0, 0x0F, 0x84, 0x49, 0x04, 0x00, 0x00 };
+constexpr std::uint64_t OverlayLookupCallRva = 0x1502A4;
+constexpr std::array<std::uint8_t, 5> OverlayLookupCallBytes { 0xE8, 0xF7, 0xFE, 0xFF, 0xFF };
 // Screen tint: void (int kind, int fadeIn, int hold, int fadeOut), stores them in globals.
 // QuestUpdateFX calls ScreenTint(3, 1000, 2000, 1000) at 0x170499 when you enter a terror
 // zone; the tint lasts until you leave it. Skipping that call keeps the zone's sound.
@@ -170,7 +182,6 @@ constexpr std::uint32_t NoId        = 0xFFFFFFFF;
 using StateOverlaysFn    = void (*)(void* unit, int state) noexcept;
 using ToggleStateFn      = void (*)(void* unit, int state, int on) noexcept;
 using CreateMissileFn    = void* (*)(void* params, int flags) noexcept;
-using CreateOverlayFn    = void (*)(void* unit, int overlay, int type, int a4, int a5, int a6, int a7) noexcept;
 using OverlayRecordFn    = const void* (*)(std::uint8_t version, int overlay) noexcept;
 using AuraTargetFn       = std::uintptr_t (*)(void* context, void* target, void* r8, void* r9) noexcept;
 using ApplyAuraFn        = int (*)(void* game, void* caster, void* target, int duration, int skill, int level) noexcept;
@@ -196,7 +207,6 @@ std::string                Problem; // why the plugin is inactive
 StateOverlaysFn    OriginalStateOverlays {};
 ToggleStateFn      OriginalToggleState {};
 CreateMissileFn    OriginalCreateMissile {};
-CreateOverlayFn    OriginalCreateOverlay {};
 OverlayRecordFn    OverlayRecord {};
 ApplyAuraFn        OriginalApplyAura {};
 AuraTargetFn       OriginalAuraTarget {};
@@ -496,13 +506,14 @@ bool IsChargeOverlay(void* unit, int overlay) noexcept {
 	return charge;
 }
 
-void HookCreateOverlay(void* unit, int overlay, int type, int a4, int a5, int a6, int a7) noexcept {
+// Reached from the overlay creation's record lookup (see OverlayLookupRva); null = create nothing.
+const void* ChargeRecordLookup(std::uint8_t version, int overlay, void* unit) noexcept {
 	std::uint32_t unitType = NoId, id = NoId;
 	if (Active.load(std::memory_order_acquire) && unit && IsChargeOverlay(unit, overlay) && UnitIdentity(unit, unitType, id)) {
 		const Kind kind = KindOf(unitType, id, LocalPlayerId());
 		if (Config.enabled.load(std::memory_order_relaxed) && Has(Config.hideCharges, kind)) {
 			HiddenOverlays.fetch_add(1, std::memory_order_relaxed);
-			return;
+			return nullptr;
 		}
 		// Remembered so these orbs can be removed if they become hidden.
 		AcquireSRWLockExclusive(&TrackLock);
@@ -512,7 +523,31 @@ void HookCreateOverlay(void* unit, int overlay, int type, int a4, int a5, int a6
 		}
 		ReleaseSRWLockExclusive(&TrackLock);
 	}
-	OriginalCreateOverlay(unit, overlay, type, a4, a5, a6, a7);
+	return OverlayRecord(version, overlay);
+}
+
+// The rel32 call has to land in the game image: the stub goes in 16 bytes of int3 padding.
+bool RedirectOverlayLookup() noexcept {
+	if (!CodeMatches(OverlayUnitRva, OverlayUnitBytes) || !CodeMatches(OverlayLookupRva, OverlayLookupBytes)) return false;
+	std::array<std::uint8_t, 15> stub { 0x49, 0x89, 0xF0, 0x48, 0xB8 }; // mov r8, rsi; mov rax, imm64; jmp rax
+	const auto target = reinterpret_cast<std::uint64_t>(&ChargeRecordLookup);
+	std::memcpy(stub.data() + 5, &target, sizeof(target));
+	stub[13] = 0xFF, stub[14] = 0xE0;
+	std::array<std::uint8_t, 16> padding {};
+	padding.fill(0xCC);
+	std::array<std::uint8_t, 0x10000> chunk {};
+	int tries = 0;
+	for (std::uint64_t start = 0x1000; start < 0x1400000 && tries < 16; start += chunk.size()) {
+		if (!Read(Base + start, chunk.data(), chunk.size())) continue;
+		for (std::size_t at = 0; at + padding.size() <= chunk.size() && tries < 16; at += 16) {
+			if (std::memcmp(chunk.data() + at, padding.data(), padding.size()) != 0) continue;
+			++tries;
+			const std::uint64_t cave = start + at;
+			if (!Context->PatchBytes(cave + 1, padding.data(), static_cast<std::uint32_t>(stub.size()), stub.data(), static_cast<std::uint32_t>(stub.size()))) continue; // taken
+			return D2RL::PatchCallRel32(Context, OverlayLookupCallRva, OverlayLookupCallBytes.data(), 5, cave + 1);
+		}
+	}
+	return false;
 }
 
 // Whether to leave out the look of an aura or shout state on a client unit. `log` = count it in the log.
@@ -728,8 +763,8 @@ bool InstallHooks() noexcept {
 		return Problem = "state overlay hook refused (code differs or another plugin hooks it)", false;
 	if (!Context->InstallInlineHook(CreateMissileRva, CreateMissileBytes.data(), static_cast<std::uint32_t>(CreateMissileBytes.size()), HookCreateMissile, &OriginalCreateMissile) || !OriginalCreateMissile)
 		return Problem = "missile hook refused (code differs or another plugin hooks it)", false;
-	if (!Context->InstallInlineHook(CreateOverlayRva, CreateOverlayBytes.data(), static_cast<std::uint32_t>(CreateOverlayBytes.size()), HookCreateOverlay, &OriginalCreateOverlay) || !OriginalCreateOverlay)
-		return Problem = "overlay hook refused (code differs or another plugin hooks it)", false;
+	if (!RedirectOverlayLookup())
+		return Problem = "overlay record lookup could not be redirected (code differs or another plugin patches it)", false;
 	// The terror zone tint is optional: without it everything else still works.
 	if (CodeMatches(TerrorTintCallRva, TerrorTintCallBytes) && CodeMatches(TintResetRva, TintResetBytes) &&
 	    Context->InstallInlineHook(ScreenTintRva, ScreenTintBytes.data(), static_cast<std::uint32_t>(ScreenTintBytes.size()), HookScreenTint, &OriginalScreenTint) && OriginalScreenTint) {
