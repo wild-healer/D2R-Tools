@@ -75,7 +75,7 @@
 namespace {
 
 constexpr const char* PluginId      = "swap-cast";
-constexpr const char* PluginVersion = "1.1.1";
+constexpr const char* PluginVersion = "1.1.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -161,6 +161,9 @@ constexpr Code DispatchBytes { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0
 constexpr std::uint64_t LeftSkillRva  = 0x34A540;
 constexpr std::uint64_t RightSkillRva = 0x34B400;
 constexpr Code SideSkillBytes { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C }; // both
+constexpr std::uint64_t SetLeftSkillRva  = 0x33EC70; // (unit, skill, owner item or -1): picks your left skill (0 = Attack)
+constexpr std::uint64_t SetRightSkillRva = 0x33EF10; // same for the right skill
+constexpr Code PickSkillBytes { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57 }; // both
 constexpr std::uint64_t RemoveSkillRva = 0x33EA00;
 constexpr Code RemoveSkillBytes { 0x48, 0x83, 0xEC, 0x38, 0x44, 0x89, 0x4C, 0x24, 0x20, 0x4D, 0x8B, 0xC8, 0x41, 0xB8, 0x01, 0x00 };
 constexpr std::uint64_t AddSkillRva = 0x33EFB0; // (unit, skill, 0, 0, file, line): what the client's "+skill" stat callback (D2R+0xFD1C0) uses
@@ -285,6 +288,7 @@ using SetSkillObjectFn = bool (*)(void* widget, void* skill, std::uint8_t flag) 
 using SetItemSkillFn = void (*)(void* unit, std::uint32_t owner, int skill, int level, int charges, int remove) noexcept;
 using DispatchFn     = std::uint64_t (*)(void* game, void* player, std::uint8_t* packet, int size) noexcept;
 using SideSkillFn    = void* (*)(void* unit) noexcept;
+using PickSkillFn     = std::uint64_t (*)(void* unit, int skill, std::uint32_t owner) noexcept;
 using RemoveSkillFn  = std::uint64_t (*)(void* unit, int skill, const char* file, int line) noexcept;
 using AddSkillFn     = void* (*)(void* unit, int skill, int a3, int a4, const char* file, int line) noexcept;
 using SkillTxtFn     = void* (*)(std::uint8_t data, int skill) noexcept;
@@ -340,6 +344,8 @@ DispatchFn      Dispatch {};
 SideSkillFn     LeftSkill {};
 SideSkillFn     RightSkill {};
 RemoveSkillFn   RemoveSkill {};
+PickSkillFn     SetLeftSkill {};
+PickSkillFn     SetRightSkill {};
 FindSkillFn     FindSkill {};
 SkillTipFn      SkillTip {};
 StringReserveFn StringReserve {};
@@ -434,6 +440,15 @@ struct ServerState {
 	ULONGLONG                    lastBusy = 0;
 } Server;
 
+// Server.tracking for the other threads: your weapons are out of the places
+// the game put them (a swap cast holds them, or set I is on its way back).
+std::atomic<bool> Displaced {};
+
+void Track(bool on) noexcept {
+	Server.tracking = on;
+	Displaced.store(on, std::memory_order_relaxed);
+}
+
 std::atomic<bool> TickQueued {};
 
 // Set 1 weapon, set 1 shield, set 2 weapon, set 2 shield (for the labels on
@@ -507,12 +522,23 @@ void Moving() noexcept { MovingUntil.store(GetTickCount64() + 1500, std::memory_
 
 // Your client may let a removal through: not while your weapons move, nor
 // for an item still in a weapon slot.
+// Your weapons are not where the game put them: Swap Cast holds them for a
+// cast, or they are on their way (swap cast, set I coming back, W).
+bool InTransit() noexcept { return GetTickCount64() < MovingUntil.load(std::memory_order_relaxed); }
+bool WeaponsMoved() noexcept { return Displaced.load(std::memory_order_relaxed) || InTransit(); }
+
+// The skills of all four weapon slots stay yours: always with show_swap_skills
+// on, and while Swap Cast moves your weapons with it off. A skill of set I
+// (an oskill on left click) must not fall back to Attack because a swap cast
+// put its item in set II for a moment.
+bool Guarding() noexcept { return Config.enabled && KeepHooked && (Config.keepSwapSkills || WeaponsMoved()); }
+
 bool ClientMayRemove(void* unit) noexcept { return unit == ClientPlayer.load(std::memory_order_relaxed) && GetTickCount64() >= MovingUntil.load(std::memory_order_relaxed); }
 
 // Hovering an item in your inventory adds its skills to compare and removes
 // them right away: those removals go through.
 void HookSetItemSkill(void* unit, std::uint32_t owner, int skill, int level, int charges, int remove) noexcept {
-	if (Keeping() && owner != NoId && level > 0 && IsLocalPlayer(unit)) {
+	if (Guarding() && owner != NoId && level > 0 && IsLocalPlayer(unit)) {
 		if (remove && (!ClientMayRemove(unit) || SlotOf(CurrentItems(unit), owner) >= 0)) {
 			Keep({ unit, owner, skill, level });
 			return;
@@ -525,7 +551,7 @@ void HookSetItemSkill(void* unit, std::uint32_t owner, int skill, int level, int
 }
 
 std::uint64_t HookRemoveSkill(void* unit, int skill, const char* file, int line) noexcept {
-	if (Keeping() && skill >= 0 && IsLocalPlayer(unit) && (!ClientMayRemove(unit) || GrantedByWeapon(unit, skill))) {
+	if (Guarding() && skill >= 0 && IsLocalPlayer(unit) && (!ClientMayRemove(unit) || GrantedByWeapon(unit, skill))) {
 		Keep({ unit, NoId, skill, 0 });
 		return 0;
 	}
@@ -557,7 +583,7 @@ Mode OwnMode(void* unit, int skill, const std::array<std::uint32_t, 4>& sets) no
 bool GrantedByWeapon(void* unit, int skill) noexcept {
 	void* const inventory = UnitInventory(unit, __FILE__, __LINE__);
 	if (!inventory) return false;
-	const bool both = Keeping();
+	const bool both = Guarding();
 	for (const auto slot : Slots) {
 		if (!both && slot != 4 && slot != 5) continue;
 		void* const item = BodyItem(inventory, slot);
@@ -588,7 +614,7 @@ void Sweep(void* unit) noexcept {
 		for (auto kept = Kept.begin(); kept != Kept.end();) {
 			bool drop = false;
 			if (kept->unit == unit) {
-				if (kept->owner != NoId) drop = Keeping() ? SlotOf(items, kept->owner) < 0 : kept->owner != items[0] && kept->owner != items[1];
+				if (kept->owner != NoId) drop = Guarding() ? SlotOf(items, kept->owner) < 0 : kept->owner != items[0] && kept->owner != items[1];
 				else if (!GrantedByWeapon(unit, kept->skill)) {
 					void* const node = FindSkill(unit, kept->skill, NoId);
 					if (!node || !Orphan(unit, node, kept->skill)) {
@@ -614,11 +640,47 @@ void Sweep(void* unit) noexcept {
 int HookButtonLevel(void* unit, void* node, int bonus, int flag) noexcept {
 	const int     level = SkillLevel(unit, node, bonus, flag);
 	std::uint32_t owner = 0;
-	if (level > 0 && Keeping() && IsLocalPlayer(unit) && Orphan(unit, node, SkillId(node))) return 0; // the button lets it go, then Sweep removes it
-	if (level > 0 || !Keeping() || !node || !ReadField(node, SkillOwnerOffset, owner) || owner != NoId || !IsLocalPlayer(unit)) return level;
+	const bool    moving = InTransit();
+	if (level > 0 && !moving && Keeping() && IsLocalPlayer(unit) && Orphan(unit, node, SkillId(node))) return 0; // the button lets it go, then Sweep removes it
+	if (level > 0 || !Guarding() || !node || !ReadField(node, SkillOwnerOffset, owner) || owner != NoId || !IsLocalPlayer(unit)) return level;
+	// While your weapons move, an item is in no weapon slot for a moment: the
+	// skill stays on its button through it.
+	if (moving) return 1;
 	void*        txt = nullptr;
 	std::int16_t id  = -1;
 	return ReadField(node, SkillTxtOffset, txt) && ReadField(txt, 0, id) && GrantedByWeapon(unit, id) ? 1 : level;
+}
+
+// A skill still given by a weapon slot item (all four while guarding): a
+// "+skill" node or an item's own skill (charges).
+bool HeldByWeapons(void* unit, void* node) noexcept {
+	std::uint32_t owner = NoId;
+	const int     id    = SkillId(node);
+	if (id <= 0 || !ReadField(node, SkillOwnerOffset, owner)) return false;
+	if (owner != NoId) return SlotOf(CurrentItems(unit), owner) >= 0;
+	return InTransit() || GrantedByWeapon(unit, id);
+}
+
+// Something puts Attack on your left or right button while Swap Cast has
+// your weapons moved: a set I skill (Widowmaker's Guided Arrow on left click)
+// whose item a swap cast put in set II for the moment. The skill stays.
+// Picking Attack yourself goes through: only a reset during a move or while
+// your weapons are away is stopped.
+std::uint64_t SideReset(bool left, void* unit, int skill, std::uint32_t owner, std::uintptr_t from) noexcept {
+	const PickSkillFn set = left ? SetLeftSkill : SetRightSkill;
+	if (skill != 0 || !unit || !Guarding() || !WeaponsMoved() || !IsLocalPlayer(unit)) return set(unit, skill, owner);
+	void* const node = left ? LeftSkill(unit) : RightSkill(unit);
+	if (!node || !HeldByWeapons(unit, node)) return set(unit, skill, owner);
+	if (Config.logSwaps) Log(false, "kept skill %d on the %s button (Attack asked by D2R+0x%llX)", SkillId(node), left ? "left" : "right", static_cast<unsigned long long>(from - Base));
+	return 0;
+}
+
+std::uint64_t HookSetLeftSkill(void* unit, int skill, std::uint32_t owner) noexcept {
+	return SideReset(true, unit, skill, owner, reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)));
+}
+
+std::uint64_t HookSetRightSkill(void* unit, int skill, std::uint32_t owner) noexcept {
+	return SideReset(false, unit, skill, owner, reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)));
 }
 
 std::atomic<void*> ClientPlayer {}; // the client's unit for you, from the UI tick
@@ -659,7 +721,7 @@ OtherSetGrant OtherSetLevel(void* unit, void* node) noexcept {
 	return grant;
 }
 
-bool ForClient(void* unit, void* node) noexcept { return node && Keeping() && (unit == ClientPlayer.load(std::memory_order_relaxed) || IsLocalPlayer(unit)); }
+bool ForClient(void* unit, void* node) noexcept { return node && Guarding() && (unit == ClientPlayer.load(std::memory_order_relaxed) || IsLocalPlayer(unit)); }
 
 // SkillLevel for you (skill buttons, picker colour, the "can cast" checks):
 // a skill at level 0 that your set II gives counts at the level set II gives
@@ -867,8 +929,8 @@ bool Restore(const char* why) noexcept {
 	const bool done    = Arrange(Server.game, Server.player, current, Server.natural);
 	if (!done) Log(true, "could not put your weapons back (%s); they stay where they are", why);
 	else if (Config.logSwaps) Log(false, "weapons put back (%s)", why);
-	Server.tracking = false;
-	Server.away     = false;
+	Track(false);
+	Server.away = false;
 	return done;
 }
 
@@ -890,7 +952,8 @@ void __cdecl ServerTick(const D2RL::PluginContext*, void*) noexcept {
 	if (!Server.away || !Server.player) return;
 	void* const player = Server.player;
 	if (IsDead(player)) {
-		Server.away = Server.tracking = false; // items go to the corpse
+		Server.away = false; // items go to the corpse
+		Track(false);
 		Log(true, "you died with moved weapons; your sets are as they were at that moment");
 		return;
 	}
@@ -906,7 +969,7 @@ void __cdecl ServerTick(const D2RL::PluginContext*, void*) noexcept {
 		const auto home    = Wanted(Follow(player, current), Main);
 		if (!Place(Server.game, player, current, home)) Log(true, "could not put weapon set I back; the items stay where they are");
 		else if (Config.logSwaps) Log(false, "set I back");
-		Server.tracking = CurrentItems(player) != Server.natural;
+		Track(CurrentItems(player) != Server.natural);
 		Server.away     = false;
 		return;
 	}
@@ -918,6 +981,7 @@ std::vector<std::uint32_t> Primed; // items whose skills the game added this gam
 void Bind(void* game, void* player) noexcept {
 	if (Server.player == player && Server.game == game) return;
 	Server        = ServerState {};
+	Displaced.store(false, std::memory_order_relaxed);
 	Server.game   = game;
 	Server.player = player;
 	Primed.clear();
@@ -927,7 +991,7 @@ void Bind(void* game, void* player) noexcept {
 // Follows the items: natural (the game's view) and the absolute sets.
 std::array<std::uint32_t, 4> Follow(void* player, const std::array<std::uint32_t, 4>& current) noexcept {
 	if (Server.tracking && std::any_of(Server.natural.begin(), Server.natural.end(), [&](std::uint32_t item) { return item != NoId && SlotOf(current, item) < 0; }))
-		Server.tracking = false; // the items changed some other way
+		Track(false); // the items changed some other way
 	if (!Server.tracking) Server.natural = current;
 	const auto&                  natural = Server.natural;
 	const bool                   two     = OnSetTwo(player);
@@ -961,7 +1025,7 @@ void BeforeCast(void* game, void* player, void* skill) noexcept {
 		if (Config.logSwaps) Log(false, "skill %d (%s): the game refused this combination, cast with the current weapons", id, Labels[mode]);
 		return;
 	}
-	Server.tracking = want != Server.natural;
+	Track(want != Server.natural);
 	Server.away     = want != Wanted(sets, Main);
 	Server.lastBusy = GetTickCount64();
 	if (Config.logSwaps) Log(false, "skill %d cast with %s", id, Labels[mode]);
@@ -1047,7 +1111,7 @@ void Settle(void* game, void* player) noexcept {
 	// Held for a moment: the client only adds the skills once it gets the items'
 	// stats, which it doesn't if they come back in the same update.
 	if (Place(game, player, current, Wanted(current, Swap))) {
-		Server.tracking = CurrentItems(player) != Server.natural;
+		Track(CurrentItems(player) != Server.natural);
 		Server.away     = true;
 		Server.lastBusy = GetTickCount64() + 300;
 		QueueTick();
@@ -1363,6 +1427,15 @@ void __cdecl UiTick(const D2RL::PluginContext*, void*) noexcept {
 		QueueResync();
 	}
 	Sweep(player);
+	{ // a weapon skill on a button turning into Attack some way the hooks didn't see
+		static int lastSkill[2] = { -1, -1 };
+		for (int side = 0; side < 2; ++side) {
+			const int skill = SkillId(side ? RightSkill(player) : LeftSkill(player));
+			if (skill == 0 && lastSkill[side] > 0 && WeaponsMoved() && Config.logSwaps)
+				Log(false, "skill %d on the %s button became Attack while your weapons moved", lastSkill[side], side ? "right" : "left");
+			lastSkill[side] = skill;
+		}
+	}
 	if (Relabel.exchange(false))
 		for (void* hud : HudButtons)
 			if (IsSkillButton(hud)) Label(hud);
@@ -1885,6 +1958,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "your other set's item skills are not kept (hook failed)");
 		KeepHooked = false;
 	}
+	if (KeepHooked && (!Hook(SetLeftSkillRva, PickSkillBytes, &HookSetLeftSkill, &SetLeftSkill) | !Hook(SetRightSkillRva, PickSkillBytes, &HookSetRightSkill, &SetRightSkill)))
+		Log(true, "a set I skill may fall back to Attack while a swap cast moves its weapon");
 	if (KeepHooked && (!Hook(SkillLevelRva, SkillLevelBytes, &HookSkillLevel, &SkillLevel) | !Hook(BonusLevelRva, BonusLevelBytes, &HookBonusLevel, &BonusLevel)))
 		Log(true, "class skills only your set II gives may show red on set I (hook failed)");
 	if (KeepHooked && !Hook(CanUseSkillRva, CanUseSkillBytes, &HookCanUseSkill, &CanUseSkill))

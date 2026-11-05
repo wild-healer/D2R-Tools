@@ -1,4 +1,34 @@
-# Swap Cast 1.1.1: release texts
+# Swap Cast 1.1.2: release texts
+
+## Patch notes
+
+```
+**Swap Cast 1.1.2**
+
+**Fixed**
+
+* A skill your set I weapon gives (Widowmaker's Guided Arrow) no longer turns into Attack on its skill button when a skill cast with set II moves that weapon away.
+```
+
+## GitHub release
+
+- Tag: `swap-cast-v1.1.2`
+- Title: `Swap Cast 1.1.2`
+- Asset: `swap-cast.zip`
+
+Body:
+
+```markdown
+**Swap Cast** 1.1.2
+
+### Fixed
+- A skill your set I weapon gives (Widowmaker's Guided Arrow) no longer turns into Attack on its skill button when a skill cast with set II moves that weapon away.
+
+### Install
+Load `swap-cast.zip` in D2RMM, or copy `d2rl-swap-cast.dll` to `<game>/d2rloader/plugins/`. Settings and modes.txt are unchanged.
+```
+
+# Swap Cast 1.1.1
 
 ## Patch notes
 
