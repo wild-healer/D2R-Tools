@@ -78,7 +78,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shrine-icons";
-constexpr const char* PluginVersion = "1.0.1-dev-2";
+constexpr const char* PluginVersion = "1.0.1-dev-3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -113,6 +113,10 @@ constexpr std::array<std::uint8_t, 19> AddCellBytes { 0x48, 0x89, 0x5C, 0x24, 0x
 	                                                  0xEC, 0x50, 0x48, 0x8B, 0x05, 0x05, 0x60, 0x8F, 0x02 };
 constexpr std::int32_t   ShrineCell    = 310;
 // Automap draw: the tile's cell is read here; 7 bytes replaced by a jump.
+// AddCell's position: unit x / 10 + 1 and unit y / 10 - 3, from these calls.
+constexpr std::uint64_t UnitXCallRva = 0xD52D3, UnitXRva = 0x34AF60;
+constexpr std::uint64_t UnitYCallRva = 0xD52DD, UnitYRva = 0x34AFB0;
+constexpr std::uintptr_t UnitAct     = 0x18;
 constexpr std::uint64_t DrawCellRva = 0xD717E;
 constexpr std::array<std::uint8_t, 7> DrawCellBytes { 0x0F, 0xBF, 0x7B, 0x22, 0x41, 0x2B, 0xD6 }; // movsx edi, word [rbx+0x22]; sub edx, r14d
 constexpr std::uint32_t CellCount = 2048;
@@ -229,7 +233,50 @@ bool FilesReady   = false;            // the effects, meshes and textures are re
 
 // Cell the automap draws for each stored cell; read by the draw stub.
 alignas(64) std::int16_t Remap[CellCount] {};
+// Stored cell -> the cell looked up by position: the plugin's own cells (kept
+// by saved maps of earlier builds) count as the gold ring.
+alignas(64) std::int16_t Plain[CellCount] {};
 bool RemapActive = false;
+
+// This game's revealed shrines: key (position and act, see ShrineKey) -> the
+// shrine's own cell. Saved automaps are kept per map seed while shrine types
+// change every game, so the automap itself only ever stores the gold ring and
+// the draw stub looks the icon up here. Cleared when a game starts.
+constexpr std::uint32_t SlotCount = 4096, SlotLimit = 3000;
+alignas(64) std::uint64_t Keys[SlotCount] {};
+alignas(64) std::int16_t  Cells[SlotCount] {};
+std::uint32_t             Used = 0;
+std::uint8_t              CurrentAct = 0;
+
+constexpr std::uint64_t ShrineKey(std::uint32_t act, std::int32_t x, std::int32_t y) noexcept {
+	return (std::uint64_t { 1 } << 63) | (std::uint64_t { act & 0xFF } << 48) | (std::uint64_t { static_cast<std::uint32_t>(x) & 0xFFFFFF } << 24) |
+	       (static_cast<std::uint32_t>(y) & 0xFFFFFF);
+}
+
+constexpr std::uint32_t Slot(std::uint64_t key) noexcept {
+	return static_cast<std::uint32_t>((key * 0x9E3779B97F4A7C15ULL) >> 52);
+}
+
+void Remember(std::uint64_t key, std::int32_t cell) noexcept {
+	for (std::uint32_t i = Slot(key);; i = (i + 1) & (SlotCount - 1)) {
+		if (Keys[i] == key) {
+			Cells[i] = static_cast<std::int16_t>(cell);
+			return;
+		}
+		if (!Keys[i]) {
+			if (Used >= SlotLimit) return;
+			Cells[i] = static_cast<std::int16_t>(cell);
+			Keys[i]  = key;
+			++Used;
+			return;
+		}
+	}
+}
+
+void Forget() noexcept {
+	std::memset(Keys, 0, sizeof(Keys));
+	Used = 0;
+}
 
 const D2RL::PluginContext*    Context {};
 const D2RL::ResourceService*  ResourceApi {};
@@ -367,27 +414,55 @@ bool MinimapShown(std::uint32_t code) noexcept {
 	return Config.boosters;
 }
 
-// With the draw stub, every shrine stores its own cell and the stub decides
-// what is drawn; without it, the cell is chosen here once.
+using UnitCoordFn = std::int32_t (*)(const void* unit) noexcept;
+
+// With the draw stub, the automap keeps the gold ring and the shrine's cell is
+// remembered by position for this game only; without it, the cell is chosen
+// here once.
 void HookAddCell(void* unit, std::int32_t cell, void* context) noexcept {
 	if (cell == ShrineCell && unit && *static_cast<const std::uint32_t*>(unit) == ObjectUnit) {
-		const auto* data   = *reinterpret_cast<const std::uint8_t* const*>(static_cast<const std::uint8_t*>(unit) + UnitData);
+		const auto* bytes  = static_cast<const std::uint8_t*>(unit);
+		const auto* data   = *reinterpret_cast<const std::uint8_t* const*>(bytes + UnitData);
 		const auto* shrine = data ? *reinterpret_cast<const std::uint8_t* const*>(data + ObjectShrine) : nullptr;
-		if (shrine && *shrine < EntryCount && MinimapCell[*shrine] && (RemapActive || MinimapShown(*shrine))) cell = MinimapCell[*shrine];
+		if (shrine && *shrine < EntryCount && MinimapCell[*shrine]) {
+			if (RemapActive) {
+				const auto act = *reinterpret_cast<const std::uint32_t*>(bytes + UnitAct);
+				if (act < 5) {
+					CurrentAct   = static_cast<std::uint8_t>(act);
+					const auto x = reinterpret_cast<UnitCoordFn>(Base + UnitXRva)(unit) / 10 + 1;
+					const auto y = reinterpret_cast<UnitCoordFn>(Base + UnitYRva)(unit) / 10 - 3;
+					Remember(ShrineKey(act, x, y), MinimapCell[*shrine]);
+				}
+			} else if (MinimapShown(*shrine)) {
+				cell = MinimapCell[*shrine];
+			}
+		}
 	}
 	OriginalAddCell(unit, cell, context);
 }
 
-// The plugin's cells drawn as themselves or as the gold ring; left alone while
-// their sheet is the game's own.
+// AddCell still reads the unit position through the calls this plugin repeats.
+bool PositionCallsMatch() noexcept {
+	const auto target = [](std::uint64_t call) -> std::uint64_t {
+		std::uint8_t code[5] {};
+		if (!Read(Base + call, code, sizeof(code)) || code[0] != 0xE8) return 0;
+		std::int32_t rel = 0;
+		std::memcpy(&rel, code + 1, 4);
+		return call + 5 + rel;
+	};
+	return target(UnitXCallRva) == UnitXRva && target(UnitYCallRva) == UnitYRva;
+}
+
+// The plugin's cells drawn as themselves or as the gold ring (also while
+// their sheet is still the game's own).
 void UpdateRemap() noexcept {
 	const auto set = [](std::int32_t cell, bool shown) {
 		if (cell > 0 && cell < static_cast<std::int32_t>(CellCount)) Remap[cell] = static_cast<std::int16_t>(shown ? cell : ShrineCell);
 	};
 	for (const auto& icon : Icons)
-		set(icon.cell, !SheetPainted[0] || MinimapShown(icon.code));
+		set(icon.cell, SheetPainted[0] && MinimapShown(icon.code));
 	for (std::uint32_t i = 0; i < BoosterCell.size(); ++i)
-		set(BoosterCell[i], !SheetPainted[1] || MinimapShown(FirstBooster + i));
+		set(BoosterCell[i], SheetPainted[1] && MinimapShown(FirstBooster + i));
 }
 
 // Memory within a rel32 jump of the game code.
@@ -435,33 +510,85 @@ bool Rel32(std::uintptr_t site, const void* target, std::int32_t& rel) noexcept 
 	return true;
 }
 
-// A stub that maps the automap draw's cell through Remap (the jump to it is
-// written once the stub page is sealed, PatchDraw).
+// A stub that picks the cell the automap draws (the jump to it is written once
+// the stub page is sealed, PatchDraw). rax and r14 are free at the site (both
+// written before they are read again) and the flags are not read.
+//   cell = Plain[stored]; if the gold ring, look its position up in Keys and
+//   draw Remap[Cells[slot]] when this game revealed a shrine there.
 std::uint8_t* DrawStub {};
 
 bool BuildDrawStub() noexcept {
 	for (std::uint32_t i = 0; i < CellCount; ++i)
-		Remap[i] = static_cast<std::int16_t>(i);
+		Remap[i] = Plain[i] = static_cast<std::int16_t>(i);
+	for (const auto& icon : Icons)
+		if (icon.cell > 0 && icon.cell < static_cast<std::int32_t>(CellCount)) Plain[icon.cell] = ShrineCell;
+	for (const auto cell : BoosterCell)
+		Plain[cell] = ShrineCell;
 	UpdateRemap();
 	const std::uintptr_t site = Base + DrawCellRva, back = site + DrawCellBytes.size();
-	auto* stub = NewStub(64);
+	auto* stub = NewStub(256);
 	if (!stub) return false;
 	std::uint8_t* at   = stub;
 	const auto    emit = [&](std::initializer_list<std::uint8_t> bytes) {
 		for (const auto byte : bytes)
 			*at++ = byte;
 	};
-	emit({ 0x0F, 0xBF, 0x7B, 0x22 });             // movsx edi, word [rbx+0x22]
-	emit({ 0x41, 0x2B, 0xD6 });                   // sub edx, r14d
-	emit({ 0x81, 0xFF, 0x00, 0x08, 0x00, 0x00 }); // cmp edi, CellCount
-	emit({ 0x73, 0x10 });                         // jae done
-	emit({ 0x50, 0x48, 0xB8 });                   // push rax; mov rax, Remap
-	const auto table = reinterpret_cast<std::uint64_t>(&Remap[0]);
-	std::memcpy(at, &table, 8), at += 8;
-	emit({ 0x0F, 0xBF, 0x3C, 0x78 });             // movsx edi, word [rax+rdi*2]
-	emit({ 0x58 });                               // pop rax
-	emit({ 0xFF, 0x25, 0, 0, 0, 0 });             // done: jmp [rip]
-	std::memcpy(at, &back, 8), at += 8;
+	const auto imm64 = [&](std::uint64_t value) { std::memcpy(at, &value, 8), at += 8; };
+	const auto ptr   = [&](const void* value) { imm64(reinterpret_cast<std::uint64_t>(value)); };
+	// A near jcc/jmp whose rel32 is filled by `land`.
+	const auto jump  = [&](std::initializer_list<std::uint8_t> opcode) {
+		emit(opcode);
+		auto* rel = at;
+		at += 4;
+		return rel;
+	};
+	const auto land = [&](std::uint8_t* rel, const std::uint8_t* target) {
+		const auto distance = static_cast<std::int32_t>(target - (rel + 4));
+		std::memcpy(rel, &distance, 4);
+	};
+	emit({ 0x0F, 0xBF, 0x7B, 0x22 });              // movsx edi, word [rbx+0x22]
+	emit({ 0x41, 0x2B, 0xD6 });                    // sub edx, r14d
+	emit({ 0x81, 0xFF, 0x00, 0x08, 0x00, 0x00 });  // cmp edi, CellCount
+	auto* toDone1 = jump({ 0x0F, 0x83 });          // jae done
+	emit({ 0x48, 0xB8 }), ptr(Plain);              // mov rax, Plain
+	emit({ 0x0F, 0xBF, 0x3C, 0x78 });              // movsx edi, word [rax+rdi*2]
+	emit({ 0x81, 0xFF, 0x36, 0x01, 0x00, 0x00 });  // cmp edi, ShrineCell
+	auto* toDone2 = jump({ 0x0F, 0x85 });          // jne done
+	emit({ 0x51 });                                // push rcx
+	emit({ 0x8B, 0x43, 0x24 });                    // mov eax, [rbx+0x24]
+	emit({ 0x25, 0xFF, 0xFF, 0xFF, 0x00 });        // and eax, 0xFFFFFF
+	emit({ 0x48, 0xC1, 0xE0, 0x18 });              // shl rax, 24
+	emit({ 0x8B, 0x4B, 0x28 });                    // mov ecx, [rbx+0x28]
+	emit({ 0x81, 0xE1, 0xFF, 0xFF, 0xFF, 0x00 });  // and ecx, 0xFFFFFF
+	emit({ 0x48, 0x09, 0xC8 });                    // or rax, rcx
+	emit({ 0x48, 0xB9 }), ptr(&CurrentAct);        // mov rcx, &CurrentAct
+	emit({ 0x0F, 0xB6, 0x09 });                    // movzx ecx, byte [rcx]
+	emit({ 0x48, 0xC1, 0xE1, 0x30 });              // shl rcx, 48
+	emit({ 0x48, 0x09, 0xC8 });                    // or rax, rcx
+	emit({ 0x48, 0x0F, 0xBA, 0xE8, 0x3F });        // bts rax, 63
+	emit({ 0x49, 0x89, 0xC6 });                    // mov r14, rax
+	emit({ 0x48, 0xB9 }), imm64(0x9E3779B97F4A7C15ULL); // mov rcx, golden
+	emit({ 0x4C, 0x0F, 0xAF, 0xF1 });              // imul r14, rcx
+	emit({ 0x49, 0xC1, 0xEE, 0x34 });              // shr r14, 52
+	emit({ 0x48, 0xB9 }), ptr(Keys);               // mov rcx, Keys
+	const auto* probe = at;
+	emit({ 0x4A, 0x39, 0x04, 0xF1 });              // probe: cmp [rcx+r14*8], rax
+	auto* toFound = jump({ 0x0F, 0x84 });          // je found
+	emit({ 0x4A, 0x83, 0x3C, 0xF1, 0x00 });        // cmp qword [rcx+r14*8], 0
+	auto* toMiss = jump({ 0x0F, 0x84 });           // je miss
+	emit({ 0x41, 0xFF, 0xC6 });                    // inc r14d
+	emit({ 0x41, 0x81, 0xE6, 0xFF, 0x0F, 0x00, 0x00 }); // and r14d, SlotCount - 1
+	land(jump({ 0xE9 }), probe);                   // jmp probe
+	land(toFound, at);
+	emit({ 0x48, 0xB9 }), ptr(Cells);              // found: mov rcx, Cells
+	emit({ 0x42, 0x0F, 0xBF, 0x3C, 0x71 });        // movsx edi, word [rcx+r14*2]
+	emit({ 0x48, 0xB9 }), ptr(Remap);              // mov rcx, Remap
+	emit({ 0x0F, 0xBF, 0x3C, 0x79 });              // movsx edi, word [rcx+rdi*2]
+	land(toMiss, at);
+	emit({ 0x59 });                                // miss: pop rcx
+	land(toDone1, at);
+	land(toDone2, at);
+	emit({ 0xFF, 0x25, 0, 0, 0, 0 }), imm64(back); // done: jmp [rip]
 	DrawStub = stub;
 	return true;
 }
@@ -1201,6 +1328,14 @@ void RegisterStandIns() noexcept {
 
 // ---- tables loaded ----
 
+// A finished game's shrines are forgotten (the next game rolls its own).
+void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
+	using Kind = D2RL::Lifecycle::GameplayEventKind;
+	if (!D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) return;
+	if (event->kind == Kind::GameLeft) Forget();
+	else if (event->kind == Kind::ActChanged && event->currentValue >= 0 && event->currentValue < 5) CurrentAct = static_cast<std::uint8_t>(event->currentValue);
+}
+
 void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent* event, void*) noexcept {
 	if (SymbolsReady) {
 		if (!FilesReady) FilesReady = RegisterSymbolFiles();
@@ -1621,7 +1756,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	const bool drawStub = minimap && BuildDrawStub();
 	if (minimap && SealStubs()) {
 		minimap     = tileStub && PatchTileLoad();
-		RemapActive = minimap && drawStub && PatchDraw();
+		RemapActive = minimap && drawStub && PositionCallsMatch() && PatchDraw();
 	} else {
 		minimap = false;
 	}
@@ -1637,6 +1772,19 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	};
 	const auto result = Lifecycle->registerDataTablesLoadedListener(context, &listener, &TablesListener);
 	if (result != D2RL::Lifecycle::Result::Success) Log(true, "Shrine Icons %s: no floating symbols, data table listener refused (result %u)", PluginVersion, static_cast<unsigned>(result));
+	if (RemapActive) {
+		using Kind = D2RL::Lifecycle::GameplayEventKind;
+		for (const auto kind : { Kind::GameLeft, Kind::ActChanged }) {
+			const D2RL::Lifecycle::GameplayEventListener gameplay {
+				.structSize = D2RL::Lifecycle::GameplayEventListenerSize,
+				.kind       = kind,
+				.callback   = OnGameplayEvent,
+			};
+			D2RL::Lifecycle::ListenerHandle handle = D2RL::Lifecycle::InvalidHandle;
+			if (Lifecycle->registerGameplayEventListener(context, &gameplay, &handle) != D2RL::Lifecycle::Result::Success)
+				Log(true, "Shrine Icons %s: game event listener refused, minimap icons may carry over between games", PluginVersion);
+		}
+	}
 	RegisterStandIns();
 	Log(false, "Shrine Icons %s: %s (symbols %s, minimap %s%s)", PluginVersion, Config.enabled ? "active" : "loaded but turned off", SymbolsReady ? "ready" : "unavailable",
 	    minimap ? "ready" : "unavailable", RemapActive ? ", live" : "");
