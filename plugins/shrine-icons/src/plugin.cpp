@@ -79,7 +79,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shrine-icons";
-constexpr const char* PluginVersion = "1.0.1-dev-6";
+constexpr const char* PluginVersion = "1.0.1-dev-7";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -197,6 +197,7 @@ struct Settings {
 	std::atomic<bool> symbols { true };
 	std::atomic<bool> minimap { true };
 	std::atomic<bool> boosters { true }; // minimap icons for booster shrines too
+	std::atomic<bool> classic { false }; // booster icons from the classic symbols instead of the HD ones
 	std::atomic<double> size { 1.0 };    // symbol size, 1 = booster symbols
 	std::atomic<double> height { 14.0 }; // how high the symbol floats
 	// Gem tuning (dev builds only, not saved): extra turn about the world
@@ -214,6 +215,10 @@ std::array<std::int32_t, EntryCount>         IconOf {};  // shrine code -> Icons
 // tools_make_minimap.py.
 constexpr std::uint32_t FirstBooster = 6;
 constexpr std::array<std::int32_t, 10> BoosterCell { 700, 701, 702, 703, 704, 705, 706, 707, 715, 716 };
+// The same icons drawn from the HD floating symbols (BOOSTER_HD_CELLS), shown
+// unless classic_boosters is on. The automap and the plugin keep the classic
+// cell; the draw (Remap) or AddCell picks the HD one.
+constexpr std::array<std::int32_t, 10> BoosterHdCell { 718, 719, 720, 721, 722, 723, 724, 725, 726, 727 };
 
 // Automap cell painted per shrine code, 0 = none. Written on the game thread
 // when the sheets load, read by the hook on the same thread.
@@ -417,6 +422,15 @@ bool MinimapShown(std::uint32_t code) noexcept {
 	return Config.boosters;
 }
 
+// The cell drawn for a stored cell of a shown icon: a booster's HD icon unless
+// the classic ones are wanted.
+std::int32_t Drawn(std::int32_t cell) noexcept {
+	if (!Config.classic)
+		for (std::size_t i = 0; i < BoosterCell.size(); ++i)
+			if (cell == BoosterCell[i]) return BoosterHdCell[i];
+	return cell;
+}
+
 using UnitCoordFn = std::int32_t (*)(const void* unit) noexcept;
 
 // With the draw stub, the automap keeps the gold ring and the shrine's cell is
@@ -437,7 +451,7 @@ void HookAddCell(void* unit, std::int32_t cell, void* context) noexcept {
 					Remember(ShrineKey(act, x, y), MinimapCell[*shrine]);
 				}
 			} else if (MinimapShown(*shrine)) {
-				cell = MinimapCell[*shrine];
+				cell = Drawn(MinimapCell[*shrine]);
 			}
 		}
 	}
@@ -460,7 +474,7 @@ bool PositionCallsMatch() noexcept {
 // their sheet is still the game's own).
 void UpdateRemap() noexcept {
 	const auto set = [](std::int32_t cell, bool shown) {
-		if (cell > 0 && cell < static_cast<std::int32_t>(CellCount)) Remap[cell] = static_cast<std::int16_t>(shown ? cell : ShrineCell);
+		if (cell > 0 && cell < static_cast<std::int32_t>(CellCount)) Remap[cell] = static_cast<std::int16_t>(shown ? Drawn(cell) : ShrineCell);
 	};
 	for (const auto& icon : Icons)
 		set(icon.cell, SheetPainted[0] && MinimapShown(icon.code));
@@ -526,6 +540,8 @@ bool BuildDrawStub() noexcept {
 	for (const auto& icon : Icons)
 		if (icon.cell > 0 && icon.cell < static_cast<std::int32_t>(CellCount)) Plain[icon.cell] = ShrineCell;
 	for (const auto cell : BoosterCell)
+		Plain[cell] = ShrineCell;
+	for (const auto cell : BoosterHdCell)
 		Plain[cell] = ShrineCell;
 	UpdateRemap();
 	const std::uintptr_t site = Base + DrawCellRva, back = site + DrawCellBytes.size();
@@ -1387,6 +1403,7 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 	if (key == "symbols") return flag(Config.symbols);
 	if (key == "minimap") return flag(Config.minimap);
 	if (key == "boosters") return flag(Config.boosters);
+	if (key == "classic_boosters") return flag(Config.classic);
 	if (key == "shimmer") return flag(Config.shimmer);
 	const auto number = [&](std::atomic<double>& target, double low, double high) {
 		char*        end   = nullptr;
@@ -1414,6 +1431,7 @@ std::string ValueOf(const std::string& key) {
 	if (key == "symbols") return flag(Config.symbols);
 	if (key == "minimap") return flag(Config.minimap);
 	if (key == "boosters") return flag(Config.boosters);
+	if (key == "classic_boosters") return flag(Config.classic);
 	if (key == "shimmer") return flag(Config.shimmer);
 	if (key == "size") return Format("%g", Config.size.load());
 	if (key == "height") return Format("%g", Config.height.load());
@@ -1449,6 +1467,10 @@ minimap = )" + ValueOf("minimap") + R"(
 # Minimap icons for the booster shrines too (armor, combat, the four resists,
 # skill, mana recharge, stamina, experience), which already float a symbol.
 boosters = )" + ValueOf("boosters") + R"(
+
+# Booster shrine minimap icons drawn from the classic floating symbols instead
+# of the HD ones.
+classic_boosters = )" + ValueOf("classic_boosters") + R"(
 
 # Also give the shrines with a new symbol the faint shimmer booster shrines
 # have.
@@ -1549,6 +1571,11 @@ key = "boosters"
 type = "bool"
 label = "Booster minimap icons"
 note = "Armor, combat, resists, skill, mana recharge, stamina, experience."
+[[setting]]
+key = "classic_boosters"
+type = "bool"
+label = "Classic booster icons"
+note = "The classic floating symbols instead of the HD ones."
 [[setting]]
 key = "size"
 type = "float"

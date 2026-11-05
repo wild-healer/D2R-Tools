@@ -20,6 +20,10 @@ minimap = true
 # skill, mana recharge, stamina, experience), which already float a symbol.
 boosters = true
 
+# Booster shrine minimap icons drawn from the classic floating symbols instead
+# of the HD ones.
+classic_boosters = false
+
 # Also give the shrines with a new symbol the faint shimmer booster shrines
 # have.
 shimmer = true

@@ -13,9 +13,9 @@ Tells shrines apart before you walk up to them. One D2RLoader plugin, no mod nee
   symbol.
 - **A minimap icon per shrine type** instead of the shared gold ring: the item
   picture for the shrines above (torch, exploding potion and gas potion keep fire,
-  exploding and poison apart), and the classic floating symbol for the booster
+  exploding and poison apart), and the HD floating symbol for the booster
   shrines (armor, combat, the four resists, skill, mana recharge, stamina,
-  experience).
+  experience), or their classic symbol with `classic_boosters`.
 
 ## How
 
@@ -50,12 +50,15 @@ Tells shrines apart before you walk up to them. One D2RLoader plugin, no mod nee
 ## Settings
 
 `d2rloader/config/shrine-icons.toml`, or in game with I Hate TOMLs, where every
-setting applies at once: `symbols`, `minimap`, `boosters`, `shimmer`, `size`,
+setting applies at once: `symbols`, `minimap`, `boosters`, `classic_boosters`,
+`shimmer`, `size`,
 `height`, one switch per shrine type, `enabled`.
 
 ## Build
 
 `sh build.sh` (MinGW-w64) builds the DLL and `shrine-icons.zip`. The minimap art
 is `src/minimap_cells.bin`, built into the DLL;
-`python3 tools_make_minimap.py <extracted game data folder>` regenerates it (the
+`python3 tools_make_minimap.py <extracted game data folder>` regenerates it
+(the HD booster icons are rendered from the HD symbol models by
+`tools_render.py`, which reads the Granny `.model` files with `tools_gr2.py`; the
 classic symbols are decoded by `tools_dcc.py`).
