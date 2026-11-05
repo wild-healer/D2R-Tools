@@ -1,0 +1,15 @@
+# HUD Cast
+#
+# The bottom bar (the HUD with the orbs, belt and skill buttons) normally stops
+# your clicks and casts when the cursor is over it, even over its empty art.
+# With this plugin, clicking or holding a skill over the bar's art casts it, or
+# walks, at the spot under the cursor, as anywhere else in the game. The bar's
+# buttons, belt, orbs and skill buttons still work as usual.
+# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
+
+[hud-cast]
+enabled = true
+
+# Write what the cursor is over each time the bar would have stopped a click
+# (d2rloader/logs/hud-cast.log), once per part of the bar.
+log_parts = true
