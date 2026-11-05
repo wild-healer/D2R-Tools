@@ -79,7 +79,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shrine-icons";
-constexpr const char* PluginVersion = "1.0.1-dev-7";
+constexpr const char* PluginVersion = "1.0.1-dev-8";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -785,6 +785,11 @@ bool                         FlushQueued = false;
 // when its bytes come from the game later) and replaced afterwards.
 std::map<std::string, D2RL::Resources::RegistrationHandle> Live;
 
+void RefreshSymbols() noexcept;
+// Symbols to redo once new definitions are served (a definition asked for
+// before its bytes are registered would be loaded, and kept, as the old one).
+std::atomic<bool> RefreshAfterFlush { false };
+
 void __cdecl FlushResources(const D2RL::PluginContext*, void*) noexcept {
 	std::vector<PendingResource> work;
 	{
@@ -817,6 +822,7 @@ void __cdecl FlushResources(const D2RL::PluginContext*, void*) noexcept {
 			Log(false, "%zu files registered on the UI thread (first one, %s: state %u)", work.size(), item.path.c_str(), static_cast<unsigned>(info.state));
 		}
 	}
+	if (RefreshAfterFlush.exchange(false)) RefreshSymbols();
 }
 
 // Queues the UI-thread task that registers what Register queued.
@@ -1066,6 +1072,15 @@ void* HookOverlayPath(void* registry, void* out, const void* record) noexcept {
 	const std::int32_t id = record ? *reinterpret_cast<const std::int32_t*>(static_cast<const std::uint8_t*>(record) + 4) : -1;
 	if (FirstRow >= 0 && id >= FirstRow && id < FirstRow + static_cast<std::int32_t>(Icons.size()) && out && Registered != ~0u) {
 		const std::string path = DefinitionPath(Icons[static_cast<std::size_t>(id - FirstRow)], Registered);
+		{
+			// Which definition the game asked for (test builds, once per path).
+			static std::string last[16];
+			static std::uint32_t next = 0;
+			if (std::find(std::begin(last), std::end(last), path) == std::end(last)) {
+				last[next++ % 16] = path;
+				Log(false, "overlay %d asked: %s", id, path.c_str());
+			}
+		}
 		if (path.size() < 0x9A) {
 			// The game's string: text, length, capacity (inline, 0x9A bytes at +0x18).
 			auto* string = static_cast<std::uint8_t*>(out);
@@ -1718,10 +1733,12 @@ bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint3
 		return false;
 	}
 	SaveConfig();
+	const auto before = Registered;
 	RegisterDefinitions();
-	QueueFlush();
 	UpdateRemap();
-	RefreshSymbols();
+	if (Registered != before) RefreshAfterFlush = true;
+	QueueFlush();
+	if (Registered == before) RefreshSymbols();
 	return true;
 }
 
