@@ -1,4 +1,4 @@
-// HUD Cast: quick cast works while the cursor is over the bottom bar's art, as
+// Quickcast over HUD: quick cast works while the cursor is over the bottom bar's art, as
 // anywhere else in the game.
 //
 // Why the bar stops it (Steam 3.3.94995 / 93787 RVAs):
@@ -36,14 +36,14 @@
 
 namespace {
 
-constexpr const char* PluginId      = "hud-cast";
-constexpr const char* PluginVersion = "0.0.6";
+constexpr const char* PluginId      = "quickcast-over-hud";
+constexpr const char* PluginVersion = "1.0.0";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
 	.abiVersion  = D2RL_PLUGIN_ABI_VERSION,
 	.id          = PluginId,
-	.name        = "HUD Cast",
+	.name        = "Quickcast over HUD",
 	.version     = PluginVersion,
 	.author      = "wild-healer",
 	.description = "Quick cast works while the cursor is over the bottom bar.",
@@ -52,7 +52,6 @@ const D2RL::PluginInfo Info {
 
 struct Settings {
 	std::atomic<bool> enabled { true };
-	std::atomic<bool> logParts { true };
 } Config;
 
 // ---- native layout (Steam 3.3.93787 / 94995) ----
@@ -132,17 +131,6 @@ void* ParentOf(const void* widget) noexcept {
 	return Read(reinterpret_cast<std::uintptr_t>(widget) + WidgetParent, &parent, sizeof(parent)) ? parent : nullptr;
 }
 
-std::string NameOf(const void* widget) {
-	const char* name = nullptr;
-	if (!Read(reinterpret_cast<std::uintptr_t>(widget) + WidgetName, &name, sizeof(name)) || !name) return "?";
-	char text[64] {};
-	for (std::size_t i = 0; i + 1 < sizeof(text); ++i) {
-		if (!Read(reinterpret_cast<std::uintptr_t>(name) + i, &text[i], 1)) break;
-		if (!text[i]) break;
-	}
-	return text[0] ? text : "?";
-}
-
 bool InHud(const void* widget) noexcept {
 	const void* at = widget;
 	for (int depth = 0; at && depth < 24; ++depth, at = ParentOf(at))
@@ -159,34 +147,6 @@ void* HoveredWidget() noexcept {
 	std::uint8_t* const manager = UiManager();
 	void*               hovered = nullptr;
 	return manager && Read(reinterpret_cast<std::uintptr_t>(manager) + UiHovered, &hovered, sizeof(hovered)) ? hovered : nullptr;
-}
-
-// Logs each HUD part the cursor stopped on once (name and vtable), to find
-// which parts the plugin lets through and which it leaves alone.
-SRWLOCK                     SeenLock = SRWLOCK_INIT;
-std::vector<std::uintptr_t> Seen;
-
-void LogPart(const void* widget, bool through) noexcept {
-	if (!Config.logParts.load(std::memory_order_relaxed) || !widget) return;
-	AcquireSRWLockExclusive(&SeenLock);
-	bool fresh = false;
-	try {
-		const auto key = reinterpret_cast<std::uintptr_t>(widget);
-		fresh = std::find(Seen.begin(), Seen.end(), key) == Seen.end() && Seen.size() < 256;
-		if (fresh) Seen.push_back(key);
-	} catch (...) {
-	}
-	ReleaseSRWLockExclusive(&SeenLock);
-	if (!fresh) return;
-	try {
-		std::string path = NameOf(widget);
-		const void* at   = ParentOf(widget);
-		for (int depth = 0; at && depth < 6; ++depth, at = ParentOf(at)) path = NameOf(at) + "/" + path;
-		const std::uintptr_t vtable = VtableOf(widget);
-		Log(false, "quick cast let through over %s (vtable D2R+0x%llX)", path.c_str(), static_cast<unsigned long long>(vtable ? vtable - Base : 0));
-		(void)through;
-	} catch (...) {
-	}
 }
 
 // ---- game threads ----
@@ -211,7 +171,6 @@ bool HookCatcherInside(void* widget, std::uint64_t point) noexcept {
 	const auto caller = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
 	if (caller != Base + CatcherKeyReturn1 && caller != Base + CatcherKeyReturn2) return inside;
 	if (!InHud(widget)) return inside;
-	LogPart(widget, true);
 	return false;
 }
 
@@ -281,33 +240,27 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 		return true;
 	};
 	if (key == "enabled") return flag(Config.enabled);
-	if (key == "log_parts") return flag(Config.logParts);
 	return error = "unknown setting", false;
 }
 
 std::string ValueOf(const std::string& key) {
 	const auto flag = [](bool on) { return std::string(on ? "true" : "false"); };
 	if (key == "enabled") return flag(Config.enabled);
-	if (key == "log_parts") return flag(Config.logParts);
 	return {};
 }
 
 std::string Render() {
-	return R"(# HUD Cast
+	return R"(# Quickcast over HUD
 #
 # With keyboard quick cast on, a skill key does nothing while the cursor is over
 # the bottom bar (the HUD with the orbs, belt and skill buttons), even over its
 # empty art. With this plugin, a quick cast over the bar's art casts at the spot
 # (or the monster) under the cursor, as anywhere else in the game. The bar's
 # buttons, belt, orbs and skill buttons, and mouse clicks, work as usual.
-# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
+# It can also be turned on or off in game with I Hate TOMLs, and applies at once.
 
-[hud-cast]
-enabled = )" + ValueOf("enabled") + R"(
-
-# Write each part of the bar a quick cast was let through over
-# (d2rloader/logs/hud-cast.log), once per part.
-log_parts = )" + ValueOf("log_parts") + "\n";
+[quickcast-over-hud]
+enabled = )" + ValueOf("enabled") + "\n";
 }
 
 void SaveConfig() {
@@ -348,17 +301,12 @@ void LoadConfig() {
 
 // ---- I Hate TOMLs ----
 
-constexpr const char* Schema = R"toml(title = "HUD Cast"
+constexpr const char* Schema = R"toml(title = "Quickcast over HUD"
 [[setting]]
 key = "enabled"
 type = "bool"
 label = "Quick cast over the bottom bar"
 note = "Over the bar's art; its buttons keep their keys."
-[[setting]]
-key = "log_parts"
-type = "bool"
-label = "Log bar parts"
-note = "In d2rloader/logs/hud-cast.log, once per part."
 )toml";
 
 PluginMenu::Connection Menu;
@@ -396,18 +344,18 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	// Hooked even when turned off: it can be turned on while playing.
 	Base = context->exeBase;
 	if (!Base || !Locate()) {
-		Log(true, "HUD Cast %s: inactive, this game build isn't supported (Steam 3.3.93787 / 3.3.94995 are)", PluginVersion);
+		Log(true, "Quickcast over HUD %s: inactive, this game build isn't supported (Steam 3.3.93787 / 3.3.94995 are)", PluginVersion);
 		return true;
 	}
 	if (!SwapCatcherInside()) {
-		Log(true, "HUD Cast %s: inactive, the bar's key check differs on this build", PluginVersion);
+		Log(true, "Quickcast over HUD %s: inactive, the bar's key check differs on this build", PluginVersion);
 		return true;
 	}
 	if (!context->InstallInlineHook(OverUiRva, OverUiBytes.data(), static_cast<std::uint32_t>(OverUiBytes.size()), &HookOverUi, &OverUi) || !OverUi) {
 		Log(true, "could not hook D2R+0x%llX: monsters under the bar aren't targeted", static_cast<unsigned long long>(OverUiRva));
 		OverUi = nullptr;
 	}
-	Log(false, "HUD Cast %s: %s, quick cast works over the bottom bar's art", PluginVersion, Config.enabled ? "active" : "loaded but turned off");
+	Log(false, "Quickcast over HUD %s: %s, quick cast works over the bottom bar's art", PluginVersion, Config.enabled ? "active" : "loaded but turned off");
 	return true;
 }
 

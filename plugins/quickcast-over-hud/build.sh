@@ -1,5 +1,5 @@
 #!/bin/sh
-# Cross-builds d2rl-hud-cast.dll on Linux with MinGW-w64.
+# Cross-builds d2rl-quickcast-over-hud.dll on Linux with MinGW-w64.
 # Needs: x86_64-w64-mingw32-g++ / windres, git. The SDK is pinned to the commit this was built against.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
@@ -17,9 +17,9 @@ mkdir -p "$out"
 x86_64-w64-mingw32-windres -I"$sdk/include" -I"$here" "$here/src/plugin.rc" -O coff -o "$out/plugin.res"
 $cxx -std=c++20 -Os -Wall -shared -static -s \
   -I"$sdk/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion \
-  -o "$out/d2rl-hud-cast.dll"
-cp "$out/d2rl-hud-cast.dll" "$here/"
+  -o "$out/d2rl-quickcast-over-hud.dll"
+cp "$out/d2rl-quickcast-over-hud.dll" "$here/"
 # Package: the DLL alone (its config is built in; D2RLoader writes it on first launch).
-rm -f "$here"/hud-cast*.zip
-(cd "$here" && zip -q -X hud-cast.zip d2rl-hud-cast.dll)
-echo "built $here/d2rl-hud-cast.dll and $here/hud-cast.zip"
+rm -f "$here"/quickcast-over-hud*.zip
+(cd "$here" && zip -q -X quickcast-over-hud.zip d2rl-quickcast-over-hud.dll)
+echo "built $here/d2rl-quickcast-over-hud.dll and $here/quickcast-over-hud.zip"

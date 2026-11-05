@@ -1,15 +1,11 @@
-# HUD Cast
+# Quickcast over HUD
 #
 # With keyboard quick cast on, a skill key does nothing while the cursor is over
 # the bottom bar (the HUD with the orbs, belt and skill buttons), even over its
 # empty art. With this plugin, a quick cast over the bar's art casts at the spot
 # (or the monster) under the cursor, as anywhere else in the game. The bar's
 # buttons, belt, orbs and skill buttons, and mouse clicks, work as usual.
-# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
+# It can also be turned on or off in game with I Hate TOMLs, and applies at once.
 
-[hud-cast]
+[quickcast-over-hud]
 enabled = true
-
-# Write each part of the bar a quick cast was let through over
-# (d2rloader/logs/hud-cast.log), once per part.
-log_parts = true
