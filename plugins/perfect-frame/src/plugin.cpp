@@ -31,6 +31,7 @@
 
 #include <D2RLPlugin/api.h>
 #include <windows.h>
+#include <psapi.h>
 
 #include "i_hate_tomls_client.h"
 
@@ -55,7 +56,7 @@ namespace Tables = D2RL::DataTables;
 namespace Events = D2RL::SharedEvents;
 
 constexpr const char* PluginId      = "perfect-frame";
-constexpr const char* PluginVersion = "1.0.2";
+constexpr const char* PluginVersion = "1.0.2-dev-1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -95,6 +96,30 @@ void Say(bool warn, const char* format, ...) noexcept {
 	std::vsnprintf(line, sizeof(line), format, args);
 	va_end(args);
 	warn ? Context->LogWarn(line) : Context->LogInfo(line);
+}
+
+// Dev build: troubleshooting log. Each distinct line once (by its text), at
+// most 3000 lines a session.
+std::mutex                   DevLock;
+std::vector<std::uint64_t>   DevSeen;
+int                          DevLines {};
+void Dev(const char* format, ...) noexcept {
+	if (!Context) return;
+	char    line[4096] {};
+	va_list args;
+	va_start(args, format);
+	std::vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	std::uint64_t hash = 1469598103934665603ull;
+	for (const char* c = line; *c; ++c) hash = (hash ^ static_cast<unsigned char>(*c)) * 1099511628211ull;
+	{
+		std::lock_guard guard(DevLock);
+		if (DevLines >= 3000 || std::find(DevSeen.begin(), DevSeen.end(), hash) != DevSeen.end()) return;
+		if (DevSeen.size() >= 4096) DevSeen.erase(DevSeen.begin(), DevSeen.begin() + 1024);
+		DevSeen.push_back(hash);
+		++DevLines;
+	}
+	Context->LogInfo((std::string("[dev] ") + line).c_str());
 }
 
 // Also on the game console (for the perfect-frame command).
@@ -318,6 +343,41 @@ bool GetTable(Tables::TableId id, Tables::TableView& view) {
 	return TableApi->getTable(Context, Tables::Bank::Rotw, id, &view) == Tables::Result::Success && view.rows;
 }
 
+// Dev build: the settings, the other plugins and who holds the hooked pointers.
+std::string ModuleAt(std::uint64_t address) {
+	HMODULE module {};
+	char    name[MAX_PATH] {};
+	if (!address || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(address), &module)
+	    || !GetModuleFileNameA(module, name, sizeof(name)))
+		return "unknown";
+	const char* slash = std::strrchr(name, '\\');
+	char        at[64];
+	std::snprintf(at, sizeof(at), "+0x%llX", static_cast<unsigned long long>(address - reinterpret_cast<std::uint64_t>(module)));
+	return std::string(slash ? slash + 1 : name) + at;
+}
+
+void DevEnvironment() {
+	Dev("settings: enabled %d uniques %d sets %d runewords %d antiperfect %d thickness %d color %d,%d,%d anti %d,%d,%d", Config.enabled, Config.uniques, Config.sets, Config.runewords,
+	    Config.antiperfect, Config.thickness, Config.colorRgb[0], Config.colorRgb[1], Config.colorRgb[2], Config.antiRgb[0], Config.antiRgb[1], Config.antiRgb[2]);
+	Dev("tooltip text pointer -> %s, comparison pointer -> %s, item details %s", ModuleAt(Field<std::uint64_t>(reinterpret_cast<void*>(Base), Game::TooltipSlot)).c_str(),
+	    ModuleAt(Field<std::uint64_t>(reinterpret_cast<void*>(Base), Game::CompareSlot)).c_str(), D2RL::HasItemServiceField(ItemApi, D2RL::ItemServiceDetailsFieldEnd) && ItemApi->getItemDetails ? "yes" : "no");
+	const auto* draw = reinterpret_cast<const unsigned char*>(Base + Game::PanelDraw);
+	Dev("tooltip panel draw starts %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X", draw[0], draw[1], draw[2], draw[3], draw[4], draw[5], draw[6], draw[7], draw[8],
+	    draw[9], draw[10], draw[11], draw[12], draw[13]);
+	HMODULE modules[512];
+	DWORD   needed = 0;
+	if (K32EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed)) {
+		std::string names;
+		for (DWORD i = 0; i < needed / sizeof(HMODULE) && i < 512; ++i) {
+			char name[MAX_PATH] {};
+			if (!K32GetModuleBaseNameA(GetCurrentProcess(), modules[i], name, sizeof(name))) continue;
+			if (_strnicmp(name, "d2rl", 4) && _strnicmp(name, "aaa-", 4) && _stricmp(name, "D2RCore.dll")) continue;
+			names += std::string(names.empty() ? "" : ", ") + name;
+		}
+		Dev("loaded plugins: %s", names.c_str());
+	}
+}
+
 void __cdecl BuildTables(const D2RL::PluginContext*, void*) noexcept {
 	if (Ready) return;
 	Tables::TableView props, items, uniques, sets, runes;
@@ -413,6 +473,7 @@ void __cdecl BuildTables(const D2RL::PluginContext*, void*) noexcept {
 		Say(true, "Perfect Frame: no Runes table; runewords are not framed");
 	Ready = true;
 	Say(false, "Perfect Frame: %zu uniques, %zu set items, %zu runewords read", Uniques.size(), Sets.size(), Runewords.size());
+	DevEnvironment();
 }
 
 // ---- perfect check (UI thread) ----
@@ -677,6 +738,8 @@ void __cdecl OnTooltip(const D2RL::PluginContext*, Events::ItemTooltipEvent* eve
 	Items::ItemInfo info { .structSize = Items::ItemInfoSize };
 	if (ItemApi->getItemInfo(Context, event->item, &info) != Items::Result::Success) return;
 	Verdict         verdict = Judge(info);
+	Dev("tooltip event: item id %u code %.4s quality %u row %d ilvl %u flags %08X sockets %u/%u -> mark %u: %s", info.runtimeId, reinterpret_cast<const char*>(&info.code),
+	    static_cast<unsigned>(info.quality), info.qualityRecordId, info.itemLevel, info.stateFlags, info.socketedItemCount, info.socketCount, verdict.Mark(), verdict.why.c_str());
 	std::lock_guard guard(FrameLock);
 	LastVerdict = std::move(verdict.why);
 	Pending.push_back(verdict.Mark());
@@ -814,12 +877,15 @@ int Recent(const GameString* built, std::uint64_t now) {
 
 void TellCompared(const char* how, const std::string& why) {
 	LastCompared = std::string(how) + ": " + why;
+	Dev("judged %s", LastCompared.c_str());
 	static int told = 0;
-	if (told < 8) {
+	if (told < 8 && false) {
 		++told;
 		Say(false, "Perfect Frame: compared %s", LastCompared.c_str());
 	}
 }
+
+std::string Printable(std::string_view text, std::size_t most);
 
 GameString* HookCompared(GameString* out, int bodyLocation) noexcept {
 	++CompareDepth;
@@ -867,6 +933,8 @@ GameString* HookTooltip(GameString* out, void* unit, void* other, void* item, st
 		if (Recent(built, now) >= 0) return built;
 	}
 	Verdict         verdict = JudgeUnit(item);
+	Dev("item text built: item id %u, %llu bytes \"%s\" -> mark %u", Field<std::uint32_t>(item, Game::UnitId), static_cast<unsigned long long>(TextOf(built).size()),
+	    Printable(TextOf(built), 200).c_str(), verdict.Mark());
 	std::lock_guard guard(FrameLock);
 	Remember(built, verdict.Mark(), now);
 	TellCompared("item text", verdict.why);
@@ -881,10 +949,14 @@ std::string_view BoxText(const unsigned char* box) {
 // other), and its verdict, else -1.
 // The same text first: a hovered item and its compared copy can hold each
 // other's lines. A match keeps the text remembered while its box shows.
+std::string BuiltHow; // how the last BuiltVerdict matched (dev log)
 int BuiltVerdict(std::string_view box, std::uint64_t now) {
+	BuiltHow = "no text";
 	if (box.empty()) return -1;
+	BuiltHow = "same text";
 	for (auto it = BuiltTexts.rbegin(); it != BuiltTexts.rend(); ++it)
 		if (box == it->text) return it->at = now, it->mark;
+	BuiltHow = "one text holds the other";
 	for (auto it = BuiltTexts.rbegin(); it != BuiltTexts.rend(); ++it) {
 		const std::string_view text = it->text;
 		if ((text.size() >= 16 && box.find(text) != std::string_view::npos) || (box.size() >= 16 && text.find(box) != std::string_view::npos)) return it->at = now, it->mark;
@@ -910,6 +982,9 @@ int BuiltVerdict(std::string_view box, std::uint64_t now) {
 		const double score = lines ? static_cast<double>(held) / static_cast<double>(lines) : 0;
 		if (score > bestScore) best = &*it, bestScore = score;
 	}
+	char how[160];
+	std::snprintf(how, sizeof(how), "%s lines, best %.0f%% of %zu built texts", best && bestScore >= 0.6 ? "most" : "too few", bestScore * 100, BuiltTexts.size());
+	BuiltHow = how;
 	if (best && bestScore >= 0.6) return best->at = now, best->mark;
 	return -1;
 }
@@ -970,6 +1045,7 @@ void HookPanelDraw(void* panel) noexcept {
 		return;
 	}
 	std::vector<std::uint8_t> frames;
+	std::vector<std::string>  Sources; // where each box's mark came from (dev log)
 	{
 		std::lock_guard guard(FrameLock);
 		const std::uint64_t hash = TextHash(boxes);
@@ -986,8 +1062,11 @@ void HookPanelDraw(void* panel) noexcept {
 		// like the compared ones, else the tooltip event (which can name the
 		// compared item first when the game compares).
 		const std::uint64_t now = GetTickCount64();
+		Sources.assign(count, std::string());
+		const std::uint8_t fromEvent = frames[0];
 		const int hovered = BuiltVerdict(BoxText(boxes), now);
 		if (hovered >= 0) frames[0] = static_cast<std::uint8_t>(hovered);
+		Sources[0] = (hovered >= 0 ? "built text (" + BuiltHow + ")" : "tooltip event " + std::to_string(fromEvent) + " (" + BuiltHow + ")") + (panel == ShownPanel ? "" : ", other panel");
 		if (count > 1 && ToldHovered < 4) {
 			++ToldHovered;
 			const std::string_view text = BoxText(boxes);
@@ -1009,12 +1088,28 @@ void HookPanelDraw(void* panel) noexcept {
 			const int              verdict = BuiltVerdict(text, now);
 			if (verdict >= 0) frames[i] = static_cast<std::uint8_t>(verdict);
 			else if (i - 1 < ShownCompare.size()) frames[i] = ShownCompare[i - 1];
+			Sources[i] = verdict >= 0 ? "built text (" + BuiltHow + ")" : i - 1 < ShownCompare.size() ? "compare order (" + BuiltHow + ")" : "nothing (" + BuiltHow + ")";
 			if (ToldBoxes < 4) {
 				++ToldBoxes;
 				Say(false, "Perfect Frame: box %llu of %llu (%llu bytes \"%s\"): %s, frame %s", static_cast<unsigned long long>(i), static_cast<unsigned long long>(count),
 				    static_cast<unsigned long long>(text.size()), Printable(text, 60).c_str(), verdict >= 0 ? "matches a built text" : "matched by order", frames[i] ? "yes" : "no");
 			}
 		}
+	}
+	{
+		std::string summary;
+		for (std::uint64_t i = 0; i < count && i < frames.size(); ++i) {
+			const unsigned char*   box  = boxes + i * Game::BoxSize;
+			const std::string_view text = BoxText(box);
+			char                   line[700];
+			std::snprintf(line, sizeof(line), " | box %llu: mark %u from %s, rect %d,%d %dx%d, header %llu, %llu bytes \"%s\"", static_cast<unsigned long long>(i), frames[i],
+			    i < Sources.size() ? Sources[i].c_str() : "?", Field<std::int32_t>(box, Game::BoxRect), Field<std::int32_t>(box, Game::BoxRect + 4), Field<std::int32_t>(box, Game::BoxRect + 8),
+			    Field<std::int32_t>(box, Game::BoxRect + 12), static_cast<unsigned long long>(Field<std::uint64_t>(box, Game::BoxHeaderSize)), static_cast<unsigned long long>(text.size()),
+			    Printable(text, 300).c_str());
+			summary += line;
+		}
+		Dev("panel %p draws %llu boxes (frames %s, worst frame %s, cycling %d/%d)%s", panel, static_cast<unsigned long long>(count), Config.enabled ? "on" : "off",
+		    Config.antiperfect ? "on" : "off", one, side, summary.c_str());
 	}
 	if (!Config.enabled) return;
 	const int thickness = Thickness();
