@@ -1057,15 +1057,28 @@ bool EnsureOverlayFiles() noexcept {
 		std::snprintf(reinterpret_cast<char*>(entry), 0x30, "shrine_icon_%s", icon.key);
 		std::snprintf(reinterpret_cast<char*>(entry + 0x30), 0x30, "%s", folder.c_str());
 	};
-	if (files && files == OwnFiles && count == total) {
-		// Ours already: only a new generation changes the folders.
+	if (files && count == total) {
+		// Ours, or the game's list built from the padded overlay table (its
+		// rows for the plugin's overlays name shrine_skill): the entries are
+		// written in place, again only when a new generation changes the folder.
+		bool changed = false;
 		for (std::size_t i = 0; i < Icons.size(); ++i) {
 			auto* entry = files + (FirstRow + i) * OverlayFileSize;
-			if (std::strncmp(reinterpret_cast<const char*>(entry + 0x30), folder.c_str(), 0x30) != 0) write(entry, Icons[i]);
+			if (std::strncmp(reinterpret_cast<const char*>(entry), "shrine_icon_", 12) != 0 ||
+			    std::strncmp(reinterpret_cast<const char*>(entry + 0x30), folder.c_str(), 0x30) != 0)
+				write(entry, Icons[i]), changed = true;
+		}
+		if (changed && files != OwnFiles) {
+			OwnFiles = files;
+			Log(false, "overlay file list: the plugin's entries written at %d-%d (%s)", FirstRow, FirstRow + static_cast<int>(Icons.size()) - 1, folder.c_str());
 		}
 		return true;
 	}
-	if (!files || count == 0 || count > static_cast<std::uint64_t>(FirstRow)) return false; // not built yet, or not the table we know
+	if (!files || count == 0 || count > static_cast<std::uint64_t>(FirstRow)) {
+		static bool told = false;
+		if (!told) told = true, Log(true, "overlay file list has %llu entries, expected up to %d or %llu: no floating symbols", static_cast<unsigned long long>(count), FirstRow, static_cast<unsigned long long>(total));
+		return false;
+	}
 	// shrine_skill's entry fills the rows this version's data never names.
 	const std::uint8_t* skill = nullptr;
 	for (std::uint64_t i = 0; i < count && !skill; ++i)
