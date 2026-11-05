@@ -79,7 +79,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shrine-icons";
-constexpr const char* PluginVersion = "1.0.1-dev-10";
+constexpr const char* PluginVersion = "1.0.2-dev-11";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -174,6 +174,8 @@ struct Icon {
 	double        fit;     // scale that brings the model to the size of the booster symbols
 	bool          upright; // lies flat on the ground: turned a quarter turn about X
 	bool          symbol;  // false: minimap icon only
+	int           mesh = 0;           // built-in mesh (resource id) used instead of lod0
+	const char*   bounds = nullptr;   // model whose bounds the copy takes instead of `model`
 };
 
 std::array<Icon, 9> Icons { {
@@ -184,7 +186,11 @@ std::array<Icon, 9> Icons { {
 	{ "health", 2, 1335, "data/hd/items/misc/potion/full_healing_potion/full_healing_potion.model", "full_healing_potion_lod0.model", "misc_full_healing_potion_alb.texture", 1.1, false, false },
 	{ "mana", 3, 1358, "data/hd/items/misc/potion/full_mana_potion/full_mana_potion.model", "full_mana_potion_lod0.model", "misc_full_mana_potion_alb.texture", 1.1, false, false },
 	{ "portal", 17, 1359, "data/hd/items/misc/scroll/town_portal_scroll/town_portal_scroll.model", "town_portal_scroll_lod0.model", "misc_town_portal_scroll_alb.texture", 0.6, true, true },
-	{ "gem", 18, 1369, "data/hd/items/misc/gem/perfect_amethyst/perfect_amethyst.model", "perfect_amethyst_lod0.model", "misc_perfect_amethyst_alb.texture", 1.85, false, true },
+	{ "gem", 18, 1369, "data/hd/items/misc/gem/perfect_amethyst/perfect_amethyst.model", "perfect_amethyst_lod0.model", "misc_perfect_amethyst_alb.texture", 1.85, false, true,
+	  // Built lying down; the effect ignores the overlay's orientation, so the
+	  // mesh itself is turned (tools_turn_model.py): tip down, top to the camera.
+	  // The Skill Shrine symbol's bounds hold the turned gem.
+	  201, "data/hd/vfx/meshes/lit_mesh/shrine_skill/shrine_skill.model" },
 	{ "fire", 19, 1386, "data/hd/vfx/meshes/missiles/firehead/firehead.model", "firehead_lod0.model", "firehead_alb.texture", 1.0, false, true },
 	{ "monster", 20, 1387, "data/hd/items/misc/gem/perfect_skull/perfect_skull.model", "perfect_skull_lod0.model", "misc_perfect_skull_alb.texture", 1.6, false, true },
 	{ "exploding", 21, 1388, "data/hd/vfx/meshes/missiles/firehead/firehead.model", "firehead_lod0.model", "firehead_alb.texture", 1.0, false, true },
@@ -645,7 +651,7 @@ void HashModels() noexcept {
 		char path[96] {};
 		std::snprintf(path, sizeof(path), "data/hd/vfx/meshes/lit_mesh/d2rloader/shrine-icons/%02u.model", Icons[i].code);
 		CopyHash[i] = PathHash(path);
-		ItemHash[i] = PathHash(Icons[i].model);
+		ItemHash[i] = PathHash(Icons[i].bounds ? Icons[i].bounds : Icons[i].model);
 	}
 }
 
@@ -891,6 +897,8 @@ bool ReplaceString(std::string& blob, const std::string& from, const std::string
 	return true;
 }
 
+std::string_view ResourceData(int id) noexcept;
+
 // The effects, meshes and textures, read from the game once. Game thread.
 bool RegisterSymbolFiles() {
 	const std::string effect = GameFile("data/hd/vfx/particles/overlays/common/shrine_skill/vfx_shrine_skill_looping.particles");
@@ -910,7 +918,7 @@ bool RegisterSymbolFiles() {
 		}
 		const std::string folder = Folder(icon.model);
 		all = Register(Format("data/hd/vfx/particles/overlays/%s/%s.particles", NameSpace, icon.key), blob)
-		      && Register(MeshPath(icon, "_lod0.model"), GameFile(folder + icon.lod0))
+		      && Register(MeshPath(icon, "_lod0.model"), icon.mesh ? std::string(ResourceData(icon.mesh)) : GameFile(folder + icon.lod0))
 		      && Register(MeshPath(icon, "_alb.texture"), GameFile(folder + icon.albedo)) && all;
 	}
 	return all;
@@ -1109,15 +1117,17 @@ bool PatchPathCalls() noexcept {
 // u16 width, u16 height, RGBA (tools_make_minimap.py).
 constexpr int CellsResource = 200;
 
-std::string_view CellsData() noexcept {
+std::string_view ResourceData(int id) noexcept {
 	HMODULE module = nullptr;
-	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&CellsData), &module)) return {};
-	HRSRC info = FindResourceW(module, MAKEINTRESOURCEW(CellsResource), MAKEINTRESOURCEW(10)); // RT_RCDATA
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&ResourceData), &module)) return {};
+	HRSRC info = FindResourceW(module, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10)); // RT_RCDATA
 	if (!info) return {};
 	HGLOBAL data = LoadResource(module, info);
 	const auto* bytes = data ? static_cast<const char*>(LockResource(data)) : nullptr;
 	return bytes ? std::string_view(bytes, SizeofResource(module, info)) : std::string_view {};
 }
+
+std::string_view CellsData() noexcept { return ResourceData(CellsResource); }
 
 struct Sheet {
 	std::uint32_t width = 0, height = 0, frames = 0;

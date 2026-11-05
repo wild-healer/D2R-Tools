@@ -62,3 +62,8 @@ is `src/minimap_cells.bin`, built into the DLL;
 (the HD booster icons are rendered from the HD symbol models by
 `tools_render.py`, which reads the Granny `.model` files with `tools_gr2.py`; the
 classic symbols are decoded by `tools_dcc.py`).
+
+The gem symbol's mesh is `src/gem_turned_lod0.model`, also built into the DLL:
+the perfect amethyst is modelled lying down and the symbol effect ignores the
+overlay's orientation, so `python3 tools_turn_model.py <game>/data/hd/items/misc/gem/perfect_amethyst/perfect_amethyst_lod0.model src/gem_turned_lod0.model`
+turns the mesh itself a quarter turn (tip down, top to the camera).

@@ -159,7 +159,11 @@ def bitknit(data, size):
 # ---- container ----
 
 def load(path):
-    d = open(path, 'rb').read()
+    return load_bytes(open(path, 'rb').read())
+
+LAST_STARTS = []
+
+def load_bytes(d):
     ver, fsize, crc, soff, nsec = struct.unpack_from('<5I', d, 0x20)
     rtype = struct.unpack_from('<2I', d, 0x34)
     rnode = struct.unpack_from('<2I', d, 0x3C)
@@ -191,6 +195,7 @@ def load(path):
         for k in range(nrel):
             o, ts, to = struct.unpack_from('<3I', rel, k * 12)
             struct.pack_into('<Q', buf, starts[si] + o, starts[ts] + to + 1)  # +1: 0 stays null
+    LAST_STARTS[:] = starts
     return buf, starts[rtype[0]] + rtype[1], starts[rnode[0]] + rnode[1]
 
 SIZES = {1: None, 2: 8, 3: 12, 4: 12, 5: 16, 7: 20, 8: 8, 9: 68, 10: 4, 11: 1, 12: 1, 13: 1, 14: 1,
@@ -216,6 +221,8 @@ class G:
             out.append((t, name, dfn, arr))
             tp += 44
         return out
+    def size_of(s, t, dfn, arr):
+        return (s.size(dfn) if t == 1 else SIZES[t]) * max(arr, 1)
     def size(s, tp):
         tot = 0
         for t, n, dfn, arr in s.members(tp):
