@@ -27,6 +27,7 @@
 
 #include "i_hate_tomls_client.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdarg>
@@ -67,8 +68,11 @@ constexpr std::uint32_t Code(const char* text) noexcept {
 }
 constexpr std::uint32_t CubeCode = Code("box ");
 
-// Cube grid (inventory.txt "Transmogrify Box") and player inventory grid.
+// Stock cube grid (inventory.txt "Transmogrify Box") and player inventory grid.
+// The badge and mini map layouts are built for the stock 3 x 4 cube; the item
+// pictures follow the cube's real size, read from the game (see CubeGridSize).
 constexpr int CubeWidth = 3, CubeHeight = 4, CubeCells = CubeWidth * CubeHeight;
+constexpr int MaxCubeSide = 16; // larger is taken as a misread
 constexpr int InvWidth = 10, InvHeight = 4;
 constexpr int CubeSize = 2; // the cube is 2 x 2
 constexpr int SpotsX = InvWidth - CubeSize + 1, SpotsY = InvHeight - CubeSize + 1, Spots = SpotsX * SpotsY;
@@ -101,6 +105,19 @@ struct Settings {
 	std::atomic<int>  spriteBackground { 1 }; // FillRect mode of the map's dark back: 0 = 25 %, 1 = 50 %, 2 = 75 %
 } Config;
 bool PicturesOk {}; // the grid draw hook is in place
+
+// Cube size read from the game while drawing the inventory (0 = not read yet).
+std::atomic<int> CubeW {}, CubeH {};
+
+// The badge and mini map are made for a 3 x 4 cube: with another size the
+// pictures stand in for them.
+bool StockCube() noexcept {
+	const int w = CubeW.load(), h = CubeH.load();
+	return !w || (w == CubeWidth && h == CubeHeight);
+}
+bool PicturesOn() noexcept {
+	return PicturesOk && (Config.sprites || ((Config.badge || Config.grid) && !StockCube()));
+}
 
 // The badge also stands in for the pictures when the game hook is missing.
 bool BadgeOn() noexcept {
@@ -422,7 +439,7 @@ D2RL::Inventory::IterationAction __cdecl Collect(const D2RL::PluginContext*, con
 
 View ReadCube() {
 	const bool badge = BadgeOn(), grid = Config.grid;
-	if (!Config.enabled || (!badge && !grid)) return {};
+	if (!Config.enabled || (!badge && !grid) || (PicturesOk && !StockCube())) return {};
 	D2RL::PlayerHandle player {};
 	if (Inventory->getLocalPlayer(Context, &player) != D2RL::Inventory::Result::Success) return {};
 	Scan                              scan;
@@ -531,6 +548,12 @@ auto __cdecl OnUiMessage(const D2RL::PluginContext*, const Events::UiMessageEven
 //   FillRect    0x657820 (x0, y0, x1, y1, r, g, b, mode, 1); mode 0 = 25 %
 //               opaque, 1 = 50 %, 2 = 75 %
 // Local player: 0x8B2D0 () -> index, 0x9A480 (index) -> unit.
+// Cube size: the inventory keeps its grids in a vector at +0x20 (count +0x28)
+// of 32-byte grids: width +0x10, height +0x11, cells +0x18 (item pointers,
+// y * width + x), as Inventory Fill reads the inventory page (index 2). The
+// cube's grid is the one whose cells hold the cube's items; with an empty cube
+// the grid found last is used, else index 5 (page 3 + 2, like the inventory's
+// page 0 at index 2).
 
 struct NativeFn {
 	std::uint64_t rva;
@@ -623,8 +646,45 @@ std::uint32_t CodeOf(void* item) noexcept {
 	return row ? *reinterpret_cast<std::uint32_t*>(row + 0x80) : 0;
 }
 
+constexpr std::size_t InventoryGrids = 0x20, InventoryGridCount = 0x28, GridStride = 0x20, GridWidth = 0x10, GridHeight = 0x11, GridCells = 0x18;
+constexpr std::size_t CubeGridGuess = 5;
+std::size_t           CubeGridIndex = SIZE_MAX; // found from the cube's items, render thread only
+
+struct GridSize {
+	int w = 0, h = 0;
+};
+
+GridSize GridAt(std::uint8_t* grids, std::size_t index, void* const** cells = nullptr) noexcept {
+	const std::uint8_t* grid = grids + index * GridStride;
+	const GridSize      size { grid[GridWidth], grid[GridHeight] };
+	if (size.w < 1 || size.h < 1 || size.w > MaxCubeSide || size.h > MaxCubeSide) return {};
+	if (cells) *cells = *reinterpret_cast<void* const* const*>(grid + GridCells);
+	return size;
+}
+
+GridSize CubeGridSize(void* inventory, const std::vector<void*>& inside) noexcept {
+	auto* const         base  = static_cast<std::uint8_t*>(inventory);
+	auto* const         grids = *reinterpret_cast<std::uint8_t**>(base + InventoryGrids);
+	const std::uint64_t count = *reinterpret_cast<std::uint64_t*>(base + InventoryGridCount);
+	if (!grids || count == 0 || count > 64) return {};
+	for (std::size_t index = 0; !inside.empty() && index < count; ++index) {
+		void* const*   cells = nullptr;
+		const GridSize size  = GridAt(grids, index, &cells);
+		if (!size.w || !cells) continue;
+		bool holds = false;
+		for (int i = 0; !holds && i < size.w * size.h; ++i)
+			holds = cells[i] && std::find(inside.begin(), inside.end(), cells[i]) != inside.end();
+		if (!holds) continue;
+		if (CubeGridIndex != index) Log(false, "cube grid: %dx%d (inventory grid %zu)", size.w, size.h, index);
+		CubeGridIndex = index;
+		return size;
+	}
+	if (CubeGridIndex < count) return GridAt(grids, CubeGridIndex);
+	return CubeGridGuess < count ? GridAt(grids, CubeGridGuess) : GridSize {};
+}
+
 void DrawCubePictures(void* grid) noexcept {
-	if (!Config.enabled || !Config.sprites) return;
+	if (!Config.enabled) return;
 	if (*(static_cast<std::uint8_t*>(grid) + 0x630) != 0) return; // not the inventory page
 	void* owner = At<GridOwnerFn>(0x2A7810)(grid);
 	void* local = At<PlayerUnitFn>(0x09A480)(At<LocalIndexFn>(0x08B2D0)());
@@ -640,7 +700,16 @@ void DrawCubePictures(void* grid) noexcept {
 		if (page == 3) inside.push_back(item);
 		else if (page == 0 && !cube && CodeOf(item) == CubeCode) cube = item;
 	}
-	if (!cube || (inside.empty() && !Config.showEmpty)) return;
+	if (!cube) return;
+	GridSize size = CubeGridSize(inventory, inside);
+	if (!size.w) size = { CubeW.load() ? CubeW.load() : CubeWidth, CubeH.load() ? CubeH.load() : CubeHeight };
+	if (CubeW.exchange(size.w) != size.w || CubeH.exchange(size.h) != size.h) ForceUntil.store(GetTickCount64() + 500);
+	if (!PicturesOn() || (inside.empty() && !Config.showEmpty)) return;
+	const int cubeW = size.w, cubeH = size.h, cells = cubeW * cubeH;
+	// Pitch shrinks so a bigger cube still fits on the 196 x 196 icon.
+	const int pitch = std::min(Pitch, (CubeSize * Cell - 20) / std::max(cubeW, cubeH));
+	const int gap = std::max(2, pitch / 8), tile = pitch - gap;
+	const int mapW = cubeW * pitch - gap, mapH = cubeH * pitch - gap;
 
 	auto**          vtable = *reinterpret_cast<void***>(grid);
 	const auto      cellOf = reinterpret_cast<CellOfFn>(vtable[0xC0 / 8]);
@@ -656,11 +725,11 @@ void DrawCubePictures(void* grid) noexcept {
 	if (!(scale > 0.0f) || cellW <= 0) return;
 	const float unit = scale * cellW / Cell; // screen pixels per layout unit
 	const auto  px   = [&](int units) { return static_cast<int>(units * unit + 0.5f); };
-	const int   left = cubeAt->x + px((CubeSize * Cell - MapWidth) / 2), top = cubeAt->y + px((CubeSize * Cell - MapHeight) / 2);
+	const int   left = cubeAt->x + px((CubeSize * Cell - mapW) / 2), top = cubeAt->y + px((CubeSize * Cell - mapH) / 2);
 
 	const auto fill = At<FillRectFn>(0x657820);
-	fill(left - px(4), top - px(4), left + px(MapWidth + 4), top + px(MapHeight + 4), 0, 0, 0, Config.spriteBackground, 1);
-	std::array<bool, CubeCells> taken {};
+	fill(left - px(4), top - px(4), left + px(mapW + 4), top + px(mapH + 4), 0, 0, 0, Config.spriteBackground, 1);
+	std::vector<bool> taken(cells);
 	for (void* item : inside) {
 		ScreenPos     tmp {};
 		const auto*   at = cellOf(grid, &tmp, item);
@@ -669,21 +738,21 @@ void DrawCubePictures(void* grid) noexcept {
 		if (!at) continue;
 		for (int y = at[1]; y < at[1] + h; ++y)
 			for (int x = at[0]; x < at[0] + w; ++x)
-				if (x >= 0 && x < CubeWidth && y >= 0 && y < CubeHeight) taken[y * CubeWidth + x] = true;
+				if (x >= 0 && x < cubeW && y >= 0 && y < cubeH) taken[y * cubeW + x] = true;
 	}
-	for (int i = 0; i < CubeCells; ++i) {
+	for (int i = 0; i < cells; ++i) {
 		if (taken[i]) continue;
-		const int x = left + px((i % CubeWidth) * Pitch), y = top + px((i / CubeWidth) * Pitch);
-		fill(x, y, x + px(Tile), y + px(Tile), 82, 76, 68, 0, 1);
+		const int x = left + px((i % cubeW) * pitch), y = top + px((i / cubeW) * pitch);
+		fill(x, y, x + px(tile), y + px(tile), 82, 76, 68, 0, 1);
 	}
 	const auto draw = At<DrawItemAtFn>(0x15BB80);
 	for (void* item : inside) {
 		ScreenPos   tmp {};
 		const auto* at = cellOf(grid, &tmp, item);
-		if (!at || at[0] < 0 || at[0] >= CubeWidth || at[1] < 0 || at[1] >= CubeHeight) continue;
-		const std::uint32_t x = left + px(at[0] * Pitch), y = top + px(at[1] * Pitch);
+		if (!at || at[0] < 0 || at[0] >= cubeW || at[1] < 0 || at[1] >= cubeH) continue;
+		const std::uint32_t x = left + px(at[0] * pitch), y = top + px(at[1] * pitch);
 		OptFloat            none {};
-		draw(item, x | static_cast<std::uint64_t>(y) << 32, scale * Pitch / Cell, &none);
+		draw(item, x | static_cast<std::uint64_t>(y) << 32, scale * pitch / Cell, &none);
 	}
 }
 
@@ -787,6 +856,9 @@ enabled = )" + ValueOf("enabled") + R"(
 # "badge": the "7/12" text. "grid": a mini 3x4 map of the cube over its icon,
 # taken cells filled and each item's cells joined, so you see the layout.
 # "both": the map with the badge in its corner.
+# The pictures follow the cube's real size (a mod can make it bigger); the
+# badge and the map are made for the stock 3x4 cube, so with another size the
+# pictures show in their place.
 display = )" + ValueOf("display") + R"(
 
 # Darkness of the box behind the pictures: 25, 50 or 75 (percent).
