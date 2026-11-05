@@ -24,7 +24,8 @@ Tells shrines apart before you walk up to them. One D2RLoader plugin, no mod nee
   function does, as the settings say. A setting change runs it again on every
   shrine the client knows, so it shows at once.
 - The symbols are overlay rows the plugin appends to the game's overlay table
-  (copies of shrine_skill). The HD client asks 0x662A90 for an overlay's file;
+  (copies of shrine_skill). The HD client asks 0x662A90 for an overlay's file (its two
+  calls, 0x1255F8 and 0x7629DA, go through the plugin);
   the plugin answers its rows with OverlayDefinitions of its own, served as
   D2RLoader resources under `.../d2rloader/shrine-icons/`. They float the Skill
   Shrine effect with its mesh swapped for an item model; the effect, meshes and

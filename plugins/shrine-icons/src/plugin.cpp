@@ -18,7 +18,7 @@
 // copy of shrine_skill each; the table is a vector at DataTables+0x1228, rows
 // of 0xE0 bytes, the DataTables of each game version at 0x2A9A580). The HD
 // client asks 0x662A90 for an overlay's file (data/hd/overlays/<folder>/<name>
-// .json); the plugin answers its rows with its own OverlayDefinition, which
+// .json; its two calls go through the plugin); the plugin answers its rows with its own OverlayDefinition, which
 // floats the Skill Shrine effect with its mesh swapped for an item's. The
 // effect, mesh and texture are the game's own files under new names (the effect
 // stores paths as length-prefixed strings, so every new path has the length of
@@ -79,7 +79,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shrine-icons";
-constexpr const char* PluginVersion = "1.0.1-dev-5";
+constexpr const char* PluginVersion = "1.0.1-dev-6";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -145,20 +145,10 @@ constexpr std::size_t    OverlayRowSize = 0xE0;
 constexpr std::uint64_t  NotOwned = 1ull << 63; // capacity flag: the game never frees the rows
 
 // HD overlay file: 0x662A90(registry, string* out, overlay record*), the
-// overlay id at record +4.
-// HD overlay file list (no hook, so plugins that check 0x662A90 still load):
-// the file of overlay id N is "data/hd/overlays" + folder + name + ".json" of
-// entry N of a vector at +0x90 (count +0x98, capacity +0xA0) of the object
-// 0x662610 returns (static at 0x3404430). Entries are 0x60 bytes: name
-// char[0x30], folder char[0x30]; 0x6650F0 fills them from the overlay table.
-constexpr std::uint64_t OverlayFilesRva   = 0x662610;
-constexpr std::uint64_t OverlayFilesObj   = 0x3404430;
-constexpr std::array<std::uint8_t, 13> OverlayFilesBytes { 0x48, 0x83, 0xEC, 0x28, 0x65, 0x48, 0x8B, 0x04, 0x25, 0x58, 0x00, 0x00, 0x00 };
-constexpr std::uint64_t OverlayFileCountRva = 0x662AF1; // cmp rax, [rcx+0x98]
-constexpr std::array<std::uint8_t, 7> OverlayFileCountBytes { 0x48, 0x3B, 0x81, 0x98, 0x00, 0x00, 0x00 };
-constexpr std::uint64_t OverlayFileListRva = 0x662B06; // lea rsi, [rcx+0x90]
-constexpr std::array<std::uint8_t, 7> OverlayFileListBytes { 0x48, 0x8D, 0xB1, 0x90, 0x00, 0x00, 0x00 };
-constexpr std::size_t   OverlayFileSize = 0x60;
+// overlay id at record +4. Its two calls are redirected (the function itself is
+// left alone, so plugins that check its bytes, like LTBL, still load).
+constexpr std::uint64_t OverlayPathRva = 0x662A90;
+constexpr std::array<std::uint64_t, 2> OverlayPathCalls { 0x1255F8, 0x7629DA };
 
 // Automap tile sheets: the tileset loader's sprite load call.
 constexpr std::uint64_t TileLoadCallRva = 0xD4724;
@@ -346,8 +336,6 @@ bool SymbolShown(std::size_t i) noexcept {
 	return Config.enabled && Config.symbols && Icons[i].symbol && IconOn[i] && Overlay[i] >= 0;
 }
 
-bool EnsureOverlayFiles() noexcept;
-
 // Removes the shrine's symbol and shimmer, then adds them again while the
 // shrine is idle and the settings want them: what the booster function does.
 void ShowSymbol(void* unit, std::size_t i) noexcept {
@@ -360,7 +348,7 @@ void ShowSymbol(void* unit, std::size_t i) noexcept {
 	remove(unit, 0, Shimmer00);
 	const bool shown = SymbolShown(i);
 	const auto now   = mode(unit);
-	const bool files = shown && now == 0 && EnsureOverlayFiles();
+	const bool files = shown && now == 0;
 	{
 		// Each shrine's symbol decision, once per unit and outcome (test builds).
 		static std::uint64_t last[64] {};
@@ -1055,65 +1043,59 @@ void AddOverlayRows() noexcept {
 		Overlay[i] = first >= 0 && Icons[i].symbol ? first + static_cast<std::int32_t>(i) : -1;
 }
 
-// The plugin's entries in the game's overlay file list, added again whenever
-// the game rebuilds the list; the folder carries the definitions' generation.
-std::uint8_t* OwnFiles     = nullptr;
-std::uint64_t OwnFilesSize = 0;
+using OverlayPathFn = void* (*)(void* registry, void* out, const void* record) noexcept;
 
-bool EnsureOverlayFiles() noexcept {
-	if (FirstRow < 0 || Registered == ~0u) return false;
-	auto*               list  = reinterpret_cast<std::uint8_t*>(Base + OverlayFilesObj + 0x90);
-	auto*               files = *reinterpret_cast<std::uint8_t**>(list);
-	const std::uint64_t count = *reinterpret_cast<std::uint64_t*>(list + 8);
-	const std::uint64_t total = static_cast<std::uint64_t>(FirstRow) + Icons.size();
-	const std::string   folder = Format("/%s/%u/", NameSpace, Registered);
-	const auto write = [&](std::uint8_t* entry, const Icon& icon) {
-		std::memset(entry, 0, OverlayFileSize);
-		std::snprintf(reinterpret_cast<char*>(entry), 0x30, "shrine_icon_%s", icon.key);
-		std::snprintf(reinterpret_cast<char*>(entry + 0x30), 0x30, "%s", folder.c_str());
-	};
-	if (files && count == total) {
-		// Ours, or the game's list built from the padded overlay table (its
-		// rows for the plugin's overlays name shrine_skill): the entries are
-		// written in place, again only when a new generation changes the folder.
-		bool changed = false;
-		for (std::size_t i = 0; i < Icons.size(); ++i) {
-			auto* entry = files + (FirstRow + i) * OverlayFileSize;
-			if (std::strncmp(reinterpret_cast<const char*>(entry), "shrine_icon_", 12) != 0 ||
-			    std::strncmp(reinterpret_cast<const char*>(entry + 0x30), folder.c_str(), 0x30) != 0)
-				write(entry, Icons[i]), changed = true;
+// The HD file of an overlay: the plugin's definition for its own rows.
+void* HookOverlayPath(void* registry, void* out, const void* record) noexcept {
+	const std::int32_t id = record ? *reinterpret_cast<const std::int32_t*>(static_cast<const std::uint8_t*>(record) + 4) : -1;
+	if (FirstRow >= 0 && id >= FirstRow && id < FirstRow + static_cast<std::int32_t>(Icons.size()) && out && Registered != ~0u) {
+		const std::string path = DefinitionPath(Icons[static_cast<std::size_t>(id - FirstRow)], Registered);
+		if (path.size() < 0x9A) {
+			// The game's string: text, length, capacity (inline, 0x9A bytes at +0x18).
+			auto* string = static_cast<std::uint8_t*>(out);
+			auto* text   = string + 0x18;
+			std::memcpy(text, path.c_str(), path.size() + 1);
+			const std::uint64_t length = path.size(), capacity = 0x800000000000009AULL;
+			std::memcpy(string, &text, 8);
+			std::memcpy(string + 8, &length, 8);
+			std::memcpy(string + 0x10, &capacity, 8);
+			return out;
 		}
-		if (changed && files != OwnFiles) {
-			OwnFiles = files;
-			Log(false, "overlay file list: the plugin's entries written at %d-%d (%s)", FirstRow, FirstRow + static_cast<int>(Icons.size()) - 1, folder.c_str());
-		}
-		return true;
 	}
-	if (!files || count == 0 || count > static_cast<std::uint64_t>(FirstRow)) {
-		static bool told = false;
-		if (!told) told = true, Log(true, "overlay file list has %llu entries, expected up to %d or %llu: no floating symbols", static_cast<unsigned long long>(count), FirstRow, static_cast<unsigned long long>(total));
-		return false;
+	return reinterpret_cast<OverlayPathFn>(Base + OverlayPathRva)(registry, out, record);
+}
+
+// A jump to HookOverlayPath near each call (written before the page is sealed).
+std::array<std::uint8_t*, OverlayPathCalls.size()> PathStubs {};
+
+bool BuildPathStubs() noexcept {
+	for (std::size_t i = 0; i < OverlayPathCalls.size(); ++i) {
+		std::uint8_t code[5] {};
+		std::int32_t rel = 0;
+		if (!Read(Base + OverlayPathCalls[i], code, sizeof(code)) || code[0] != 0xE8) return false;
+		std::memcpy(&rel, code + 1, 4);
+		if (OverlayPathCalls[i] + 5 + rel != OverlayPathRva) return false;
+		auto* stub = NewStub(16);
+		if (!stub) return false;
+		const auto target = reinterpret_cast<std::uint64_t>(&HookOverlayPath);
+		const std::uint8_t jump[6] { 0xFF, 0x25, 0, 0, 0, 0 }; // jmp [rip]
+		std::memcpy(stub, jump, 6);
+		std::memcpy(stub + 6, &target, 8);
+		PathStubs[i] = stub;
 	}
-	// shrine_skill's entry fills the rows this version's data never names.
-	const std::uint8_t* skill = nullptr;
-	for (std::uint64_t i = 0; i < count && !skill; ++i)
-		if (std::strncmp(reinterpret_cast<const char*>(files + i * OverlayFileSize), "shrine_skill", 0x30) == 0) skill = files + i * OverlayFileSize;
-	if (!skill) skill = files;
-	auto* own = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, total * OverlayFileSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-	if (!own) return false;
-	std::memcpy(own, files, count * OverlayFileSize);
-	for (std::uint64_t i = count; i < static_cast<std::uint64_t>(FirstRow); ++i)
-		std::memcpy(own + i * OverlayFileSize, skill, OverlayFileSize);
-	for (std::size_t i = 0; i < Icons.size(); ++i)
-		write(own + (FirstRow + i) * OverlayFileSize, Icons[i]);
-	// The old buffer stays the game's (it frees it when it rebuilds the list);
-	// the capacity flag keeps the game from freeing ours.
-	*reinterpret_cast<std::uint64_t*>(list + 0x10) = total | NotOwned;
-	*reinterpret_cast<std::uint8_t**>(list)        = own;
-	*reinterpret_cast<std::uint64_t*>(list + 8)    = total;
-	OwnFiles     = own;
-	OwnFilesSize = total;
-	Log(false, "overlay file list: %llu entries, the plugin's at %d-%d", static_cast<unsigned long long>(count), FirstRow, FirstRow + static_cast<int>(Icons.size()) - 1);
+	return true;
+}
+
+bool PatchPathCalls() noexcept {
+	for (std::size_t i = 0; i < OverlayPathCalls.size(); ++i) {
+		const std::uintptr_t site = Base + OverlayPathCalls[i];
+		std::int32_t         from = static_cast<std::int32_t>(OverlayPathRva - (OverlayPathCalls[i] + 5)), to = 0;
+		if (!PathStubs[i] || !Rel32(site, PathStubs[i], to)) return false;
+		std::uint8_t expected[5] { 0xE8 }, call[5] { 0xE8 };
+		std::memcpy(expected + 1, &from, 4);
+		std::memcpy(call + 1, &to, 4);
+		if (!Patch(OverlayPathCalls[i], expected, call, 5)) return false;
+	}
 	return true;
 }
 
@@ -1369,7 +1351,6 @@ void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::D
 		if (!FilesReady) FilesReady = RegisterSymbolFiles();
 		RegisterDefinitions();
 		if (FilesReady) AddOverlayRows();
-		EnsureOverlayFiles();
 	}
 	if (OriginalAddCell) PrepareSheets();
 	QueueFlush();
@@ -1712,7 +1693,6 @@ bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint3
 	SaveConfig();
 	RegisterDefinitions();
 	QueueFlush();
-	EnsureOverlayFiles();
 	UpdateRemap();
 	RefreshSymbols();
 	return true;
@@ -1768,9 +1748,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		    !OriginalFindModelDesc) {
 			Log(true, "Shrine Icons %s: no floating symbols, the game's model table code is not the one this version knows", PluginVersion);
 			OriginalFindModelDesc = nullptr;
-		} else if (!CodeIs(OverlayFilesRva, OverlayFilesBytes.data(), OverlayFilesBytes.size()) || !CodeIs(OverlayFileCountRva, OverlayFileCountBytes.data(), OverlayFileCountBytes.size())
-		           || !CodeIs(OverlayFileListRva, OverlayFileListBytes.data(), OverlayFileListBytes.size())) {
-			Log(true, "Shrine Icons %s: no floating symbols, the game's overlay file list is not the one this version knows", PluginVersion);
+		} else if (!BuildPathStubs()) {
+			Log(true, "Shrine Icons %s: no floating symbols, the game's overlay file code is not the one this version knows", PluginVersion);
 		} else if (!PatchTable()) {
 			Log(true, "Shrine Icons %s: no floating symbols, could not change the shrine table", PluginVersion);
 		} else {
@@ -1782,7 +1761,14 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!minimap) OriginalAddCell = nullptr;
 	const bool tileStub = minimap && BuildTileStub();
 	const bool drawStub = minimap && BuildDrawStub();
-	if (minimap && SealStubs()) {
+	const bool sealed = SealStubs();
+	if (SymbolsReady && !(sealed && PatchPathCalls())) {
+		// The table already points at Appear: its symbols would show nothing, so
+		// none are added.
+		SymbolsReady = false;
+		Log(true, "Shrine Icons %s: no floating symbols, could not redirect the overlay file calls", PluginVersion);
+	}
+	if (minimap && sealed) {
 		minimap     = tileStub && PatchTileLoad();
 		RemapActive = minimap && drawStub && PositionCallsMatch() && PatchDraw();
 	} else {
