@@ -69,7 +69,7 @@ BOOSTER_HD = [  # (model, albedo, tint) under LIT; None = drawn another way
     ('shrine_resist_poison/shrine_resist_poison_lod0.model', 'shrine_resist_poison/shrine_resist_poison_alb.texture', (120, 230, 90)),
     ('shrine_skill/shrine_skill_lod0.model', 'shrine_skill/shrine_skill_alb.texture', (255, 225, 150)),
     None,  # mana recharge
-    ('shrine_stamina/shrine_stamina_lod0.model', 'shrine_stamina/shrine_stamina_alb.texture', (255, 225, 150), 90),  # seen from the side, as in game
+    ('shrine_stamina/shrine_stamina_lod0.model', 'shrine_stamina/shrine_stamina_alb.texture', (255, 225, 150), -90),  # seen from its left side, as in game
     ('shrine_experience/shrine_experience_lod0.model', 'shrine_experience/shrine_experience_alb.texture', 'cross'),
 ]
 
@@ -102,16 +102,16 @@ def flame(size, inner, outer, core):
     return np.dstack([colour, mask])
 
 def in_flame(ball, inner, outer, core, size=200):
-    """`ball` (a 200 px symbol) shrunk into the foot of a flame."""
+    """`ball` (a 200 px symbol) shrunk into the foot of a flame that is taller
+    and narrower than the square it was drawn in, the flame 30% see-through."""
+    width, height = int(size * 0.75), int(size * 1.3)
+    out = np.asarray(rgba(flame(size, inner, outer, core)).resize((width, height), Image.LANCZOS)).astype(float) / 255
+    out[..., 3] *= 0.7
+    flames = Image.new('RGBA', (size, height))
+    flames.alpha_composite(rgba(out), ((size - width) // 2, 0))
     small = ball.resize((int(size * 0.58), int(size * 0.58)), Image.LANCZOS)
-    canvas = Image.new('RGBA', (size, size))
-    canvas.alpha_composite(small, ((size - small.width) // 2, 80))
-    front = np.asarray(canvas).astype(float) / 255
-    out = flame(size, inner, outer, core)
-    a = front[..., 3:4]
-    out[..., :3] = front[..., :3] * a + out[..., :3] * (1 - a)
-    out[..., 3] = np.maximum(out[..., 3], front[..., 3])
-    return rgba(out)
+    flames.alpha_composite(small, ((size - small.width) // 2, height - small.height - 4))
+    return flames
 
 def hd_symbol(index):
     """The HD floating symbol of booster shrine `index` (code order), 200 px."""
