@@ -40,7 +40,7 @@
 namespace {
 
 constexpr const char* PluginId      = "hud-cast";
-constexpr const char* PluginVersion = "0.0.1";
+constexpr const char* PluginVersion = "0.0.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -218,6 +218,57 @@ int HookOverUi(int* x, int* y) noexcept {
 	if (!through) return over;
 	if (UiReady()) CursorWorld(x, y);
 	return 0;
+}
+
+// ---- diagnostics (0.0.2): who stops a click over the bar ----
+
+// SetHandled 0x843FC0: void (), sets UI manager (global D2R+0x3440170) +0xB8 = 1.
+constexpr std::uint64_t SetHandledRva = 0x843FC0;
+constexpr std::array<std::uint8_t, 20> SetHandledBytes { 0x48, 0x8B, 0x05, 0xA9, 0xC1, 0xBF, 0x02, 0x48, 0x85, 0xC0, 0x74, 0x07, 0xC6, 0x80, 0xB8, 0x00, 0x00, 0x00, 0x01, 0xC3 };
+constexpr std::uint64_t UiManagerGlobalRva = 0x3440170;
+// UI mouse-down handlers: bool (MouseMessage*), true = the UI took the click.
+constexpr std::uint64_t UiLeftDownRva  = 0x83FCC0;
+constexpr std::uint64_t UiRightDownRva = 0x840120;
+constexpr std::array<std::uint8_t, 14> UiDownBytes { 0x48, 0x89, 0x74, 0x24, 0x20, 0x55, 0x48, 0x8D, 0xAC, 0x24, 0xE0, 0xFD, 0xFF, 0xFF };
+using UiDownFn = bool (*)(void* message) noexcept;
+UiDownFn UiLeftDown {}, UiRightDown {};
+thread_local std::uintptr_t HandledBy {};
+std::atomic<int> ClickLogs {};
+
+void SetHandledHook() noexcept {
+	HandledBy = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+	std::uint8_t* manager = *reinterpret_cast<std::uint8_t**>(Base + UiManagerGlobalRva);
+	if (manager) manager[0xB8] = 1;
+}
+
+bool LogClick(const char* side, UiDownFn original, void* message) noexcept {
+	HandledBy = 0;
+	const bool taken = original(message);
+	if (!Config.logParts.load(std::memory_order_relaxed) || ClickLogs.load() >= 40) return taken;
+	void* const hovered = HoveredWidget();
+	if (!hovered || !InHud(hovered)) return taken;
+	++ClickLogs;
+	try {
+		const std::string name = NameOf(hovered);
+		Log(false, "%s click over %s: %s%s", side, name.c_str(), taken ? "taken by the UI" : "passed to the game",
+		    taken && HandledBy ? (" (set at D2R+0x" + [] (std::uintptr_t a) { char t[32]; std::snprintf(t, sizeof(t), "%llX", static_cast<unsigned long long>(a)); return std::string(t); }(HandledBy - Base) + ")").c_str() : "");
+	} catch (...) {
+	}
+	return taken;
+}
+bool HookUiLeftDown(void* message) noexcept { return LogClick("left", UiLeftDown, message); }
+bool HookUiRightDown(void* message) noexcept { return LogClick("right", UiRightDown, message); }
+
+void InstallDiagnostics() noexcept {
+	if (CodeMatches(SetHandledRva, SetHandledBytes)) {
+		std::array<std::uint8_t, 12> jump { 0x48, 0xB8 };
+		const auto target = reinterpret_cast<std::uint64_t>(&SetHandledHook);
+		std::memcpy(jump.data() + 2, &target, sizeof(target));
+		jump[10] = 0xFF, jump[11] = 0xE0;
+		if (!Context->PatchBytes(SetHandledRva, SetHandledBytes.data(), 12, jump.data(), 12)) Log(true, "diag: could not patch SetHandled");
+	}
+	if (!Context->InstallInlineHook(UiLeftDownRva, UiDownBytes.data(), 14, &HookUiLeftDown, &UiLeftDown) || !UiLeftDown) Log(true, "diag: no left click hook");
+	if (!Context->InstallInlineHook(UiRightDownRva, UiDownBytes.data(), 14, &HookUiRightDown, &UiRightDown) || !UiRightDown) Log(true, "diag: no right click hook");
 }
 
 // The rel32 call has to land in the game image: the stub goes in 16 bytes of int3 padding.
@@ -399,6 +450,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		return true;
 	}
 	CatcherPatched = RedirectCatcherHover();
+	InstallDiagnostics();
 	if (!CatcherPatched) Log(true, "could not patch D2R+0x%llX: clicks on the bar stay stopped", static_cast<unsigned long long>(CatcherHoverCallRva));
 	if (!context->InstallInlineHook(OverUiRva, OverUiBytes.data(), static_cast<std::uint32_t>(OverUiBytes.size()), &HookOverUi, &OverUi) || !OverUi) {
 		Log(true, "could not hook D2R+0x%llX: held casts still stop over the bar", static_cast<unsigned long long>(OverUiRva));
