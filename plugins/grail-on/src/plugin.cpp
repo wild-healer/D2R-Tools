@@ -114,7 +114,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.1.5";
+constexpr const char* PluginVersion = "1.2.0";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -175,6 +175,7 @@ constexpr int HeaderRows = 1;
 constexpr int HeaderLeft = GridLeft + Cell + 20, HeaderWidth = 14 * Cell - 40;
 // The settings page's sizes.
 constexpr int TabWidth = 290, TabGap = 20; // the settings' page tabs
+constexpr int ExclInputWidth = 1220 - 56 - 20, ExclRowHeight = 46, ExclIndent = 44, ExclMark = 36; // the Loot page's exclusions list
 constexpr int ObjInputWidth = 1220 - 56 - 20; // the objectives page's text box: the table less the + button
 constexpr int DropWidth = 610, MiscDrop = 260, DropHeight = 56, SmallBox = 64, ResetBox = 120, AxisWidth = 30 + 2 * SmallBox + 100 + 20, TileHeight = 52, TableLabel = 300, TableColumn = 230, TableRow = 72, TableWidth = TableLabel + 4 * TableColumn;
 int           LineHeight = 4; // the section divider's, once made
@@ -190,8 +191,9 @@ constexpr int StatsView    = -2; // and while the stats are (empty for now); the
 // The menus: the stats, unique weapons, unique armor and accessories, their
 // ethereal copies (the same categories, eth tiles only), sets, runewords and
 // the settings.
-constexpr const char* Menus[] { "Stats", "Unique Weapons", "Unique Armor & Misc", "Ethereal Weapons", "Ethereal Armor", "Sets", "Runewords", "Misc", "Objectives", "Config" };
-constexpr int StatsMenu = 0, WeaponMenu = 1, ArmorMenu = 2, EthWeaponMenu = 3, EthArmorMenu = 4, SetMenu = 5, RunewordMenu = 6, MiscMenu = 7, ObjMenu = 8, ConfigMenu = 9;
+constexpr const char* Menus[] { "Stats", "Unique Weapons", "Unique Armor & Misc", "Ethereal Weapons", "Ethereal Armor", "Sets", "Runewords", "Misc", "Objectives", "Lost items", "Config" };
+constexpr int StatsMenu = 0, WeaponMenu = 1, ArmorMenu = 2, EthWeaponMenu = 3, EthArmorMenu = 4, SetMenu = 5, RunewordMenu = 6, MiscMenu = 7, ObjMenu = 8, LostMenu = 9, ConfigMenu = 10;
+std::map<std::uint32_t, int> LostOf; // lost records' fingerprints -> their entries (the Lost items tiles); guarded by Lock
 
 const D2RL::PluginContext*          Context {};
 const D2RL::InventoryService*       Inventory {};
@@ -287,6 +289,7 @@ struct Settings {
 	int  goal[4] { GoalFind, GoalFind, GoalFind, GoalFind }; // by Kind: uniques, ethereal uniques, set items, runewords
 	int  loot[3] { LootAll, LootAll, LootAll };               // uniques, ethereal uniques, set items on the ground
 	bool lootUnidOnly = true; // only unidentified ground items are hidden
+	bool lootUnidStats {};    // an unidentified item as good as its grail copy in every varying stat shows
 	bool lootAmbiguous {};  // unidentified items hidden by what they are, not only when every item of their base would be
 	int  compare = CompareAlways; // the grail copy in the comparison: never, with Shift held, always
 	bool perfectFrames = true;     // perfect copies' glow around their tile
@@ -296,6 +299,8 @@ struct Settings {
 	bool swapColumns {}; // the categories in the outer icon column, the menus in the inner one
 	bool middleClick = true; // a middle click on a grail item shows it in the grail
 	bool objectives = true; // the custom objectives shown (their list is kept either way)
+	bool affixVariants {};   // items with a choice roll get a tile per choice (but those in AffixOff)
+	bool graphicVariants {}; // items whose base has several pictures get a tile per picture (but those in GraphicOff)
 	bool frameAnimations = true, scrollAnimations = true; int frameMs = 30; // perfect glows and wheel steps animated (settings page); each scroll frame's time (grailon frame <n>)
 	int  language = -1; // the texts' language: an index in Languages, or -1 for the game's
 	int  buttonX = 3, buttonY = 954; // the inventory button's place, in the inventory panel's units
@@ -306,7 +311,7 @@ constexpr int DefaultButtonX = 3, DefaultButtonY = 954, DefaultSearchX = -220, D
 
 // The settings page's check boxes, by group; the settings file uses the same
 // keys. Each box turns its field on.
-enum ToggleGroup { ShowNames, ShowArt, DisplayGroup, LootGroup, ObjectiveGroup };
+enum ToggleGroup { ShowNames, ShowArt, DisplayGroup, LootGroup, ObjectiveGroup, RpGroup, VariantGroup };
 struct Toggle {
 	const char* key;
 	bool Settings::*field;
@@ -326,14 +331,20 @@ constexpr Toggle Toggles[] {
 	{ "scroll_animations", &Settings::scrollAnimations, "Scroll animations", "The mouse wheel scrolls smoothly. Off: it jumps a row at a time.", DisplayGroup },
 	{ "loot_unid_only", &Settings::lootUnidOnly, "Only unidentified items",
 	  "Only unidentified items are hidden; identified ones always show. Off: identified items are hidden too.", LootGroup },
+	{ "loot_unid_stats", &Settings::lootUnidStats, "Filter unidentified stats",
+	  "With Hide perfect: an item whose grail copy is not perfect only shows when it is an upgrade, every varying stat the same or better and at least one better (read from the game you play or host; in games you join it stays hidden). Off: Hide perfect alone decides.", RpGroup },
 	{ "loot_ambiguous", &Settings::lootAmbiguous, "Filter ambiguous bases",
 	  "Unidentified items are hidden by what they really are, even when other items share their base. Off: an unidentified item is only hidden when every unique or set item of its base would be.",
-	  LootGroup },
+	  RpGroup },
 	{ "frame_animations", &Settings::frameAnimations, "Frame animations", "The perfect glow moves. Off: it stays still.", DisplayGroup },
 	{ "compact", &Settings::compact, "Compact", "The window sits against the screen's left edge, with its menus on its right. Off: the menus are on its left, where the game's panels start.", DisplayGroup },
 	{ "swap_columns", &Settings::swapColumns, "Swap columns", "The categories go in the left icon column and the menus in the right one. Off: the menus on the left.", DisplayGroup },
 	{ "middle_click", &Settings::middleClick, "Middle click", "A middle click on an item shows it in Grail On!, and its tooltip says so. Off: middle clicks are the game's.", DisplayGroup },
 	{ "objectives", &Settings::objectives, "Custom objectives", "Your objectives have their own menu. Off: the menu is hidden and the list is kept.", ObjectiveGroup },
+	{ "affix_variants", &Settings::affixVariants, "Affix variants",
+	  "Items whose choice roll differs from copy to copy (a skill, a class, an element...) get a tile for each choice. Off: one tile for all of them.", VariantGroup },
+	{ "graphic_variants", &Settings::graphicVariants, "Graphic variants",
+	  "Items whose picture differs from copy to copy (rings, amulets, jewels, charms without art of their own) get a tile for each picture. Off: one tile for all of them.", VariantGroup },
 };
 
 // Where the window (the stash frame) starts from the panels' anchor, and where
@@ -351,6 +362,62 @@ int CatX() { return ColumnRoom() + (Config.swapColumns ? MenuLeft + (MenuSize - 
 constexpr const char* CompareNames[] { "None", "Shift", "Always" };
 int OpenDrop = -1; // the settings drop-down whose list is open (goals 0-3, loot 4-6, compare 7, language 8)
 constexpr int SettingsPageCount = 5;
+// The Loot page's list of exclusions: the groups open (menus "m<menu>",
+// categories "c<menu>.<category>"), its first row shown and how many fit.
+std::set<std::string> ExclOpen;
+int                   ExclFirst = 0, ExclPerPage = 1, ExclMax = 0, ExclSteps = 1;
+// The player's exclusion lists, in the player's order: the loot filter never
+// hides an item of an active one. A list's items are grail entry ids ("|eth"
+// for an ethereal tile); a list made from a preset uses the preset's items
+// until the player changes it (`own`). Guarded by Lock.
+struct ExclList {
+	std::string           name;
+	int                   preset = -1; // 0 very valuable, 1 most interesting, -1 none
+	bool                  own {}, active {};
+	std::set<std::string> items;
+};
+constexpr const char* PresetNames[] { "Very valuable items", "Most interesting items" };
+constexpr const char* PresetKeys[] { "valuable", "interesting" };
+std::vector<ExclList> DefaultExclLists() { return { { PresetNames[0], 0 }, { PresetNames[1], 1 } }; }
+std::vector<ExclList> ExclLists = DefaultExclLists();
+int                   ExclEditing = -1;     // the list in the editor, or -1: the lists shown
+ExclList              ExclDraft;            // the editor's copy of it, saved by Save
+int                   ExclRenaming = -1;    // the list whose name is typed
+int                   ExclDeleteArmed = -1; // the list whose Delete was clicked once (a second click deletes)
+// The Variants section: the items left out of affix / graphic variants (base
+// entry ids; new items are in by default), and the editor open for one of
+// them (1 affix, 2 graphic; it uses ExclDraft, its items the ones in). Guarded by Lock.
+std::set<std::string> AffixOff, GraphicOff;
+int                   VarEditing = 0;
+// What the editor lists and ticks: exclusions, or one of the variant lists.
+int  EditorMode() { return VarEditing; }
+// The built-in lists: grail entry ids without their number (every Rainbow
+// Facet), both tiles. Most interesting items holds the very valuable ones too.
+constexpr const char* PresetValuable[] { "u:Harlequin Crest", "u:Griffon's Eye", "u:Crown of Ages", "u:Andariel's Visage", "u:Nightwing's Veil", "u:Arachnid Mesh", "u:Fathom", "u:Eschuta's temper", "u:Deaths's Web", "u:Mara's Kaleidoscope", "u:The Stone of Jordan", "u:Bul Katho's Wedding Band", "u:Highlord's Wrath", "u:Tyrael's Might", "u:Templar's Might", "u:Windforce", "u:The Grandfather", "u:Doombringer", "u:Deathcleaver", "u:Ethereal Edge", "u:Stormlash", "u:Wisp", "u:Annihilus", "u:Hellfire Torch", "u:Gheed's Fortune", "u:Rainbow Facet", "u:Dracul's Grasp", "u:Herald of Zakarum", "u:Cold Rupture", "u:Flame Rift", "u:Crack of the Heavens", "u:Rotting Fissure", "u:Bone Break", "u:Black Cleft", "u:Azurewrath", "u:Wizardspike", "u:Raven Frost", "u:Metalgrid", "u:Shadowdancer", "u:Mang Song's Lesson", "u:Steel Carapice", "s:Immortal King's Will", "s:Immortal King's Soul Cage", "s:Immortal King's Detail", "s:Immortal King's Forge", "s:Immortal King's Pillar", "s:Immortal King's Stone Crusher", "s:Tal Rasha's Fire-Spun Cloth", "s:Tal Rasha's Adjudication", "s:Tal Rasha's Lidless Eye", "s:Tal Rasha's Howling Wind", "s:Tal Rasha's Horadric Crest",  };
+constexpr const char* PresetInteresting[] { "u:Ormus' Robes", "u:Vampiregaze", "u:Kira's Guardian", "u:Giantskull", "u:Veil of Steel", "u:Jalal's Mane", "u:Arreat's Face", "u:Homunculus", "u:Medusa's Gaze", "u:Stormshield", "u:Spirit Ward", "u:Kerke's Sanctuary", "u:Lidless Wall", "u:The Oculus", "u:Titan's Revenge", "u:Thunderstroke", "u:Lycander's Aim", "u:Buriza-Do Kyanon", "u:Eaglehorn", "u:Kuko Shakaku", "u:Whichwild String", "u:Lightsabre", "u:Baranar's Star", "u:Schaefer's Hammer", "u:Messerschmidt's Reaver", "u:Bloodmoon", "u:The Reaper's Toll", "u:Tomb Reaver", "u:Stormspire", "u:Earthshifter", "u:Arioc's Needle", "u:Hone Sundan", "u:Dwarf Star", "u:Nosferatu's Coil", "u:Verdugo's Hearty Cord", "u:Thudergod's Vigor", "u:String of Ears", "u:Seraph's Hymn", "u:Atma's Scarab", "u:The Cat's Eye", "u:Saracen's Chance", "u:Gorerider", "u:Shadowkiller", "u:Sandstorm Trek", "u:Wartraveler", "u:Waterwalk", "u:Marrowwalk", "u:Steelrend", "u:Souldrain", "u:Magefist", "u:Frostburn", "u:Chance Guards", "u:Lavagout", "u:Leviathan", "u:Skin of the Vipermagi", "u:Que-Hegan's Wisdon", "u:Guardian Angel", "u:Shaftstop", "u:Duriel's Shell", "u:Halaberd's Reign", "u:Wolfhowl", "u:Cerebus", "u:Ravenlore", "u:Spiritkeeper", "u:Horizon's Tornado", "u:Boneflame", "u:Darkforge Spawn", "u:Heaven's Light", "u:The Cranium Basher", "u:Nord's Tenderizer", "u:Ribcracker", "u:Fleshripper", "u:Ghostflame", "u:Gimmershred", "u:Lacerator", "u:Deathbit", "u:Warshrike", "u:Demon's Arch", "u:Gargoyle's Bite", "u:Lycander's Flank", "u:Ondal's Wisdom", "u:Nagelring", "u:Crescent Moon", "u:Bloodraven's Charge", "s:Natalya's Totem", "s:Natalya's Mark", "s:Natalya's Shadow", "s:Natalya's Soul", "s:Aldur's Stony Gaze", "s:Aldur's Deception", "s:Aldur's Gauntlet", "s:Aldur's Advance", "s:Griswold's Valor", "s:Griswold's Heart", "s:Griswolds's Redemption", "s:Griswold's Honor", "s:Trang-Oul's Guise", "s:Trang-Oul's Scales", "s:Trang-Oul's Wing", "s:Trang-Oul's Claws", "s:Trang-Oul's Girth", "s:M'avina's True Sight", "s:M'avina's Embrace", "s:M'avina's Icy Clutch", "s:M'avina's Tenet", "s:M'avina's Caster", "s:Telling of Beads", "s:Laying of Hands", "s:Rite of Passage", "s:Spiritual Custodian", "s:Credendum", "s:Dangoon's Teaching", "s:Heaven's Taebaek", "s:Haemosu's Adament", "s:Ondal's Almighty", "s:Hwanin's Splendor", "s:Hwanin's Refuge", "s:Hwanin's Seal", "s:Hwanin's Justice", "s:Sazabi's Cobalt Redeemer", "s:Sazabi's Ghost Liberator", "s:Sazabi's Mental Sheath", "s:Bul-Kathos' Sacred Charge", "s:Bul-Kathos' Tribal Guardian", "s:Naj's Puzzler", "s:Naj's Light Plate", "s:Naj's Circlet", "s:Horazon's Countenance", "s:Horazon's Dominion", "s:Horazon's Hold", "s:Horazon's Legacy", "s:Horazon's Secrets",  };
+const std::set<std::string>& PresetIds(int profile) {
+	static const std::set<std::string> valuable(std::begin(PresetValuable), std::end(PresetValuable));
+	static const std::set<std::string> interesting = [] {
+		std::set<std::string> all(std::begin(PresetInteresting), std::end(PresetInteresting));
+		all.insert(std::begin(PresetValuable), std::end(PresetValuable));
+		return all;
+	}();
+	return profile == 0 ? valuable : interesting;
+}
+// Whether an exclusion key ("id" or "id|eth") is in a built-in list.
+bool InPreset(int profile, std::string key) {
+	if (const auto bar = key.find('|'); bar != std::string::npos) key.resize(bar);
+	if (const auto hash = key.find('#'); hash != std::string::npos) key.resize(hash);
+	return PresetIds(profile).count(key) != 0;
+}
+// Whether a list holds a key; whether an active list does.
+bool ListHas(const ExclList& list, const std::string& key) {
+	if (list.preset >= 0 && !list.own) return InPreset(list.preset, key);
+	return list.items.count(key) != 0;
+}
+bool ExcludedKey(const std::string& key) {
+	return std::any_of(ExclLists.begin(), ExclLists.end(), [&](const ExclList& list) { return list.active && ListHas(list, key); });
+}
 int SettingsPage = 0; // the settings' page: general, display, loot, misc tracking
 int ObjPicking = -1; // the objective whose icon picker is open, or -1
 int ObjFirst = 0, ObjPerPage = 1; // the objectives page's first objective shown, and how many fit
@@ -438,6 +505,20 @@ struct CategoryEntry {
 	int         artSize {}; // the icon's size in pixels when it is not a cell's
 };
 // A unique or set item of the grail.
+// One choice of a choice roll: the stat (and layer) it gives, its value's range, its name.
+// An item with several choice rolls (renewed sunders): one choice per roll, in `parts`.
+struct VariantChoice {
+	int                              stat {}, layer {}, low {}, high {};
+	std::string                      label;
+	std::vector<std::pair<int, int>> parts; // several rolls: every roll's (stat, layer); empty for one roll
+};
+// A choice's key in ids and the storage file: "<stat>.<layer>", "+" between several rolls'.
+std::string ChoiceKey(const VariantChoice& choice) {
+	if (choice.parts.empty()) return std::to_string(choice.stat) + "." + std::to_string(choice.layer);
+	std::string key;
+	for (const auto& [stat, layer] : choice.parts) key += (key.empty() ? "" : "+") + std::to_string(stat) + "." + std::to_string(layer);
+	return key;
+}
 struct UniqueEntry {
 	int         category {}, row {}, kind {}, width {}, height {};
 	bool        eth {}, set {};
@@ -457,7 +538,23 @@ struct UniqueEntry {
 	bool                     misc {};   // a misc base tracked by its item type (Misc menu): one tile per base, counted in no kind
 	std::string              miscType;  // its item type's code
 	bool                     objective {}; // a player's own objective (Objectives menu): a checkbox tile with an icon
+	// Variants: affix variants (a choice roll: a property group, a random
+	// skill or class skill; Ormus' Robes' skill, Wraithstep's skill tab...)
+	// and graphic variants (the picture the game picks for each item of a
+	// ring, amulet, jewel or charm base). Found from the game's tables. A base
+	// entry lists a variant entry per affix choice, per picture, and per both;
+	// the settings say which ones have tiles.
+	std::vector<VariantChoice> affixes; // its choices (a variant keeps its base's)
+	int              pictures {};        // its pictures, 0 for none (only bases without art of their own)
+	std::vector<int> variants;           // the base's: its variant entries
+	bool             variant {};         // a variant entry
+	int              variantOf = -1;     // a variant's: its base entry
+	std::string      detail;             // what its name has in brackets (a variant's choice, a Rainbow Facet's element): the tile's tooltip, not its label
+	int              affix = -1;         // a variant's: index in affixes, -1 for any
+	int              picture = -1;       // a variant's: its picture (0 for the first), -1 for any
+	bool             lost {};            // a lost item's tile (Lost items menu): a stored item no other tile shows
 };
+
 struct BaseInfo {
 	int  width = 1, height = 1, kind = 2; // kind: 0 weapon, 1 armor, 2 other
 	bool durable {}, quest {};
@@ -469,6 +566,7 @@ struct BaseInfo {
 	int  dropSound {};    // sounds row, 0 for none
 	int  sockets = -1;    // gemsockets: the most sockets it can have, -1 when not known
 	int  colorClass = -1; // InvTrans
+	int  pictures {};     // its item type's VarInvGfx: how many pictures the game picks from (rings 5...), 0 or 1 for one
 	int  row = -1;        // its Items row (an item unit's class)
 	std::string type;     // its own item type (Items type column)
 	std::string name, asset;
@@ -593,6 +691,7 @@ constexpr std::uint32_t TypeRowSize = 232, ItemRowSize = 448, UniqueRowSize = 34
 namespace TypeRow {
 constexpr int Code = 0, Equiv1 = 4, Equiv2 = 6; // codes; Equiv: u16 rows, 0 for none
 constexpr int RunewordCategory1 = 228, RunewordCategory2 = 229; // RunewordUICategories rows, 0xFF for none
+constexpr int VarInvGfx = 34; // u8: how many inventory pictures its items pick from (InvGfx1-6 follow, 32 bytes each)
 }
 namespace ItemRow {
 constexpr int Code = 128, NormalCode = 132, ExceptionalCode = 136, EliteCode = 140, NameString = 252, Width = 286, Height = 287, NoDurability = 290, Type = 302, Type2 = 304, Quest = 314;
@@ -980,6 +1079,19 @@ struct SetTables {
 	std::uint32_t runewordCategorySize {};
 	std::string (*keyText)(const char* key) {}; // a string by its key ("Runeword1")
 	std::map<std::string, std::string> keyNames; // the runewords' names by key, from the game's strings file
+	// The choice rolls' tables and names (variants): PropertyGroups rows, and
+	// from the game's txt files (what the compiled rows have no names for).
+	TableRows     groups;
+	std::uint32_t groupSize {};
+	std::map<int, std::string>            skillKeys, skillNames; // skill id -> its name's string key (SkillDesc "str name"), its English name
+	std::map<std::string, int>            skillIds;              // English skill name (lower case) -> id
+	std::vector<std::string>              classNames;            // by class: CharStats "class" (English)
+	std::vector<std::array<std::string, 3>> tabKeys;            // by class: StrSkillTab1-3 (string keys)
+	std::map<int, std::string>            statKeys;              // stat id -> descstrpos (string key)
+	std::map<int, std::string>            statNames;             // stat id -> its name (ItemStatCost "Stat", lower case)
+	std::set<std::string>                 obtainable;            // what drops or a cube makes by its name (TreasureClassEx items, CubeMain outputs)
+	std::set<std::string>                 cubeMade;              // what a cube recipe makes by its name (its picture is its recipe's)
+	std::vector<std::array<std::string, 8>> groupParNames;      // PropertyGroups rows' ParMin1-8 as written (skill names the compiled rows may leave 0)
 };
 
 // Where Runes keeps its fields: found from the first rows of the game's own
@@ -1194,6 +1306,331 @@ int PropClass(int prop, int par, const SetTables& tables, const PropLayout& layo
 	return c >= 0 && c < ClassCount ? c : -1;
 }
 
+// A txt table's lines split into cells (tabs), the header first.
+std::vector<std::vector<std::string>> TxtCells(const std::string& file) {
+	std::vector<std::vector<std::string>> out;
+	for (std::size_t at = 0; at < file.size();) {
+		auto end = file.find('\n', at);
+		if (end == std::string::npos) end = file.size();
+		std::vector<std::string> row;
+		for (std::size_t from = at;;) {
+			const auto tab = file.find('\t', from);
+			const auto stop = tab == std::string::npos || tab > end ? end : tab;
+			std::string cell = file.substr(from, stop - from);
+			while (!cell.empty() && (cell.back() == '\r' || cell.back() == ' ')) cell.pop_back();
+			row.push_back(std::move(cell));
+			if (stop == end) break;
+			from = stop + 1;
+		}
+		out.push_back(std::move(row));
+		at = end + 1;
+	}
+	return out;
+}
+
+// The choice rolls' names, from the game's txt files: skills (and their
+// SkillDesc name keys), CharStats (classes, skill tab keys), ItemStatCost
+// (description keys), PropertyGroups (parameters as written).
+// What the game gives by name: treasure class items (Uber Ancients' colossal
+// jewels) and cube outputs (renewed sunders). A unique the tables mark not
+// spawnable is still in the grail when one of them names it.
+void ReadObtainable(SetTables& tables, const std::string& treasure, const std::string& cube) {
+	for (const auto* file : { &treasure, &cube }) {
+		const auto rows = TxtCells(*file);
+		if (rows.empty()) continue;
+		std::vector<int> wanted;
+		for (std::size_t k = 0; k < rows[0].size(); ++k) {
+			std::string head = rows[0][k];
+			for (auto& c : head) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+			if (file == &treasure ? head.rfind("item", 0) == 0 : head.rfind("output", 0) == 0) wanted.push_back(static_cast<int>(k));
+		}
+		for (std::size_t r = 1; r < rows.size(); ++r)
+			for (const int k : wanted)
+				if (k < static_cast<int>(rows[r].size()) && !rows[r][k].empty()) {
+					std::string name = rows[r][k];
+					if (const auto comma = name.find(','); comma != std::string::npos) name.resize(comma); // "name,qualifiers"
+					if (!name.empty() && name.front() == '"') name.erase(0, 1);
+					tables.obtainable.insert(name);
+					if (file == &cube) tables.cubeMade.insert(name);
+				}
+	}
+}
+
+void ReadVariantTexts(SetTables& tables, const std::string& skills, const std::string& skillDesc, const std::string& charStats, const std::string& statCost, const std::string& groups) {
+	const auto column = [](const std::vector<std::string>& head, const char* name) {
+		for (std::size_t k = 0; k < head.size(); ++k)
+			if (!_stricmp(head[k].c_str(), name)) return static_cast<int>(k);
+		return -1;
+	};
+	const auto cell = [](const std::vector<std::string>& row, int k) { return k >= 0 && k < static_cast<int>(row.size()) ? row[k] : std::string(); };
+	std::map<std::string, std::string> descKeys; // skilldesc -> str name
+	if (const auto rows = TxtCells(skillDesc); !rows.empty()) {
+		const int name = column(rows[0], "skilldesc"), key = column(rows[0], "str name");
+		for (std::size_t r = 1; r < rows.size(); ++r)
+			if (!cell(rows[r], name).empty()) descKeys[cell(rows[r], name)] = cell(rows[r], key);
+	}
+	if (const auto rows = TxtCells(skills); !rows.empty()) {
+		const int name = column(rows[0], "skill"), id = column(rows[0], "*Id") >= 0 ? column(rows[0], "*Id") : column(rows[0], "Id"), desc = column(rows[0], "skilldesc");
+		for (std::size_t r = 1; r < rows.size(); ++r) {
+			const auto text = cell(rows[r], id);
+			if (text.empty() || cell(rows[r], name).empty() || !std::isdigit(static_cast<unsigned char>(text[0]))) continue;
+			const int skill = std::atoi(text.c_str());
+			tables.skillNames[skill] = cell(rows[r], name);
+			std::string lower = cell(rows[r], name);
+			for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+			tables.skillIds.try_emplace(lower, skill);
+			if (const auto key = descKeys.find(cell(rows[r], desc)); key != descKeys.end() && !key->second.empty()) tables.skillKeys[skill] = key->second;
+		}
+	}
+	if (const auto rows = TxtCells(charStats); !rows.empty()) {
+		const int name = column(rows[0], "class"), tab1 = column(rows[0], "StrSkillTab1"), tab2 = column(rows[0], "StrSkillTab2"), tab3 = column(rows[0], "StrSkillTab3");
+		for (std::size_t r = 1; r < rows.size(); ++r) {
+			const auto text = cell(rows[r], name);
+			if (text.empty() || text == "Expansion") continue; // the row that splits the classic classes from the others
+			tables.classNames.push_back(text);
+			tables.tabKeys.push_back({ cell(rows[r], tab1), cell(rows[r], tab2), cell(rows[r], tab3) });
+		}
+	}
+	if (const auto rows = TxtCells(statCost); !rows.empty()) {
+		const int id = column(rows[0], "*ID") >= 0 ? column(rows[0], "*ID") : column(rows[0], "ID"), key = column(rows[0], "descstrpos"), stat = column(rows[0], "Stat");
+		for (std::size_t r = 1; r < rows.size(); ++r) {
+			const auto text = cell(rows[r], id);
+			if (text.empty() || !std::isdigit(static_cast<unsigned char>(text[0]))) continue;
+			if (!cell(rows[r], key).empty()) tables.statKeys[std::atoi(text.c_str())] = cell(rows[r], key);
+			if (auto name = cell(rows[r], stat); !name.empty()) {
+				for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+				tables.statNames[std::atoi(text.c_str())] = name;
+			}
+		}
+	}
+	if (const auto rows = TxtCells(groups); !rows.empty()) {
+		int par[8];
+		for (int k = 0; k < 8; ++k) par[k] = column(rows[0], ("ParMin" + std::to_string(k + 1)).c_str());
+		for (std::size_t r = 1; r < rows.size(); ++r) {
+			if (cell(rows[r], 0).empty() || cell(rows[r], 0) == "Expansion") continue;
+			std::array<std::string, 8> names;
+			for (int k = 0; k < 8; ++k) names[k] = cell(rows[r], par[k]);
+			tables.groupParNames.push_back(names);
+		}
+	}
+}
+
+// ---- variants: the choice rolls ----
+// A game text as a short name: its format codes and numbers gone ("+%d to
+// Demon Skills" -> "Demon", "+%d%% to Fire Skill Damage" -> "Fire Skill Damage").
+std::string ShortLabel(std::string text) {
+	text = StripColors(text);
+	std::string out;
+	for (std::size_t i = 0; i < text.size(); ++i) {
+		const char c = text[i];
+		if (c == '%') { // %d, %+d, %i, %s, %%
+			std::size_t k = i + 1;
+			while (k < text.size() && (text[k] == '+' || text[k] == '-')) ++k;
+			if (k < text.size()) i = k;
+			continue;
+		}
+		if ((c >= '0' && c <= '9') || c == '+' || c == '\n') {
+			out += ' ';
+			continue;
+		}
+		out += c;
+	}
+	// Spaces collapsed, then the English words around a name.
+	std::string words;
+	for (std::size_t i = 0; i < out.size(); ++i)
+		if (out[i] != ' ' || (!words.empty() && words.back() != ' ')) words += out[i];
+	while (!words.empty() && (words.back() == ' ' || words.back() == ':')) words.pop_back();
+	for (const char* lead : { "to ", "To " })
+		if (words.rfind(lead, 0) == 0) words.erase(0, std::strlen(lead));
+	for (const char* tail : { " Skills", " skills", " Skill Levels" })
+		if (const std::size_t n = std::strlen(tail); words.size() > n && words.compare(words.size() - n, n, tail) == 0) words.resize(words.size() - n);
+	return words;
+}
+
+// A string by its key, in the texts' language (else the game's, else empty).
+std::string KeyLabel(const std::string& key, const SetTables& tables) {
+	if (key.empty()) return {};
+	std::string text = GameKeyText(key);
+	if (text.empty() && tables.keyText) text = tables.keyText(key.c_str());
+	return text;
+}
+
+// The name of one choice: a skill's, a class's, a skill tab's, else the stat's description.
+std::string ChoiceLabel(int stat, int layer, const SetTables& tables) {
+	std::string label;
+	if (stat == 107 || stat == 97) { // item_singleskill / item_nonclassskill: the skill
+		if (const auto key = tables.skillKeys.find(layer); key != tables.skillKeys.end()) label = StripColors(KeyLabel(key->second, tables));
+		if (label.empty())
+			if (const auto name = tables.skillNames.find(layer); name != tables.skillNames.end()) label = name->second;
+	} else if (stat == 83) { // item_addclassskills: the class
+		if (layer >= 0 && layer < static_cast<int>(tables.classNames.size())) label = Tr(tables.classNames[layer]);
+	} else if (stat == 188) { // item_addskill_tab: class * 8 + tab
+		const int c = layer / 8, tab = layer % 8;
+		if (c < static_cast<int>(tables.tabKeys.size()) && tab < 3) label = ShortLabel(KeyLabel(tables.tabKeys[c][tab], tables));
+	} else if (const auto key = tables.statKeys.find(stat); key != tables.statKeys.end())
+		label = ShortLabel(KeyLabel(key->second, tables));
+	return label;
+}
+
+// The choices of a row's choice rolls (its props `first`..`count`): a
+// property group (one of its properties), a random skill (func 12: skills
+// min-max) or a random class's skills (func 36: classes min-max). Empty when
+// it has none; several choice rolls: the first one's.
+std::vector<VariantChoice> ChoicesOf(const unsigned char* row, int first, int count, const SetTables& tables, const PropLayout& layout) {
+	std::vector<VariantChoice> out;
+	if (layout.func < 0 || layout.stat < 0 || !tables.props.rows) return out;
+	const auto propRow = [&](int prop) { return tables.props.rows + static_cast<std::size_t>(prop) * tables.propSize; };
+	const auto add     = [&](int stat, int layer, int low, int high) {
+        if (stat < 0 || stat >= 0xFFFF) return;
+        for (const auto& known : out)
+            if (known.stat == stat && known.layer == layer) return;
+        out.push_back({ stat, layer, std::min(low, high), std::max(low, high), {} });
+	};
+	// The stat and layer a property gives with parameter `par`.
+	const auto choice = [&](int prop, int par, int low, int high) {
+		if (prop < 0 || static_cast<std::uint32_t>(prop) >= tables.props.count) return;
+		const unsigned char* text = propRow(prop);
+		const int            func = text[layout.func], stat = Field<std::uint16_t>(text, layout.stat);
+		const int            value = layout.value >= 0 ? Field<std::uint16_t>(text, layout.value) : 0;
+		if (func == 10) add(stat, (par / 3) * 8 + par % 3, low, high);   // a skill tab: three per class
+		else if (func == 21) add(stat, value, low, high);                 // a class's skills: its value
+		else if (func == 22) add(stat, par, low, high);                   // a skill
+		else if (func == 7) add(17, 0, low, high);                        // enhanced damage (max and min)
+		else if (func == 5 || func == 6 || func == 11 || func == 12 || func == 36) return; // ranges and procs: not choices
+		else add(stat, 0, low, high);
+	};
+	// Each choice roll's choices; several rolls (renewed sunders' affix
+	// groups) give a variant per mix.
+	std::vector<std::vector<VariantChoice>> rolls;
+	const auto                              settle = [&] {
+        if (out.empty()) return;
+        for (auto& c : out) {
+            c.label = ChoiceLabel(c.stat, c.layer, tables);
+            if (c.label.empty()) c.label = Tr("Variant") + " " + std::to_string(&c - out.data() + 1);
+        }
+        rolls.push_back(std::move(out));
+        out.clear();
+	};
+	for (int p = 0; p < count; ++p, settle()) {
+		const int at = first + p * 16;
+		const int prop = Field<std::int32_t>(row, at), par = Field<std::int32_t>(row, at + 4), low = Field<std::int32_t>(row, at + 8), high = Field<std::int32_t>(row, at + 12);
+		if (prop >= 0x10000) { // a property group: one of its properties
+			const int g = prop - 0x10000;
+			if (!tables.groups.rows || g < 0 || static_cast<std::uint32_t>(g) >= tables.groups.count || tables.groupSize < 8 + 24) continue;
+			const unsigned char* group = tables.groups.rows + static_cast<std::size_t>(g) * tables.groupSize;
+			if (Field<std::uint32_t>(group, 4) == 0) continue; // every property, no choice
+			const int entries = std::min<int>(8, static_cast<int>((tables.groupSize - 8) / 24));
+			for (int e = 0; e < entries; ++e) {
+				const unsigned char* option = group + 8 + e * 24;
+				const int            what = Field<std::int32_t>(option, 0);
+				int                  parMin = Field<std::int32_t>(option, 4), parMax = Field<std::int32_t>(option, 8);
+				const int            modMin = Field<std::int32_t>(option, 12), modMax = Field<std::int32_t>(option, 16);
+				if (what < 0 || static_cast<std::uint32_t>(what) >= tables.props.count) continue;
+				// A skill by its name in the txt file (the compiled rows may keep 0).
+				if (parMin == 0 && parMax == 0 && g < static_cast<int>(tables.groupParNames.size())) {
+					std::string name = tables.groupParNames[g][e];
+					for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+					if (const auto id = tables.skillIds.find(name); !name.empty() && id != tables.skillIds.end()) parMin = parMax = id->second;
+					else if (!name.empty() && std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; })) parMin = parMax = std::atoi(name.c_str());
+				}
+				if (parMax < parMin || parMax - parMin > 64) parMax = parMin;
+				for (int q = parMin; q <= parMax; ++q) choice(what, q, modMin, modMax);
+			}
+			if (out.size() < 2) out.clear(); // one option: no choice
+			continue;
+		}
+		if (prop < 0 || static_cast<std::uint32_t>(prop) >= tables.props.count) continue;
+		const unsigned char* text = propRow(prop);
+		const int            func = text[layout.func], stat = Field<std::uint16_t>(text, layout.stat);
+		const int            value = layout.value >= 0 ? Field<std::uint16_t>(text, layout.value) : 0;
+		if (func == 12 && high > low && high - low <= 400) // a random skill of skills low..high, at level par
+			for (int skill = low; skill <= high; ++skill) add(stat, skill, par, par);
+		else if (func == 36 && high > low && high - low <= 32) // a random class's skills, classes low..high
+			for (int c = low; c <= high; ++c) add(stat, c, value, value);
+		if (out.size() < 2) out.clear();
+	}
+	if (rolls.size() == 1) return rolls[0];
+	if (rolls.empty()) return {};
+	// Every mix, the first roll's choice varying slowest.
+	std::vector<VariantChoice> mixes { VariantChoice {} };
+	for (const auto& roll : rolls) {
+		std::vector<VariantChoice> next;
+		if (mixes.size() * roll.size() > 100000) return {}; // (a broken table, not an item)
+		for (const auto& mix : mixes)
+			for (const auto& choice : roll) {
+				VariantChoice made = mix;
+				if (made.parts.empty()) made.stat = choice.stat, made.layer = choice.layer, made.low = choice.low, made.high = choice.high;
+				made.parts.push_back({ choice.stat, choice.layer });
+				made.label += (made.label.empty() ? "" : ", ") + choice.label;
+				next.push_back(std::move(made));
+			}
+		mixes = std::move(next);
+	}
+	return mixes;
+}
+
+// A variant's id after its base's: "~<choice key>", "~p<picture>", or both.
+std::string VariantSuffix(const UniqueEntry& entry) {
+	std::string suffix;
+	if (entry.affix >= 0 && entry.affix < static_cast<int>(entry.affixes.size())) suffix += "~" + ChoiceKey(entry.affixes[entry.affix]);
+	if (entry.picture >= 0) suffix += "~p" + std::to_string(entry.picture + 1);
+	return suffix;
+}
+
+// The art of picture `p` of a base whose art is `art` (ring1..ring5: its digits replaced).
+std::string PictureArt(std::string art, int p) {
+	while (!art.empty() && art.back() >= '0' && art.back() <= '9') art.pop_back();
+	return art + std::to_string(p + 1);
+}
+
+// The variant entries of `base`: per choice, per picture, then per both.
+// Its name without the brackets: the tile's label (the brackets are its tooltip).
+std::string PlainName(int u);
+
+// A picture variant's word: a jewel's colour (the game's six jewel pictures),
+// else "Picture n".
+std::string PictureLabel(const UniqueEntry& base, int p) {
+	static constexpr const char* colours[] { "Purple", "Blue", "Orange", "Green", "Red", "White" };
+	if ((base.code == "jew" || base.code == "cjw") && base.pictures == 6 && p >= 0 && p < 6) return Tr(colours[p]);
+	return Tr("Picture") + " " + std::to_string(p + 1);
+}
+
+std::vector<UniqueEntry> VariantEntries(const UniqueEntry& base) {
+	std::vector<UniqueEntry> out;
+	const int  affixes = static_cast<int>(base.affixes.size()), pictures = base.pictures > 1 ? base.pictures : 0;
+	const auto make    = [&](int a, int p) {
+        UniqueEntry entry = base;
+        entry.variant     = true;
+        entry.variants.clear();
+        entry.affix   = a;
+        entry.picture = p;
+        std::string label;
+        if (a >= 0) label = base.affixes[a].label;
+        if (p >= 0) {
+            label += (label.empty() ? "" : ", ") + PictureLabel(base, p);
+            entry.ghost = PictureArt(base.ghost, p);
+            if (base.art == base.ghost) entry.art = entry.ghost;
+        }
+        // In the base's brackets when it has some: "Rainbow Facet (Fire, Die, Red)".
+        entry.name   = !base.name.empty() && base.name.back() == ')' ? base.name.substr(0, base.name.size() - 1) + ", " + label + ")" : base.name + " (" + label + ")";
+        entry.detail = base.detail.empty() ? label : base.detail + ", " + label;
+        entry.id   = base.id + VariantSuffix(entry);
+        out.push_back(std::move(entry));
+	};
+	for (int a = 0; a < affixes; ++a) make(a, -1);
+	for (int p = 0; p < pictures; ++p) make(-1, p);
+	for (int a = 0; a < affixes; ++a)
+		for (int p = 0; p < pictures; ++p) make(a, p);
+	return out;
+}
+
+std::string PlainName(int u) {
+	const auto& entry = Uniques[u];
+	const auto  tail  = " (" + entry.detail + ")";
+	if (!entry.detail.empty() && entry.name.size() > tail.size() && entry.name.compare(entry.name.size() - tail.size(), tail.size(), tail) == 0) return entry.name.substr(0, entry.name.size() - tail.size());
+	return entry.name;
+}
+
 // Builds the lists from the compiled rows. Kept apart from the table service so
 // the test harness can feed it the dumped rows.
 std::map<std::string, int> EntryById; // UniqueEntry::id -> index in Uniques; guarded by Lock
@@ -1232,9 +1669,38 @@ constexpr int PickWidth = PickColumns * PickCell + (PickColumns - 1) * PickGap +
 constexpr int AddWidth = 56; // the Add button: the loot filter's square + button, at the drop-down's height
 // A tile ticked by a click instead of holding an item.
 bool IsCheckbox(const UniqueEntry& entry) { return entry.objective || (entry.misc && MiscModeOf(entry.miscType) == MiscCheck); }
+// The loot filter's exclusions: by tile (an ethereal tile has its own); only
+// uniques and set items are filtered.
+// A variant is excluded with its base (one key for all its choices).
+std::string ExcludeKey(int u, bool eth) { return Uniques[Uniques[u].variant && Uniques[u].variantOf >= 0 ? Uniques[u].variantOf : u].id + (eth ? "|eth" : ""); }
+bool        Excludable(const UniqueEntry& entry) { return !entry.runeword && !entry.misc && !entry.objective && !entry.secret && !entry.variant; }
+bool        Excluded(int u, bool eth) { return ExcludedKey(ExcludeKey(u, eth)); }
+// Lock held. Whether the editor's list holds a tile.
+// The editor's key of a tile: an exclusion's, or (variant lists) the item's id.
+std::string DraftKey(int u, bool eth) { return VarEditing ? Uniques[u].id : ExcludeKey(u, eth); }
+bool        Drafted(int u, bool eth) { return ListHas(ExclDraft, DraftKey(u, eth)); }
+// Lock held. The editor's list about to change: a preset's items become its own.
+void OwnBuiltin() {
+	auto& list = ExclDraft;
+	if (list.preset < 0 || list.own) return;
+	list.items.clear();
+	for (int u = 0; u < UniqueCount(); ++u)
+		for (const bool eth : { false, true })
+			if (Excludable(Uniques[u]) && InPreset(list.preset, ExcludeKey(u, eth))) list.items.insert(ExcludeKey(u, eth));
+	list.own = true;
+}
+
+// A list name not taken yet: `base`, else `base 2`, `base 3`...
+std::string FreeListName(const std::string& base) {
+	const auto taken = [](const std::string& name) { return std::any_of(ExclLists.begin(), ExclLists.end(), [&](const ExclList& list) { return list.name == name; }); };
+	if (!taken(base)) return base;
+	for (int n = 2;; ++n)
+		if (!taken(base + " " + std::to_string(n))) return base + " " + std::to_string(n);
+}
 std::vector<char>          CategoryOff; // a misc category not tracked: no tiles
 std::vector<std::array<char, 2>> CategoryHas; // whether a category has plain / ethereal tiles
 bool HasTile(int u, bool eth);
+bool BaseHasTile(int u, bool eth);
 void UpdateMiscTracking() {
 	CategoryOff.assign(Categories.size(), 0);
 	for (const auto& misc : MiscCategories)
@@ -1304,7 +1770,8 @@ std::string ObjTypedText();
 std::string TypedText(int target);
 extern std::atomic<bool> ObjTyping;
 extern std::atomic<int>  TypeTarget; // what the keys go to while typing: 0 the objectives' box, 1 the search bar
-constexpr int            TypeObjective = 0, TypeSearch = 1;
+constexpr int            TypeObjective = 0, TypeSearch = 1, TypeExclude = 2, TypeListName = 3; // the Loot page's list search, its list's name
+constexpr int            TypeSlot(int target) { return target < 0 || target > 3 ? 0 : target; }
 void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows sets, NameLookup names, const ArtMaps& mod, const SetTables& setTables = {}) {
 	std::vector<std::string> typeCodes(types.count);
 	for (std::uint32_t t = 0; t < types.count; ++t) typeCodes[t] = FourCC(types.rows + t * TypeRowSize, TypeRow::Code);
@@ -1361,7 +1828,7 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 		base.dropSound   = Field<std::uint16_t>(row, ItemRow::DropSound);
 		base.sockets     = socketsAt >= 0 ? row[socketsAt] : -1;
 		base.types       = found;
-		if (const auto own = Field<std::uint16_t>(row, ItemRow::Type); own && own < types.count) base.type = typeCodes[own];
+		if (const auto own = Field<std::uint16_t>(row, ItemRow::Type); own && own < types.count) base.type = typeCodes[own], base.pictures = types.rows[static_cast<std::size_t>(own) * TypeRowSize + TypeRow::VarInvGfx];
 		base.category    = OtherRule;
 		for (const char* type : RulePriority)
 			if (has(type)) {
@@ -1425,13 +1892,22 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 		if (const auto own = ownArt.find(Key(index)); own != ownArt.end()) entry.art = folder(entry.kind) + own->second;
 		else if (const auto known = uniqueArt.find(Key(index)); !set && known != uniqueArt.end()) entry.art = known->second;
 		else entry.art = entry.ghost;
+		// Its variants: its choice rolls, and its pictures when it has no art of its own.
+		entry.affixes = ChoicesOf(row, set ? SetRow::Props : UniqueRow::Props, set ? SetRow::PropCount : UniqueRow::PropCount, setTables, propLayout);
+		// (Not a cube's unique, only made by a recipe: renewed sunders all look alike.)
+		const bool cubeOnly = !set && !(Field<std::uint32_t>(row, UniqueRow::Flags) & UniqueRow::Spawnable) && setTables.cubeMade.count(index);
+		if (entry.art == entry.ghost && !cubeOnly && base->second.pictures > 1 && base->second.pictures <= 8) entry.pictures = base->second.pictures;
 		found.push_back(entry);
 		rule.push_back(base->second.category);
 		return &found.back();
 	};
 	for (std::uint32_t k = 0; k < uniques.count; ++k) {
 		const unsigned char* row = uniques.rows + static_cast<std::size_t>(k) * UniqueRowSize;
-		if (!(Field<std::uint32_t>(row, UniqueRow::Flags) & UniqueRow::Spawnable)) continue;
+		if (!(Field<std::uint32_t>(row, UniqueRow::Flags) & UniqueRow::Spawnable)) {
+			// Not dropped as a random unique: still in when a treasure class or the cube names it.
+			const std::string index(reinterpret_cast<const char*>(row + UniqueRow::Index), strnlen(reinterpret_cast<const char*>(row + UniqueRow::Index), UniqueRow::IndexLength));
+			if (index.empty() || !setTables.obtainable.count(index)) continue;
+		}
 		auto* entry = add(row, k, UniqueRow::Index, UniqueRow::NameString, UniqueRow::Code, mod.uniques, false);
 		if (!entry || !entry->eth) continue;
 		// "ethereal" first: Ethereal Edge is both, and always ethereal.
@@ -1717,6 +2193,65 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 		}
 		return a.set && (a.setId != b.setId ? a.setId < b.setId : a.setIndex < b.setIndex);
 	});
+	// Uniques sharing a name (the Rainbow Facets): what tells them apart after
+	// it, from their properties: "Rainbow Facet (Fire, Die)".
+	{
+		const auto words = [&](const UniqueEntry& e) {
+			std::vector<std::string> out;
+			if (e.set || e.runeword || e.misc || e.row < 0 || static_cast<std::uint32_t>(e.row) >= uniques.count || propLayout.stat < 0) return out;
+			const unsigned char* row  = uniques.rows + static_cast<std::size_t>(e.row) * UniqueRowSize;
+			const auto           push = [&](const char* word) {
+                if (std::find(out.begin(), out.end(), word) == out.end()) out.push_back(word);
+			};
+			for (int p = 0; p < UniqueRow::PropCount; ++p) {
+				const int prop = Field<std::int32_t>(row, UniqueRow::Props + p * 16);
+				if (prop < 0 || static_cast<std::uint32_t>(prop) >= setTables.props.count) continue;
+				const int  stat = Field<std::uint16_t>(setTables.props.rows + static_cast<std::size_t>(prop) * setTables.propSize, propLayout.stat);
+				const auto name = setTables.statNames.find(stat);
+				if (name == setTables.statNames.end()) continue;
+				const std::string& n = name->second;
+				if (n == "item_skillondeath") push("Die");
+				else if (n == "item_skillonlevelup") push("Level up");
+				else if (n == "item_skillonhit") push("Hit");
+				else if (n == "item_skillongethit") push("Struck");
+				else if (n == "item_skillonattack") push("Attack");
+				else if (n == "item_skillonkill") push("Kill");
+				else if (n.find("fire") != std::string::npos) push("Fire");
+				else if (n.find("cold") != std::string::npos) push("Cold");
+				else if (n.find("ltng") != std::string::npos || n.find("light") != std::string::npos) push("Lightning");
+				else if (n.find("pois") != std::string::npos) push("Poison");
+			}
+			return out;
+		};
+		std::map<std::string, std::vector<std::size_t>> byName;
+		for (std::size_t i = 0; i < found.size(); ++i)
+			if (!found[i].set && !found[i].runeword && !found[i].misc) byName[found[i].name].push_back(i);
+		for (const auto& [name, list] : byName) {
+			if (list.size() < 2) continue;
+			std::vector<std::vector<std::string>> all;
+			for (const auto i : list) all.push_back(words(found[i]));
+			std::vector<std::string> labels;
+			for (const auto& mine : all) {
+				std::string label;
+				for (const auto& word : mine) {
+					const bool everyone = std::all_of(all.begin(), all.end(), [&](const auto& other) { return std::find(other.begin(), other.end(), word) != other.end(); });
+					if (!everyone) label += (label.empty() ? "" : ", ") + Tr(word);
+				}
+				labels.push_back(label);
+			}
+			const std::set<std::string> distinct(labels.begin(), labels.end());
+			if (distinct.size() != labels.size() || distinct.count("")) continue; // nothing tells them apart: names as they are
+			for (std::size_t k = 0; k < list.size(); ++k) found[list[k]].name += " (" + labels[k] + ")", found[list[k]].detail = labels[k];
+		}
+	}
+	// Variants: their entries right after their base's (always built, so
+	// indices never change with the settings).
+	for (std::size_t i = 0; i < found.size(); ++i) {
+		if (found[i].variant || (found[i].affixes.empty() && found[i].pictures < 2)) continue;
+		const auto made = VariantEntries(found[i]);
+		found.insert(found.begin() + static_cast<std::ptrdiff_t>(i + 1), made.begin(), made.end());
+		i += made.size();
+	}
 	// Built again (another language): each entry keeps its index, so what
 	// points at one (stored items, the open view) stays right.
 	// (The Standard and the misc entries come after these, built the same way each time.)
@@ -1731,7 +2266,8 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 	SetByRow.assign(sets.count, -1);
 	RunewordByRow.assign(setTables.runes.count, -1);
 	RunewordIds.clear();
-	for (int u = 0; u < UniqueCount(); ++u) (Uniques[u].runeword ? RunewordByRow : Uniques[u].set ? SetByRow : UniqueByRow)[Uniques[u].row] = u;
+	for (int u = 0; u < UniqueCount(); ++u)
+		if (!Uniques[u].variant) (Uniques[u].runeword ? RunewordByRow : Uniques[u].set ? SetByRow : UniqueByRow)[Uniques[u].row] = u;
 	// The Standard of Heroes: one more tile, at the bottom of the stats overview.
 	SecretEntry = -1;
 	if (const auto standard = Bases.find("std"); standard != Bases.end()) {
@@ -1809,10 +2345,23 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 				entry.code       = base->first;
 				entry.ghost = entry.art = base->second.asset;
 				entry.colorClass = base->second.colorClass;
+				if (base->second.pictures > 1 && base->second.pictures <= 8) entry.pictures = base->second.pictures;
 				Uniques.push_back(entry);
 				MiscByCode[base->first] = UniqueCount() - 1;
+				for (auto& variant : VariantEntries(entry)) Uniques.push_back(std::move(variant));
 			}
 		}
+	}
+	// Each variant's base, each base's variants (by index, now they are placed).
+	for (int u = 0; u < UniqueCount(); ++u) {
+		Uniques[u].variants.clear();
+		if (Uniques[u].variant)
+			for (int b = u - 1; b >= 0; --b)
+				if (!Uniques[b].variant) {
+					Uniques[u].variantOf = b;
+					Uniques[b].variants.push_back(u);
+					break;
+				}
 	}
 	UpdateMiscTracking();
 	// Rows sharing an index (the Rainbow Facets): numbered in row order.
@@ -1825,6 +2374,14 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 			if (n) Uniques[list[n]].id += "#" + std::to_string(n + 1);
 			EntryById[Uniques[list[n]].id] = list[n];
 		}
+	}
+	// A variant's id: its base's (numbered above) and its key.
+	for (int u = 0; u < UniqueCount(); ++u) {
+		auto& entry = Uniques[u];
+		if (!entry.variant || entry.variantOf < 0) continue;
+		if (const auto known = EntryById.find(entry.id); known != EntryById.end() && known->second == u) EntryById.erase(known);
+		entry.id              = Uniques[entry.variantOf].id + VariantSuffix(entry);
+		EntryById[entry.id]   = u;
 	}
 	for (const auto& [from, to] : aliases)
 		if (const auto entry = EntryById.find(to); entry != EntryById.end() && !EntryById.count(from)) EntryById[from] = entry->second;
@@ -2304,6 +2861,17 @@ void __cdecl BuildFromGame(const D2RL::PluginContext* context, void*) noexcept {
 	optional(Tables::TableId::Skills, extra.skills, extra.skillSize);
 	optional(Tables::TableId::Runes, extra.runes, extra.runeSize);
 	optional(Tables::TableId::RunewordUiCategories, extra.runewordCategories, extra.runewordCategorySize);
+	optional(Tables::TableId::PropertyGroups, extra.groups, extra.groupSize);
+	{
+		const auto txt = [](const char* path) {
+			std::string file = ArchiveFile(path);
+			return file.empty() ? ResourceFile(path) : file;
+		};
+		ReadVariantTexts(extra, txt("data/global/excel/skills.txt"), txt("data/global/excel/skilldesc.txt"), txt("data/global/excel/charstats.txt"),
+		                 txt("data/global/excel/itemstatcost.txt"), txt("data/global/excel/propertygroups.txt"));
+		ReadObtainable(extra, txt("data/global/excel/treasureclassex.txt"), txt("data/global/excel/cubemain.txt"));
+		Say(false, "grailon: variants: %u property groups, %zu skill names, %zu classes, %zu stat texts", extra.groups.count, extra.skillKeys.size(), extra.classNames.size(), extra.statKeys.size());
+	}
 	// The item types' names (a comment column, not in the compiled table): from the game's itemtypes.txt.
 	{
 		constexpr const char* path = "data/global/excel/itemtypes.txt";
@@ -2383,7 +2951,17 @@ constexpr const char* DefaultObjective = "Find the easter egg in Grail On!";
 void LoadSettings() {
 	FILE* file = _wfopen(SettingsPath().c_str(), L"r");
 	Objectives = { { 1, 14, DefaultObjective }, { 2, 1, "Find a 3/20/20 small charm" } }, NextObjective = 3;
+	ExclLists = DefaultExclLists();
+	AffixOff.clear(), GraphicOff.clear();
 	if (!file) return;
+	// The lists as the file has them ("loot_list" lines), else the default ones;
+	// the items by list number.
+	std::vector<ExclList>                   lists;
+	std::map<int, std::set<std::string>>    listItems;
+	std::set<int>                           owned;
+	int                                     chosen = -1;
+	std::set<int>                           actives;
+	bool                                    activesKnown = false;
 	bool objectivesKnown = false; // the file has the objectives' switch: its list is the player's
 	char line[4096];
 	while (std::fgets(line, sizeof(line), file)) {
@@ -2403,7 +2981,70 @@ void LoadSettings() {
 			}
 			continue;
 		}
+		// The exclusion lists: "loot_list = <preset>|<own>|<name>" each in order
+		// (preset: none, valuable or interesting; own: 1 once a preset's list was
+		// changed, its items then in the file), "loot_exclude_list = <number>"
+		// (the one in use, from 0), "loot_exclude = <number>|<id>" ("|eth" for
+		// an ethereal tile). A test build's names (valuable, interesting,
+		// custom1-3) stand for the default lists and two more custom ones; an
+		// id alone goes to Custom 1.
+		if (!std::strncmp(line, "loot_list", 9) || !std::strncmp(line, "loot_exclude", 12)) {
+			if (const char* at = std::strchr(line, '=')) {
+				std::string value = at + 1;
+				while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ')) value.pop_back();
+				while (!value.empty() && value.front() == ' ') value.erase(0, 1);
+				const auto listOf = [](const std::string& key) {
+					if (!key.empty() && std::all_of(key.begin(), key.end(), [](char c) { return c >= '0' && c <= '9'; })) return std::min(std::atoi(key.c_str()), 999);
+					constexpr const char* old[] { "valuable", "interesting", "custom1", "custom2", "custom3" };
+					for (int k = 0; k < 5; ++k)
+						if (key == old[k]) return k;
+					return -1;
+				};
+				if (!std::strncmp(line, "loot_list", 9)) {
+					ExclList   list;
+					const auto first = value.find('|'), second = first == std::string::npos ? first : value.find('|', first + 1);
+					if (second != std::string::npos) {
+						const auto preset = value.substr(0, first);
+						list.preset       = preset == PresetKeys[0] ? 0 : preset == PresetKeys[1] ? 1 : -1;
+						list.own          = value.substr(first + 1, second - first - 1) == "1";
+						list.name         = value.substr(second + 1);
+						if (list.name.empty()) list.name = "List";
+						lists.push_back(list);
+					}
+				} else if (!std::strncmp(line, "loot_exclude_active", 19)) {
+					activesKnown = true;
+					for (std::size_t from = 0; from < value.size();) {
+						const auto comma = value.find(',', from);
+						const auto item  = value.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+						if (const int k = listOf(item); k >= 0) actives.insert(k);
+						if (comma == std::string::npos) break;
+						from = comma + 1;
+					}
+				} else if (!std::strncmp(line, "loot_exclude_list", 17)) {
+					if (const int k = listOf(value); k >= 0) chosen = k;
+				} else if (!std::strncmp(line, "loot_exclude_own", 16)) {
+					if (const int k = listOf(value); k >= 0) owned.insert(k);
+				} else if (!value.empty()) {
+					const auto bar = value.find('|');
+					int        k   = bar == std::string::npos ? -1 : listOf(value.substr(0, bar));
+					if (k >= 0) value.erase(0, bar + 1);
+					else k = 2;
+					if (!value.empty()) listItems[k].insert(value);
+				}
+			}
+			continue;
+		}
 		// An objective: "objective = id|icon|text".
+		// Items left out of affix / graphic variants: one id a line.
+		if (!std::strncmp(line, "affix_variant_off", 17) || !std::strncmp(line, "graphic_variant_off", 19)) {
+			if (const char* at = std::strchr(line, '=')) {
+				std::string id = at + 1;
+				while (!id.empty() && (id.back() == '\n' || id.back() == '\r' || id.back() == ' ')) id.pop_back();
+				while (!id.empty() && id.front() == ' ') id.erase(0, 1);
+				if (!id.empty()) (line[0] == 'a' ? AffixOff : GraphicOff).insert(id);
+			}
+			continue;
+		}
 		if (!std::strncmp(line, "objectives", 10) && !objectivesKnown) Objectives.clear(), NextObjective = 1, objectivesKnown = true;
 		if (!std::strncmp(line, "objective ", 10) || !std::strncmp(line, "objective=", 10)) {
 			if (!objectivesKnown) Objectives.clear(), NextObjective = 1, objectivesKnown = true;
@@ -2453,8 +3094,28 @@ void LoadSettings() {
 		if (!std::strcmp(key, "spoilers"))
 			Config.uniqueNames = Config.uniqueArt = Config.setItemNames = Config.setItemArt = Config.setNames = Config.runewordNames = Config.runewordRunes = on;
 		if (!std::strcmp(key, "animations")) Config.frameAnimations = Config.scrollAnimations = on;
+		if (!std::strcmp(key, "variants")) Config.affixVariants = on; // a test build's
 	}
 	std::fclose(file);
+	const bool fromTest = lists.empty();
+	if (fromTest) {
+		// No lists in the file: the presets, and a test build's custom ones (numbered 2-4 there).
+		lists = DefaultExclLists();
+		const int last = listItems.empty() ? 0 : std::min(listItems.rbegin()->first, 4);
+		for (int k = 2; k <= std::max(last, chosen); ++k) lists.push_back({ "Custom " + std::to_string(k - 1) });
+		for (const int k : owned)
+			if (k < static_cast<int>(lists.size())) lists[k].own = true;
+	}
+	for (auto& [k, items] : listItems)
+		if (k < static_cast<int>(lists.size())) lists[k].items = std::move(items);
+	// Active: as the file says, else (a test build's) the one list in use.
+	if (!activesKnown && chosen >= 0) actives.insert(chosen);
+	if (fromTest && chosen < 0 && listItems.count(2)) actives.insert(2); // the exclusions from before the lists: on as they were
+	for (const int k : actives)
+		if (k < static_cast<int>(lists.size())) lists[k].active = true;
+	// A test build's custom lists left empty and unused go.
+	if (fromTest) std::erase_if(lists, [](const ExclList& list) { return list.preset < 0 && list.items.empty() && !list.active; });
+	ExclLists = std::move(lists);
 }
 
 void SaveSettings() {
@@ -2488,6 +3149,21 @@ void SaveSettings() {
 	             tracked.c_str(), checked.c_str());
 	std::fprintf(file, "# The player's own objectives, ticked in the Objectives menu: number|icon (0-%d)|text.\n", ObjectiveIconCount - 1);
 	for (const auto& objective : Objectives) std::fprintf(file, "objective = %d|%d|%s%s\n", objective.id, objective.icon, objective.text.c_str(), objective.enabled ? "" : "|off");
+	std::fprintf(file, "# Items the loot filter never hides (chosen in the Loot settings). The lists in order: preset (none, valuable, interesting)|1 once a preset's list\n"
+	                   "# was changed (its items then follow, else it keeps the preset's)|name; the active lists (numbers from 0); then list number|grail entry id, |eth for the ethereal tile.\n");
+	std::string active;
+	for (std::size_t k = 0; k < ExclLists.size(); ++k) {
+		const auto& list = ExclLists[k];
+		std::fprintf(file, "loot_list = %s|%d|%s\n", list.preset >= 0 ? PresetKeys[list.preset] : "none", list.own ? 1 : 0, list.name.c_str());
+		if (list.active) active += (active.empty() ? "" : ",") + std::to_string(k);
+	}
+	std::fprintf(file, "loot_exclude_active = %s\n", active.c_str());
+	for (std::size_t k = 0; k < ExclLists.size(); ++k)
+		if (ExclLists[k].preset < 0 || ExclLists[k].own)
+			for (const auto& id : ExclLists[k].items) std::fprintf(file, "loot_exclude = %zu|%s\n", k, id.c_str());
+	std::fprintf(file, "# Items left out of affix / graphic variants (chosen in the Grail settings): one grail entry id a line.\n");
+	for (const auto& id : AffixOff) std::fprintf(file, "affix_variant_off = %s\n", id.c_str());
+	for (const auto& id : GraphicOff) std::fprintf(file, "graphic_variant_off = %s\n", id.c_str());
 	std::fclose(file);
 }
 
@@ -2544,8 +3220,77 @@ int RunewordEntry(int row, const std::string& code) {
 
 int RunewordRowOf(const Items::ItemInfo& item); // from its save bytes
 
-// The grail entry of an item: its index in Uniques, or -1.
+int  RawStat(const void* unit, int stat, int layer);
+// Whether an item has a choice: its stat, or every roll's for several.
+bool ChoiceOn(const void* unit, const VariantChoice& choice) {
+	if (choice.parts.empty()) return RawStat(unit, choice.stat, choice.layer) != 0;
+	for (const auto& [stat, layer] : choice.parts)
+		if (RawStat(unit, stat, layer) == 0) return false;
+	return true;
+}
+void* ClientItem(std::uint32_t runtimeId);
+// Lock held. Whether base entry `b`'s affix (graphic) variants have tiles:
+// the setting on, and the item not left out of it.
+bool AffixOn(int b) { return Config.affixVariants && !Uniques[b].affixes.empty() && !AffixOff.count(Uniques[b].id); }
+bool GraphicOn(int b) { return Config.graphicVariants && Uniques[b].pictures > 1 && !GraphicOff.count(Uniques[b].id); }
+// Lock held. The entry whose tile an item of base entry `b` with choice `a`
+// and picture `p` (-1: not known) goes in: `b` when its variants have no
+// tiles, -1 when a part the tiles need is not known.
+int VariantOf(int b, int a, int p) {
+	if (b < 0 || b >= UniqueCount() || Uniques[b].variant || Uniques[b].variants.empty()) return b;
+	const bool affix = AffixOn(b), graphic = GraphicOn(b);
+	if (!affix && !graphic) return b;
+	if ((affix && a < 0) || (graphic && p < 0)) return -1;
+	const int wantA = affix ? a : -1, wantP = graphic ? p : -1;
+	for (const int v : Uniques[b].variants)
+		if (Uniques[v].affix == wantA && Uniques[v].picture == wantP) return v;
+	return -1;
+}
+// Lock held. The choice item `unit` of base entry `b` has (its choice's stat on it), or -1.
+int AffixIndex(int b, const void* unit) {
+	if (!unit || b < 0 || b >= UniqueCount()) return -1;
+	const auto& choices = Uniques[b].affixes;
+	for (std::size_t c = 0; c < choices.size(); ++c)
+		if (ChoiceOn(unit, choices[c])) return static_cast<int>(c);
+	return -1;
+}
+int AffixIndexOfKey(int b, const std::string& key) {
+	if (key.empty() || b < 0 || b >= UniqueCount()) return -1;
+	const auto& choices = Uniques[b].affixes;
+	for (std::size_t c = 0; c < choices.size(); ++c)
+		if (ChoiceKey(choices[c]) == key) return static_cast<int>(c);
+	return -1;
+}
+// Items' variant entries, by runtime id (read once; cleared with the game and the settings). Guarded by Lock.
+std::map<std::uint32_t, int> VariantUnits;
+// Items' pictures, by runtime id (-1: none; from their save bytes). Guarded by Lock.
+std::map<std::uint32_t, int> Pictures;
+int PictureOfItem(const Items::ItemInfo& item);
+
+int GrailEntry(const Items::ItemInfo& item);
+// The grail entry of an item: its index in Uniques, or -1. An item with
+// variants is its variant's when they have tiles.
 int GrailIndex(const Items::ItemInfo& item) {
+	const int u = GrailEntry(item);
+	bool      graphic = false;
+	int       a       = -1;
+	{
+		std::lock_guard guard(Lock);
+		if (u < 0 || u >= UniqueCount() || Uniques[u].variant || Uniques[u].variants.empty() || (!AffixOn(u) && !GraphicOn(u))) return u;
+		if (const auto known = VariantUnits.find(item.runtimeId); known != VariantUnits.end() && known->second >= 0 && known->second < UniqueCount() && Uniques[known->second].variantOf == u)
+			return known->second;
+		if (AffixOn(u)) a = AffixIndex(u, ClientItem(item.runtimeId));
+		graphic = GraphicOn(u);
+	}
+	const int p = graphic ? PictureOfItem(item) : -1;
+	std::lock_guard guard(Lock);
+	const int v = VariantOf(u, a, p);
+	if (v < 0) return u; // not known: its base's (no tile)
+	VariantUnits[item.runtimeId] = v;
+	return v;
+}
+
+int GrailEntry(const Items::ItemInfo& item) {
 	std::lock_guard guard(Lock);
 	// A base kept in a runeword tile.
 	if (const auto base = BaseFor.find(item.runtimeId); base != BaseFor.end()) return base->second;
@@ -2627,6 +3372,9 @@ int                 RowCount {};        // tile rows of the current category
 int                 LastRow {};
 int                 MaxScroll {};       // first row once the last row is on screen
 std::atomic<int>    BarMax {};          // MaxScroll for the window thread (0: no scroll bar)
+// The scroll bar on screen, for the window thread: its top and steps (the
+// view's, or the Loot page's exclusions list's, shorter).
+std::atomic<int> BarY { BarTop }, BarSteps { ScrollSteps };
 std::vector<Tile>   Shown;              // tiles on screen, page coordinates
 std::vector<std::pair<int, int>> ShownHeaders; // set names on screen: set, view row
 std::vector<Tile>   Peeking;            // tiles shown as pictures: past the view's end, or past the page's rows (page coordinates)
@@ -2651,10 +3399,21 @@ bool RefreshPerfect();
 // Whether an item may be stored: a grail unique whose tile has no other item
 // yet. Lock held.
 // Whether unique `u` has a tile for its plain or its ethereal copy.
-bool HasTile(int u, bool eth) {
+// Whether unique `u` (or its variants, whichever the setting shows) has a
+// tile for its plain or its ethereal copy.
+bool BaseHasTile(int u, bool eth) {
 	const auto& entry = Uniques[u];
 	if (entry.misc && (eth || (entry.category >= 0 && entry.category < static_cast<int>(CategoryOff.size()) && CategoryOff[entry.category]))) return false;
 	return eth ? entry.eth : !entry.onlyEth;
+}
+// Variants on: the variants' tiles, not their base's; off: the base's only.
+bool HasTile(int u, bool eth) {
+	const auto& entry = Uniques[u];
+	if (entry.variant) {
+		const int b = entry.variantOf;
+		if (b < 0 || (entry.affix >= 0) != AffixOn(b) || (entry.picture >= 0) != GraphicOn(b)) return false;
+	} else if (!entry.variants.empty() && (AffixOn(u) || GraphicOn(u))) return false;
+	return BaseHasTile(u, eth);
 }
 
 bool IsEthMenu(int menu) { return menu == EthWeaponMenu || menu == EthArmorMenu; }
@@ -2668,6 +3427,7 @@ int MenuOf(int c, bool eth) {
 // Whether category `c` has a button in `menu`: a tile there.
 bool InMenu(int c, int menu) {
 	if (Categories[c].menu != BaseMenu(menu)) return false;
+	if (menu == LostMenu && c < static_cast<int>(CategoryHas.size())) return CategoryHas[c][0] || CategoryHas[c][1];
 	if (c < static_cast<int>(CategoryHas.size())) return CategoryHas[c][IsEthMenu(menu)] != 0;
 	for (int u = 0; u < UniqueCount(); ++u)
 		if (Uniques[u].category == c && HasTile(u, IsEthMenu(menu))) return true;
@@ -2711,7 +3471,8 @@ std::vector<Row> BuildRows(int category) {
 	};
 	for (int i = 0; i < UniqueCount(); ++i) {
 		if (Uniques[i].category != category || Uniques[i].secret) continue;
-		if (HasTile(i, ViewEth)) add(i, ViewEth);
+		const bool eth = Uniques[i].lost ? Uniques[i].onlyEth : ViewEth; // a lost item: its own tile, ethereal or not
+		if (HasTile(i, eth)) add(i, eth);
 	}
 	return rows;
 }
@@ -3026,6 +3787,7 @@ void PlaceRows(const std::vector<Row>& rows) {
 	MaxScroll = RowCount;
 	for (int height = 0; MaxScroll > 0 && height + rows[MaxScroll - 1].height <= ViewRows;) height += rows[--MaxScroll].height;
 	BarMax = MaxScroll;
+	BarY = BarTop, BarSteps = ScrollSteps;
 	// An item dropped for another category or row: show the row with its tile.
 	// An item dropped for another category or row: scroll as little as it takes
 	// to show the row with its tile.
@@ -3269,9 +4031,17 @@ std::string Icon(const std::string& name, int x, int y, int box, const std::stri
 	return icon;
 }
 
+// A square button (the menu buttons' plate) with one of the icons on it.
+std::string IconButton(const std::string& name, int x, int y, const char* icon, const std::string& tooltip, const std::string& command, int size = DropHeight) {
+	const int box = size * 7 / 10;
+	return SquareButton(name, x, y, false, "squarebtn", tooltip, command, size)
+	     + Icon(name + "Icon", x + (size - box) / 2, y + (size - box) / 2, box, std::string("d2rloader\\grail-on\\icon-") + icon, 1, 1, "", IconSize);
+}
+
 // Whether a menu has a button: Misc only while one of its categories has tiles.
 bool MenuShown(int menu) {
 	if (menu == ObjMenu) return Config.objectives && std::any_of(Objectives.begin(), Objectives.end(), [](const Objective& objective) { return objective.enabled; });
+	if (menu == LostMenu) return !LostOf.empty();
 	if (menu != MiscMenu) return true;
 	for (int c = 0; c < CategoryCount(); ++c)
 		if (InMenu(c, MiscMenu)) return true;
@@ -3314,6 +4084,7 @@ std::string MenuArt(int menu, int& width, int& height) {
 	case RunewordMenu: return "d2rloader\\grail-on\\icon-runewords";
 	case MiscMenu: return "d2rloader\\grail-on\\icon-other";
 	case ObjMenu: return "d2rloader\\grail-on\\icon-objectives";
+	case LostMenu: return "d2rloader\\grail-on\\icon-lost";
 	default: return "d2rloader\\grail-on\\icon-config";
 	}
 }
@@ -3401,7 +4172,7 @@ std::string RunewordArt(const Tile& tile, const std::string& n, int left, int to
 			out += Image(n + "Back", x, y, std::string("d2rloader\\item-quality-backgrounds\\") + (bare ? "normal\\" : "runeword\\") + std::to_string(box.width) + "x" + std::to_string(box.height),
 			             bare ? ", \"transparency\": 0.65" : ", \"transparency\": 0.55");
 		// The game's sockets are about 62% of a cell, their runes 55%. The
-		// sockets are under the item, at about 60% (the game's grid in Théo's
+		// sockets are under the item, at about 60% (the game's grid in a
 		// screenshot), the runes over it.
 		const auto   spots = SocketSpots(box.width, box.height, static_cast<int>(entry.runes.size()));
 		const double room  = Cell * std::min(1.0, spots.second) * 0.62;
@@ -3460,6 +4231,139 @@ std::string StoredArt(int u, bool eth, const std::string& art);
 std::string DimVeil(const Tile& tile, const std::string& name, int left, int top) {
 	return Image(name, left, top, "d2rloader\\grail-on\\dim" + std::to_string(std::clamp(tile.width, 1, 4)) + "x" + std::to_string(std::clamp(tile.height, 1, 4)));
 }
+// Lock held. How many grail tiles a list holds.
+int ListCount(const ExclList& list) {
+	int count = 0;
+	for (int u = 0; u < UniqueCount(); ++u)
+		if (Excludable(Uniques[u]))
+			for (const bool eth : { false, true }) count += BaseHasTile(u, eth) && ListHas(list, ExcludeKey(u, eth));
+	return count;
+}
+// ---- the Loot page's exclusions list ----
+// An accordion: the grail's menus that hold uniques and set items, their
+// categories, their tiles (an ethereal menu's are the ethereal tiles).
+struct ExclRow {
+	int         level {}, kind {}; // kind: 0 menu, 1 category or set, 2 item
+	std::string key, name;         // key: "m<menu>", "c<menu>.<category>", "s<menu>.<category>.<set>", "<entry>p" or "<entry>e"
+	int         excluded {}, total {};
+	bool        open {};
+};
+constexpr int ExclMenus[] { WeaponMenu, ArmorMenu, EthWeaponMenu, EthArmorMenu, SetMenu };
+
+std::string AsciiLower(std::string text) {
+	for (auto& c : text)
+		if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+	return text;
+}
+
+// The menus the editor lists: the exclusions', or the variant lists' (no ethereal menus: one line per item).
+std::vector<int> EditorMenus() {
+	if (VarEditing) return { WeaponMenu, ArmorMenu, SetMenu, MiscMenu };
+	return std::vector<int>(std::begin(ExclMenus), std::end(ExclMenus));
+}
+// Lock held. Whether a base entry is in the variant list `mode` (1 affix, 2 graphic) can hold.
+bool VariantCandidate(int u, int mode) {
+	const auto& entry = Uniques[u];
+	if (entry.variant || entry.variants.empty() || entry.objective || entry.secret) return false;
+	return mode == 1 ? !entry.affixes.empty() : mode == 2 && entry.pictures > 1;
+}
+
+// Lock held. The tiles of menu `m` (category `c`, or all of the menu's when
+// c < 0) whose name has `query` (lower case; empty for all).
+std::vector<std::pair<int, bool>> ExclTiles(int m, int c, const std::string& query) {
+	std::vector<std::pair<int, bool>> out;
+	const bool                        eth = IsEthMenu(m);
+	for (int u = 0; u < UniqueCount(); ++u) {
+		const auto& entry = Uniques[u];
+		if (VarEditing ? !VariantCandidate(u, VarEditing) || (!BaseHasTile(u, false) && !BaseHasTile(u, true)) : !Excludable(entry)) continue;
+		if (entry.category < 0 || entry.category >= CategoryCount() || (!VarEditing && !BaseHasTile(u, eth))) continue;
+		if (c >= 0 ? entry.category != c : Categories[entry.category].menu != BaseMenu(m)) continue;
+		// The search: the item's name or its base's (shako finds Harlequin Crest).
+		if (!query.empty() && AsciiLower(entry.name).find(query) == std::string::npos && AsciiLower(entry.base).find(query) == std::string::npos) continue;
+		out.push_back({ u, eth });
+	}
+	return out;
+}
+
+// Lock held. The list's rows as shown: open groups' children under them; a
+// search shows every group that has a match, open, with only the matches.
+std::vector<ExclRow> ExclRows(const std::string& typed) {
+	const std::string    query = AsciiLower(typed);
+	std::vector<ExclRow> rows;
+	const auto           counted = [](ExclRow& row, const std::vector<std::pair<int, bool>>& tiles) {
+        row.total = static_cast<int>(tiles.size());
+        for (const auto& [u, eth] : tiles) row.excluded += Drafted(u, eth);
+	};
+	for (const int m : EditorMenus()) {
+		const auto all = ExclTiles(m, -1, query);
+		if (all.empty()) continue;
+		ExclRow menu { .level = 0, .kind = 0, .key = "m" + std::to_string(m), .name = Tr(Menus[m]) };
+		counted(menu, all);
+		menu.open = !query.empty() || ExclOpen.count(menu.key);
+		rows.push_back(menu);
+		if (!menu.open) continue;
+		for (int c = 0; c < CategoryCount(); ++c) {
+			if (Categories[c].menu != BaseMenu(m)) continue;
+			const auto tiles = ExclTiles(m, c, query);
+			if (tiles.empty()) continue;
+			ExclRow category { .level = 1, .kind = 1, .key = "c" + std::to_string(m) + "." + std::to_string(c), .name = Tr(Categories[c].name) };
+			counted(category, tiles);
+			category.open = !query.empty() || ExclOpen.count(category.key);
+			rows.push_back(category);
+			if (!category.open) continue;
+			const auto item = [&](int u, bool eth, int level) {
+				// A variant list: the item's number of variants after its name.
+				std::string name = Uniques[u].name;
+				if (VarEditing) name += " (" + std::to_string(VarEditing == 1 ? static_cast<int>(Uniques[u].affixes.size()) : Uniques[u].pictures) + ")";
+				rows.push_back({ .level = level, .kind = 2, .key = std::to_string(u) + (eth ? "e" : "p"), .name = name, .excluded = Drafted(u, eth) ? 1 : 0, .total = 1 });
+			};
+			if (m != SetMenu) {
+				for (const auto& [u, eth] : tiles) item(u, eth, 2);
+				continue;
+			}
+			// Set items: under their set, the sets in the grail's order.
+			std::vector<int> sets;
+			for (const auto& tile : tiles)
+				if (std::find(sets.begin(), sets.end(), Uniques[tile.first].setId) == sets.end()) sets.push_back(Uniques[tile.first].setId);
+			for (const int set : sets) {
+				std::vector<std::pair<int, bool>> members;
+				for (const auto& tile : tiles)
+					if (Uniques[tile.first].setId == set) members.push_back(tile);
+				const auto named = SetNames.find(set);
+				ExclRow    group { .level = 2, .kind = 1, .key = "s" + std::to_string(m) + "." + std::to_string(c) + "." + std::to_string(set),
+				                   .name = named != SetNames.end() && !named->second.empty() ? named->second : Tr("Set") };
+				counted(group, members);
+				group.open = !query.empty() || ExclOpen.count(group.key);
+				rows.push_back(group);
+				if (group.open)
+					for (const auto& [u, eth] : members) item(u, eth, 3);
+			}
+		}
+	}
+	return rows;
+}
+
+// Lock held. The tiles a row stands for (the search's matches only).
+std::vector<std::pair<int, bool>> ExclRowTiles(const std::string& key, const std::string& typed) {
+	const std::string query = AsciiLower(typed);
+	if (key.empty()) return {};
+	if (key[0] == 'm') return ExclTiles(std::atoi(key.c_str() + 1), -1, query);
+	if (key[0] == 'c' || key[0] == 's') {
+		const auto dot = key.find('.');
+		if (dot == std::string::npos) return {};
+		auto tiles = ExclTiles(std::atoi(key.c_str() + 1), std::atoi(key.c_str() + dot + 1), query);
+		if (key[0] == 's') { // a set: its items only
+			const auto second = key.find('.', dot + 1);
+			const int  set    = second == std::string::npos ? -2 : std::atoi(key.c_str() + second + 1);
+			std::erase_if(tiles, [&](const auto& tile) { return Uniques[tile.first].setId != set; });
+		}
+		return tiles;
+	}
+	const int u = std::atoi(key.c_str());
+	if (u < 0 || u >= UniqueCount() || (VarEditing ? !VariantCandidate(u, VarEditing) : !Excludable(Uniques[u]))) return {};
+	return { { u, key.back() == 'e' } };
+}
+
 std::string FakeTile(const Tile& tile, int top, const std::string& n, bool label, bool frames = false) {
 	const auto& entry   = Uniques[tile.unique];
 	const bool  stored  = Stored.count({ tile.unique, tile.eth }) != 0;
@@ -3654,7 +4558,7 @@ KindCount CountTiles(Pick pick) {
 	KindCount count;
 	for (int u = 0; u < UniqueCount(); ++u)
 		for (const bool eth : { false, true }) {
-			if (Uniques[u].secret || !HasTile(u, eth) || !pick(u, eth)) continue;
+			if (Uniques[u].secret || Uniques[u].lost || !HasTile(u, eth) || !pick(u, eth)) continue;
 			if (BaseTiles.count({ u, eth })) ++count.bases; // a base is not the runeword
 			else if (!Stored.count({ u, eth })) ++count.missing;
 			else if (Perfect.count({ u, eth })) ++count.perfect;
@@ -3721,6 +4625,9 @@ std::string ButtonRing(const std::string& name, int x, int y, int size, const Ki
 	if (!count.total()) return "";
 	return Image(name, x + pad, y + pad, ChartSprite(ChartParts(count), size - 2 * pad, hole, square));
 }
+// The Lost items buttons' ring: all red.
+constexpr Rgb LostColor { 200, 30, 30 };
+std::string LostRing(const std::string& name, int x, int y, int size) { return Image(name, x + RingPad, y + RingPad, ChartSprite({ { 1, LostColor } }, size - 2 * RingPad, ButtonHole, true)); }
 
 // Invisible buttons over a ring chart's parts, for their tooltips: along each
 // row of small squares, one button per run of squares whose centre is in the
@@ -3970,7 +4877,7 @@ std::string ViewLayout(const std::string& id) {
 		if (!MenuShown(m)) continue;
 		const int  x = MenuX(), y = MenuTop + slot++ * MenuStep;
 		layout += SquareButton("Menu" + std::to_string(m), x, y, m == menu, "menu", "@grail-on:M" + std::to_string(m), "menu" + std::to_string(m), MenuSize);
-		layout += ButtonRing("MenuRing" + std::to_string(m), x, y, MenuSize, CountMenu(m));
+		layout += m == LostMenu ? LostRing("MenuRing" + std::to_string(m), x, y, MenuSize) : ButtonRing("MenuRing" + std::to_string(m), x, y, MenuSize, CountMenu(m));
 		// The ethereal menus' icons are see-through, like ethereal items.
 		int width = 1, height = 1;
 		if (const auto art = MenuArt(m, width, height); !art.empty())
@@ -3980,6 +4887,7 @@ std::string ViewLayout(const std::string& id) {
 	// frames show. ShiftLayout moves its children too: it starts MenuRoom left.
 	const std::string layoutBefore = layout;
 	layout.clear();
+	std::string tips; // the labels' tooltips: over LowerHit, which would hide them (a click on one is LowerHit's)
 	// The set names above their sets: "Unknown set" until one of its items is
 	// found, with spoilers off.
 	for (std::size_t h = 0; h < ShownHeaders.size(); ++h) {
@@ -4021,6 +4929,9 @@ std::string ViewLayout(const std::string& id) {
 		const int  margin = LabelMargin;
 		layout += Label("Label" + n, left - margin, top - LabelRows * Cell + Cell / 2, SlotWidth * Cell + margin + LabelMargin, LabelRows * Cell - Cell / 2, key,
 		                present && !dim ? "$FontColorGoldYellow" : "$FontColorGray", Config.font, "center", "center");
+		// Its brackets (a variant's choice): the label's tooltip, the label stays short.
+		if (named && !entry.detail.empty())
+			tips += HitButton("LabelTip" + n, left - margin, top - LabelRows * Cell + Cell / 2, SlotWidth * Cell + margin + LabelMargin, LabelRows * Cell - Cell / 2, Wrap(entry.detail), "lower");
 	}
 	// The row whose items do not fit: their whole slots and art, inside the
 	// game's ClipViewWidget, so they are cut where the view ends (half a cell
@@ -4039,6 +4950,8 @@ std::string ViewLayout(const std::string& id) {
 		const int   left = GridLeft + tile.x * Cell, top = GridTop + tile.y * Cell;
 		layout += Label("PeekLabel" + std::to_string(i), left - LabelMargin, top - LabelRows * Cell + Cell / 2, SlotWidth * Cell + 2 * LabelMargin, LabelRows * Cell - Cell / 2, key,
 		                Present.count(tile.unique) && !Dimmed(tile.unique, tile.eth) ? "$FontColorGoldYellow" : "$FontColorGray", Config.font, "center", "center");
+		if (named && !Uniques[tile.unique].detail.empty())
+			tips += HitButton("PeekLabelTip" + std::to_string(i), left - LabelMargin, top - LabelRows * Cell + Cell / 2, SlotWidth * Cell + 2 * LabelMargin, LabelRows * Cell - Cell / 2, Wrap(Uniques[tile.unique].detail), "lower");
 	}
 	layout += veils;
 	{
@@ -4055,6 +4968,11 @@ std::string ViewLayout(const std::string& id) {
 		              GridLeft, ViewTop, PageSize * Cell, ViewRows * Cell, Command("lower").c_str());
 		layout += lower;
 	}
+	if (!tips.empty()) {
+		char shift[160] {};
+		std::snprintf(shift, sizeof(shift), R"(, {"type": "Widget", "name": "Tips", "fields": {"rect": {"x": %d, "y": 0}}, "children": [)", -MenuRoom);
+		layout += shift + tips.substr(1) + "]}";
+	}
 	// The menu's categories down the left (over the grid's empty first column,
 	// after the grid so their clicks reach them), the category's first base on them.
 	for (int c = 0; c < CategoryCount() && !settings; ++c) {
@@ -4062,7 +4980,7 @@ std::string ViewLayout(const std::string& id) {
 		const int y = ButtonTop(c);
 		layout += SquareButton("Cat" + std::to_string(c), CatX(), y, c == CurrentCategory, "category", "@grail-on:C" + std::to_string(c),
 		                       "cat" + std::to_string(c), CatSize);
-		layout += ButtonRing("CatRing" + std::to_string(c), CatX(), y, CatSize, CountCategory(c, ViewEth));
+		layout += Categories[c].menu == LostMenu ? LostRing("CatRing" + std::to_string(c), CatX(), y, CatSize) : ButtonRing("CatRing" + std::to_string(c), CatX(), y, CatSize, CountCategory(c, ViewEth));
 		const auto& category = Categories[c];
 		if (!category.icon.empty())
 			layout += Icon("CatIcon" + std::to_string(c), CatX() + (CatSize - CatIcon) / 2, y + (CatSize - CatIcon) / 2, CatIcon, category.icon, category.width, category.height, ViewEth ? EthLook : "",
@@ -4152,7 +5070,7 @@ std::string ViewLayout(const std::string& id) {
 				layout += Icon("SetPageIcon" + std::to_string(p), CatX() + (CatSize - CatIcon) / 2, top + (CatSize - CatIcon) / 2, CatIcon, std::string("d2rloader\\grail-on\\icon-") + icons[p], 1, 1);
 			}
 		}
-		if (SettingsPage == 0) {
+		if (SettingsPage == 0 && !VarEditing) {
 		header("Spoilers");
 		{
 			// Shown before they are found: a column per kind, a row for names and one for art.
@@ -4184,6 +5102,23 @@ std::string ViewLayout(const std::string& id) {
 			         std::string("Your goal for ") + (k == 0 ? "uniques" : k == 1 ? "ethereal uniques" : k == 2 ? "set items" : "runewords")
 			             + ". None: left out of the overview. Find: one copy counts. Perfect: only a perfect copy counts.",
 			         "goal" + std::to_string(k));
+		// Variants: a switch each, how many items it splits and an edit
+		// button opening the list of items it can split.
+		header("Variants");
+		for (const auto& toggle : Toggles)
+			if (toggle.group == VariantGroup) {
+				const int mode  = !std::strcmp(toggle.key, "affix_variants") ? 1 : 2;
+				int       total = 0, in = 0;
+				const auto& off = mode == 1 ? AffixOff : GraphicOff;
+				for (int u = 0; u < UniqueCount(); ++u)
+					if (VariantCandidate(u, mode) && (BaseHasTile(u, false) || BaseHasTile(u, true))) ++total, in += !off.count(Uniques[u].id);
+				setting(toggle.key, left, toggle.name, Config.*toggle.field, toggle.help, std::string("toggle:") + toggle.key);
+				layout += TextLabel(std::string("VarCount") + toggle.key, x + TableWidth / 2, y, TableWidth / 2 - DropHeight - 20, ButtonSize,
+				                    std::to_string(in) + " / " + std::to_string(total) + " " + Tr("items"), "$FontColorGray", 26, "right");
+				layout += IconButton(std::string("VarEdit") + toggle.key, x + TableWidth - DropHeight, y + (ButtonSize - DropHeight) / 2, "edit",
+				                     Wrap(mode == 1 ? "Edit: the items whose choice rolls get a tile each." : "Edit: the items whose pictures get a tile each."), "varedit" + std::to_string(mode));
+				y += line;
+			}
 		}
 		if (SettingsPage == 1) {
 		header("Display");
@@ -4250,7 +5185,10 @@ std::string ViewLayout(const std::string& id) {
 			y += line;
 		}
 		}
-		if (SettingsPage == 2) {
+		if (SettingsPage == 2 || VarEditing) {
+		const bool editing = VarEditing || (ExclEditing >= 0 && ExclEditing < static_cast<int>(ExclLists.size()));
+		if (!editing) {
+		ExclMax = 0;
 		header("Loot");
 		for (int k = 0; k < 3; ++k)
 			dropdown(4 + k, GoalRowNames[k], choices(LootNames, 3), Config.loot[k],
@@ -4262,6 +5200,157 @@ std::string ViewLayout(const std::string& id) {
 				setting(toggle.key, left, toggle.name, Config.*toggle.field, toggle.help, std::string("toggle:") + toggle.key);
 				y += line;
 			}
+		header("RP Breaking Settings");
+		for (const auto& toggle : Toggles)
+			if (toggle.group == RpGroup) {
+				setting(toggle.key, left, toggle.name, Config.*toggle.field, toggle.help, std::string("toggle:") + toggle.key);
+				y += line;
+			}
+		// The exclusion lists: a line each with its active box, its name (typed
+		// in place while renaming), how many items it holds, then move up and
+		// down, Rename, Edit (the list's items in the editor) and Delete (a
+		// second click deletes); under them, Add (empty or from a preset).
+		header("Excluded items");
+		{
+			const int  count    = static_cast<int>(ExclLists.size());
+			const bool renaming = ObjTyping && TypeTarget == TypeListName;
+			const auto onHelp = Wrap("Active: the loot filter never hides its items."), editHelp = Wrap("Edit: choose the list's items.");
+			const auto renameHelp = Wrap("Rename: type a new name (Enter or a click elsewhere ends)."), deleteHelp = Wrap("Deletes this list (a second click confirms).");
+			for (int i = 0; i < count; ++i) {
+				const auto& list = ExclLists[i];
+				const auto  n    = std::to_string(i);
+				layout += SquareButton("ExclOn" + n, x, y, list.active, "tick", onHelp, "exlon" + n);
+				// The buttons from the right: Delete, Edit, Rename, down, up.
+				int        at   = x + TableWidth;
+				const bool armed = ExclDeleteArmed == i;
+				at -= ResetBox; // Delete's room: its button, or the confirmation as wide as Edit
+				if (armed) layout += TextButton("ExclDel" + n, at, y, ResetBox, DropHeight, "resetbox", 0, 3, 1, "Delete", "$FontColorRed", Wrap("Click again to delete this list."), "exldel" + n);
+				else layout += TextButton("ExclDel" + n, at + ResetBox - DropHeight, y, DropHeight, DropHeight, "removebutton", 0, 3, 1, "", "", deleteHelp, "exldel" + n);
+				at -= 12 + DropHeight;
+				layout += IconButton("ExclEdit" + n, at, y, "edit", editHelp, "exledit" + n);
+				at -= 12 + DropHeight;
+				layout += IconButton("ExclRename" + n, at, y, "rename", renameHelp, "exlren" + n);
+				at -= 12 + DropHeight;
+				if (i + 1 < count) layout += TextButton("ExclDown" + n, at, y, DropHeight, DropHeight, "downarrow", 0, 1, 2, "", "", Wrap("Move down"), "exldown" + n);
+				at -= 12 + DropHeight;
+				if (i > 0) layout += TextButton("ExclUp" + n, at, y, DropHeight, DropHeight, "uparrow", 0, 1, 2, "", "", Wrap("Move up"), "exlup" + n);
+				const int nameX = x + ButtonSize + 20, countWidth = 170, nameWidth = at - 20 - countWidth - nameX;
+				if (renaming && ExclRenaming == i) {
+					layout += TextLabel("ExclName" + n, nameX, y, nameWidth, DropHeight, TypedText(TypeListName) + "|", "$FontColorWhite", 30);
+					layout += HitButton("ExclNameHit" + n, nameX, y, nameWidth, DropHeight, "", "exlren" + n);
+				} else {
+					layout += TextLabel("ExclName" + n, nameX, y, nameWidth, DropHeight, list.name, list.active ? "$FontColorWhite" : "$FontColorGray", 30);
+					layout += HitButton("ExclNameHit" + n, nameX, y, nameWidth, DropHeight, onHelp, "exlon" + n);
+				}
+				const int items = ListCount(list);
+				layout += TextLabel("ExclCount" + n, nameX + nameWidth, y, countWidth, DropHeight, std::to_string(items) + (items == 1 ? " item" : " items"), "$FontColorGray", 26, "right");
+				y += line;
+			}
+			if (count == 0) {
+				layout += TextLabel("ExclNoList", x, y, TableWidth, DropHeight, "No list: add one", "$FontColorGray", 26);
+				y += line;
+			}
+			layout += TextButton("ExclListAdd", x, y, AddWidth, DropHeight, "addbutton", 0, 1, 2, "", "", Wrap("Add a list: empty, or with a preset's items."), "drop14");
+			layout += TextLabel("ExclAddName", x + AddWidth + 20, y, 400, DropHeight, "Add a list", "$FontColorWhite", 30);
+			layout += HitButton("ExclAddHit", x + AddWidth + 20, y, 400, DropHeight, "", "drop14");
+			if (OpenDrop == 14) {
+				list.x = x, list.y = y + DropHeight, list.current = -1, list.width = DropWidth, list.tile = "droptile";
+				const char* choices[] { "Empty list", PresetNames[0], PresetNames[1] };
+				for (int k = 0; k < 3; ++k) list.names.push_back(choices[k]), list.commands.push_back("exladd" + std::to_string(k));
+			}
+			y += line;
+		}
+		}
+		// The editor: the list's name, Cancel and Save; a search box; the
+		// accordion of the grail's menus, their categories (sets: their sets)
+		// and their items, each with a check box (a group's ticks or clears
+		// all of it); the window's scroll bar for it.
+		if (editing) {
+			const std::string title = Tr("Edit") + ": " + (VarEditing ? Tr(ExclDraft.name) : ExclDraft.name);
+			header(title.c_str());
+			layout += TextLabel("ExclEditHelp", x, y, TableWidth - 2 * (DropHeight + 12), DropHeight,
+			                    VarEditing == 1   ? "Ticked items get a tile for each choice of their choice roll."
+			                    : VarEditing == 2 ? "Ticked items get a tile for each of their pictures."
+			                                      : "Ticked items are never hidden by the loot filter.",
+			                    "$FontColorGray", 26);
+			layout += IconButton("ExclCancel", x + TableWidth - 2 * DropHeight - 12, y, "cancel", Wrap("Cancel: leaves the list as it was."), "exlcancel");
+			layout += IconButton("ExclSave", x + TableWidth - DropHeight, y, "save", Wrap("Save: keeps the changes."), "exlsave");
+			y += line;
+		}
+		if (editing) {
+			layout += Image("ExclInputBack", x, y, "d2rloader\\grail-on\\inputboxs");
+			const std::string typed  = TypedText(TypeExclude);
+			const bool        typing = ObjTyping && TypeTarget == TypeExclude;
+			const bool        empty  = typed.empty() && !typing;
+			layout += R"(, {"type": "TextBoxWidget", "name": "ExclTyped", "fields": {)" + Rect(x + 24, y, ExclInputWidth - 48, DropHeight) + R"(, "text": )"
+			        + Json(empty ? Tr("Search items") : typed + (typing ? "|" : "")) + R"(, "style": {"fontColor": ")" + (empty ? "$FontColorGray" : "$FontColorWhite")
+			        + R"(", "pointSize": 30, "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "left", "v": "center"}}}})";
+			layout += HitButton("ExclTypeHit", x, y, ExclInputWidth - (empty ? 0 : DropHeight), DropHeight, "", "excltype");
+			if (!empty) layout += IconButton("ExclTypeClear", x + ExclInputWidth - DropHeight, y, "cancel", Tr("Clear the search"), "excltypeclear");
+			const bool builtin = ExclDraft.preset >= 0;
+			layout += IconButton("ExclClear", x + TableWidth - DropHeight, y, builtin ? "reset" : "clear",
+			                     Wrap(builtin      ? "Reset: the preset's items again, as the list came."
+			                          : VarEditing ? "Clear: no item gets tiles of its own."
+			                                       : "Clear: every item of the list is filtered again."),
+			                     "excludeclear");
+			y += line + 6;
+			const auto rows    = ExclRows(typed);
+			const int  rowStep = ExclRowHeight;
+			const int  bottom  = ViewTop + ViewRows * Cell - 20;
+			const int  steps   = std::clamp((bottom - y) / StepHeight, 2, ScrollSteps);
+			const int  perPage = std::max(1, steps * StepHeight / rowStep);
+			const int  count   = static_cast<int>(rows.size());
+			ExclPerPage        = perPage;
+			ExclMax            = std::max(0, count - perPage);
+			ExclSteps          = steps;
+			ExclFirst          = std::clamp(ExclFirst, 0, ExclMax);
+			const int  top     = y;
+			const int  arrowX  = x + TableWidth;
+			const auto itemHelp = Wrap(VarEditing ? "Ticked: a tile for each of its variants." : "Ticked: the loot filter never hides it."), groupHelp = Wrap("Ticks every item in it, or clears them all when they are all ticked.");
+			if (rows.empty()) layout += TextLabel("ExclNone", x, y, TableWidth, ExclRowHeight, typed.empty() ? "No items" : "No item matches", "$FontColorGray", 26);
+			for (int i = ExclFirst; i < count && i < ExclFirst + perPage; ++i) {
+				const auto& row    = rows[i];
+				const auto  n      = std::to_string(i - ExclFirst);
+				y                  = top + (i - ExclFirst) * rowStep;
+				const int   indent = x + row.level * ExclIndent;
+				const int   boxX   = indent + ExclMark + 8;
+				const int   nameX  = boxX + ExclMark + 14;
+				const int   right  = arrowX - 20;
+				const int   markY  = y + (rowStep - ExclMark) / 2;
+				if (row.kind < 2) // a group: its arrow opens or closes it
+					layout += TextButton("ExclOpen" + n, indent, markY, ExclMark, ExclMark, row.open ? "exopen" : "exclosed", 0, 1, 2, "", "", "", "exo" + row.key);
+				const char* box = row.excluded == 0 ? "ticks" : row.excluded == row.total ? "ticksall" : "tickspart";
+				layout += TextButton("ExclBox" + n, boxX, markY, ExclMark, ExclMark, box, 0, 1, 2, "", "", row.kind < 2 ? groupHelp : itemHelp, (row.kind < 2 ? "exg" : "exi") + row.key);
+				const char* color = row.kind == 0 ? "$FontColorGoldYellow" : row.kind == 1 ? "$FontColorLightGold" : row.excluded ? "$FontColorWhite" : "$FontColorGray";
+				layout += TextLabel("ExclName" + n, nameX, y, right - nameX - 160, rowStep, row.name, color, row.kind == 2 ? 26 : 28);
+				if (row.kind < 2)
+					layout += TextLabel("ExclCount" + n, right - 160, y, 160, rowStep, std::to_string(row.excluded) + " / " + std::to_string(row.total), "$FontColorGray", 24, "right");
+				layout += HitButton("ExclHit" + n, nameX, y, right - nameX, rowStep, "", (row.kind < 2 ? "exo" : "exi") + row.key);
+			}
+			// The list's scroll bar: the view's, where the view's is, as tall as
+			// the list (its track cut to that height, its bottom edge kept).
+			BarMax = ExclMax, BarY = top, BarSteps = steps;
+			if (ExclMax > 0) {
+				const int  height = steps * StepHeight, edge = 16;
+				const int  thumb  = std::clamp((steps * perPage + count / 2) / std::max(1, count), 1, steps - 1);
+				char       track[1024] {};
+				std::snprintf(track, sizeof(track),
+				              R"(, {"type": "ClipViewWidget", "name": "ExclTrack", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}}, "children": [)"
+				              R"({"type": "ImageWidget", "name": "ExclTrackTop", "fields": {"rect": {"x": %d, "y": 0}, "filename": "d2rloader\\grail-on\\track"}}]})"
+				              R"(, {"type": "ClipViewWidget", "name": "ExclTrackEnd", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}}, "children": [)"
+				              R"({"type": "ImageWidget", "name": "ExclTrackBottom", "fields": {"rect": {"x": %d, "y": %d}, "filename": "d2rloader\\grail-on\\track"}}]})",
+				              BarLeft, top, BarWidth, height - edge, -MenuRoom, BarLeft, top + height - edge, BarWidth, edge, -MenuRoom, edge - BarHeight);
+				layout += track;
+				layout += Image("ExclThumb", BarLeft, top + (steps - thumb) * StepHeight * ExclFirst / ExclMax, "d2rloader\\grail-on\\thumb" + std::to_string(thumb));
+				for (int i = 0; i < steps; ++i) {
+					char step[512] {};
+					std::snprintf(step, sizeof(step),
+					              R"(, {"type": "ButtonWidget", "name": "ExclStep%d", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "filename": "d2rloader\\grail-on\\step", "normalFrame": 0, "hoveredFrame": 0, "pressedFrame": 0, "onClickMessage": %s}})",
+					              i, BarLeft, top + i * StepHeight, BarWidth, StepHeight, Command("exs" + std::to_string(i)).c_str());
+					layout += step;
+				}
+			}
+		}
 		}
 		if (SettingsPage == 3) {
 			// Misc tracking: a drop-down per item type with misc items, one
@@ -4416,7 +5505,7 @@ std::string ViewLayout(const std::string& id) {
 std::string ViewKey() {
 	if (CurrentCategory != SettingsView) OpenDrop = -1; // a list closes with its page
 	std::string key = "q" + TypedText(TypeSearch) + (ObjTyping && TypeTarget == TypeSearch ? "|" : "") + std::to_string(SearchAt) + "/" + std::to_string(SearchMatches.size()) + ":" + std::to_string(Config.searchX) + ","
-	                + std::to_string(Config.searchY) + "," + std::to_string(Config.searchWidth) + ":" + (CurrentCategory == SettingsView && SettingsPage == 4 ? "t" + ObjTypedText() + (ObjTyping ? "|" : "") + ":" : std::string()) + std::to_string(Config.version) + ":d" + std::to_string(OpenDrop) + ":" + std::to_string(ProblemCount.load()) + ":" + std::to_string(CurrentCategory) + (ViewEth ? "e:" : ":") + std::to_string(Scroll) + ":";
+	                + std::to_string(Config.searchY) + "," + std::to_string(Config.searchWidth) + ":" + (CurrentCategory == SettingsView && SettingsPage == 4 ? "t" + ObjTypedText() + (ObjTyping ? "|" : "") + ":" : std::string()) + (CurrentCategory == SettingsView && (SettingsPage == 2 || VarEditing) ? "V" + std::to_string(VarEditing) + "x" + TypedText(TypeExclude) + (ObjTyping && TypeTarget == TypeExclude ? "|" : "") + ":" + std::to_string(ExclFirst) + ":" + (ObjTyping && TypeTarget == TypeListName ? "n" + std::to_string(ExclRenaming) + TypedText(TypeListName) + ":" : std::string()) + "D" + std::to_string(ExclDeleteArmed) + "E" + std::to_string(ExclEditing) + ":" : std::string()) + std::to_string(Config.version) + ":d" + std::to_string(OpenDrop) + ":" + std::to_string(ProblemCount.load()) + ":" + std::to_string(CurrentCategory) + (ViewEth ? "e:" : ":") + std::to_string(Scroll) + ":";
 	for (const auto& tile : Shown) key += Present.count(tile.unique) ? Perfect.count({ tile.unique, tile.eth }) ? '2' : '1' : '0';
 	key += ':';
 	// The cut slots and pictures, which hold no real item: drawn stored or not.
@@ -4433,6 +5522,7 @@ std::string ViewKey() {
 	// The rings show the counts: every menu's, and the stats pages' or the menu's categories'.
 	const auto add = [&](const KindCount& count) { key += ":" + std::to_string(count.perfect) + "/" + std::to_string(count.stored) + "/" + std::to_string(count.bases) + "/" + std::to_string(count.missing); };
 	for (int m = 0; m < static_cast<int>(std::size(Menus)); ++m) add(CountMenu(m));
+	key += ":l" + std::to_string(LostOf.size());
 	if (CurrentCategory == StatsView) {
 		key += ":p" + std::to_string(StatsPage);
 		for (int k = 0; k < KindCountAll; ++k) add(CountKind(static_cast<Kind>(k)));
@@ -4485,10 +5575,10 @@ std::string StringsJson() {
 		const auto n = std::to_string(u);
 		if (Uniques[u].runeword) strings.push_back({ "B" + n, "Unknown runeword" }); // shown until found, spoilers off
 		else strings.push_back({ "B" + n, Uniques[u].base, Raw });
-		strings.push_back({ "N" + n, Uniques[u].name, Raw });
+		strings.push_back({ "N" + n, PlainName(u), Raw });
 		if (!Uniques[u].eth) continue;
 		strings.push_back({ "BE" + n, Uniques[u].base, Raw }); // in the ethereal menus: no mark needed
-		strings.push_back({ "NE" + n, Uniques[u].name, Raw });
+		strings.push_back({ "NE" + n, PlainName(u), Raw });
 	}
 	const int   chosen = Config.language >= 0 && Config.language < LanguageCount ? Config.language : -1;
 	std::string json   = "[";
@@ -5087,6 +6177,45 @@ void RegisterSettingsArt() {
 	else {
 		auto plain = CategoryButton(false, DropHeight, DropHeight);
 		ok         = RegisterSprite("removebutton", { plain[0], plain[2], plain[0], plain[1] }) && ok;
+	}
+	// The exclusions list: small check boxes (none, all, some of a group
+	// ticked: the ticked box dimmed), its search box, the groups' arrows (the
+	// loot filter's down arrow, turned to point right while closed).
+	if (const auto& box = art[ArtCheck]; box.size() >= 7) {
+		std::vector<Picture> off, on, part;
+		for (const int f : { 0, 1, 2 }) {
+			off.push_back(Fit(box[f], ExclMark, ExclMark)), on.push_back(Fit(box[f + 4], ExclMark, ExclMark));
+			Picture dim = on.back();
+			for (std::size_t k = 0; k + 3 < dim.rgba.size(); k += 4) dim.rgba[k] = static_cast<unsigned char>(dim.rgba[k] / 2), dim.rgba[k + 1] = static_cast<unsigned char>(dim.rgba[k + 1] / 2), dim.rgba[k + 2] = static_cast<unsigned char>(dim.rgba[k + 2] / 2);
+			part.push_back(dim);
+		}
+		ok = RegisterSprite("ticks", off) && RegisterSprite("ticksall", on) && RegisterSprite("tickspart", part) && ok;
+	} else {
+		auto off = CheckBox(false), on = CheckBox(true);
+		for (auto& frame : off) frame = Fit(frame, ExclMark, ExclMark);
+		for (auto& frame : on) frame = Fit(frame, ExclMark, ExclMark);
+		ok = RegisterSprite("ticks", off) && RegisterSprite("ticksall", on) && RegisterSprite("tickspart", on) && ok;
+	}
+	if (const auto &l = art[ArtTileLeft], &m = art[ArtTileCenter], &r = art[ArtTileRight]; !l.empty() && !m.empty() && !r.empty())
+		ok = RegisterSprite("inputboxs", { Join(l[0], m[0], r[0], ExclInputWidth, DropHeight) }) && ok;
+	else ok = RegisterSprite("inputboxs", { CategoryButton(false, ExclInputWidth, DropHeight)[0] }) && ok;
+	{
+		std::vector<Picture> down;
+		if (art[ArtDown].size() >= 3) down = fitted(art[ArtDown], ExclMark, ExclMark);
+		else {
+			auto plain = CategoryButton(false, ExclMark, ExclMark);
+			static constexpr unsigned char gold[3] { 199, 179, 119 };
+			for (auto& frame : plain) Arrow(frame, ExclMark / 2, ExclMark / 2, gold);
+			down = { plain[0], plain[1], plain[2] };
+		}
+		std::vector<Picture> right;
+		for (const auto& frame : down) { // turned a quarter: pointing right
+			Picture turned { frame.height, frame.width, std::vector<unsigned char>(frame.rgba.size()) };
+			for (int y = 0; y < frame.height; ++y)
+				for (int x = 0; x < frame.width; ++x) std::memcpy(turned.at(y, frame.width - 1 - x), const_cast<Picture&>(frame).at(x, y), 4);
+			right.push_back(turned);
+		}
+		ok = RegisterSprite("exopen", down) && RegisterSprite("exclosed", right) && ok;
 	}
 	// The icon picker's box: a loot filter list line, stretched.
 	if (const auto& row = art[ArtRow]; !row.empty()) ok = RegisterSprite("pickback", { Stretch(row[0], PickWidth, PickHeight, 24, 16) }) && ok;
@@ -5833,6 +6962,8 @@ struct Record {
 	std::uint32_t             code {}, quality {}, itemLevel {}, stateFlags {};
 	std::int32_t              qualityRecordId = -1;
 	std::vector<std::uint8_t> bytes;
+	std::string               variant; // an item with a choice roll: its choice's key (ChoiceKey), empty when not known yet
+	mutable int               picture = -2; // its picture from its bytes (-1: none), -2 before it is read
 };
 // All guarded by Lock.
 std::map<std::uint32_t, Record>       Records;      // by fingerprint
@@ -5852,6 +6983,8 @@ struct TakenOutRecord {
 std::map<std::uint32_t, TakenOutRecord> TakenOut;
 std::string                           StoreCharacter; // the open storage's character (UTF-8 name)
 bool                                  TakenOutChecked {}; // this character's leftovers from a crash were looked at
+bool                                  PicturesScanned {}; // this character's items' pictures read (graphic variants on)
+void ReadPictures(D2RL::PlayerHandle player, bool all);
 bool                                  OrphansChecked {};  // stored items no tile claims were given back for this character
 bool StaleChecked {}; // the page this character came in with was checked against the records; guarded by Lock
 bool                                  StoreReady {}; // the native calls are there
@@ -5995,6 +7128,13 @@ void SaveStore() {
 	w.out += "OUT1";
 	w.u32(static_cast<std::uint32_t>(TakenOut.size()));
 	for (const auto& [fingerprint, out] : TakenOut) w.text(out.owner), put(out.record);
+	// Then the records' variants (older versions stop before them).
+	std::uint32_t variants = 0;
+	for (const auto& [fingerprint, record] : Records) variants += !record.variant.empty();
+	w.out += "VAR1";
+	w.u32(variants);
+	for (const auto& [fingerprint, record] : Records)
+		if (!record.variant.empty()) w.u32(fingerprint), w.text(record.variant);
 	const std::wstring temporary = StorePath + L".tmp";
 	FILE*              file      = _wfopen(temporary.c_str(), L"wb");
 	if (!file || std::fwrite(w.out.data(), 1, w.out.size(), file) != w.out.size()) {
@@ -6068,6 +7208,14 @@ bool          LoadStore(const std::wstring& path) {
 			out.owner = r.text();
 			if (!r.ok || !take(out.record)) break;
 			TakenOut[out.record.fingerprint] = std::move(out);
+		}
+	}
+	if (r.ok && r.at + 8 <= data.size() && !data.compare(r.at, 4, "VAR1")) {
+		r.at += 4;
+		for (std::uint32_t n = r.get(4); r.ok && n--;) {
+			const auto fingerprint = r.get(4);
+			auto       key         = r.text();
+			if (const auto record = Records.find(fingerprint); r.ok && record != Records.end()) record->second.variant = std::move(key);
 		}
 	}
 	if (!r.ok) {
@@ -6165,6 +7313,7 @@ void OpenStoreFor(D2RL::PlayerHandle player) {
 	StoreCharacter  = name;
 	TakenOutChecked = false;
 	OrphansChecked  = false;
+	PicturesScanned = false;
 	if (folder.empty()) {
 		StorePath.clear();
 		Problem(true, "grailon: no Saved Games folder: the grail cannot store items");
@@ -6183,6 +7332,8 @@ struct Snapshot {
 	std::uint32_t             itemLevel {}, quality {}; // to find the fingerprint in the bytes
 	bool                      ok {};
 	std::uint32_t             code {}; // its base: a simple item's (gem, rune...) identity
+	const std::vector<VariantChoice>* variants {}; // set: the item's choices, read on the native item
+	std::string               variant;     // its choice's key (ChoiceKey)
 };
 
 // The item's fingerprint as its save bytes hold it (what stays the same
@@ -6192,6 +7343,9 @@ struct Snapshot {
 // level+quality after the compact part (53 bits + the code + 3 socket bits,
 // so from bit 64 on). Read from the bytes alone, so the same item always
 // gives the same value. 0 when none.
+// The item level as the save writer wrote it: 99 at most (an item dropped at
+// 110, the Hellfire Torch, is saved and loaded back at 99).
+bool SavedLevel(std::uint32_t saved, std::uint32_t itemLevel) { return saved == (itemLevel & 0x7F) || (itemLevel > 99 && saved == 99); }
 std::uint32_t FingerprintInBytes(const std::vector<std::uint8_t>& bytes, std::uint32_t itemLevel, std::uint32_t quality) {
 	const auto bit = [&](std::size_t i) { return (bytes[i >> 3] >> (i & 7)) & 1u; };
 	const auto get = [&](std::size_t at, int n) {
@@ -6201,7 +7355,7 @@ std::uint32_t FingerprintInBytes(const std::vector<std::uint8_t>& bytes, std::ui
 	};
 	const std::size_t total = bytes.size() * 8;
 	for (std::size_t at = 64 + 32; at + 11 <= total && at < 64 + 32 + 160; ++at) {
-		if (get(at, 7) != (itemLevel & 0x7F) || get(at + 7, 4) != (quality & 0xF)) continue;
+		if (!SavedLevel(get(at, 7), itemLevel) || get(at + 7, 4) != (quality & 0xF)) continue;
 		return get(at - 32, 32);
 	}
 	return 0;
@@ -6219,7 +7373,7 @@ int PictureInBytes(const std::vector<std::uint8_t>& bytes, std::uint32_t itemLev
 	};
 	const std::size_t total = bytes.size() * 8;
 	for (std::size_t at = 64 + 32; at + 15 <= total && at < 64 + 32 + 160; ++at) {
-		if (get(at, 7) != (itemLevel & 0x7F) || get(at + 7, 4) != (quality & 0xF)) continue;
+		if (!SavedLevel(get(at, 7), itemLevel) || get(at + 7, 4) != (quality & 0xF)) continue;
 		return get(at + 11, 1) ? static_cast<int>(get(at + 12, 3)) : -1;
 	}
 	return -1;
@@ -6232,7 +7386,8 @@ Record* RecordAt(int u, bool eth);
 std::string StoredArt(int u, bool eth, const std::string& art) {
 	const auto& entry = Uniques[u];
 	const int   count = entry.code == "rin" ? 5 : entry.code == "amu" ? 3 : entry.code == "jew" || entry.code == "cjw" ? 6 : entry.code == "cm1" || entry.code == "cm2" || entry.code == "cm3" ? 3 : 0;
-	if (!count) return art;
+	// An item with its own picture (Annihilus, Hellfire Torch, Seraph's Hymn...) keeps it.
+	if (!count || entry.art != entry.ghost) return art;
 	const Record* record = RecordAt(u, eth);
 	if (!record) return art;
 	const int picture = PictureInBytes(record->bytes, record->itemLevel, record->quality);
@@ -6261,6 +7416,12 @@ void __cdecl TakeSnapshot(const D2RL::PluginContext*, void* native, void* userDa
 	// A simple item (gems, runes, skulls...) has no fingerprint: every copy of
 	// a base is the same, so its base stands for it.
 	if (snapshot->ok && !snapshot->fingerprint && snapshot->bytes.size() <= 24 && snapshot->code) snapshot->fingerprint = SimplePrint(snapshot->code);
+	if (snapshot->variants)
+		for (const auto& choice : *snapshot->variants)
+			if (ChoiceOn(native, choice)) {
+				snapshot->variant = ChoiceKey(choice);
+				break;
+			}
 }
 
 // The fingerprint of an item (read once per item).
@@ -6275,7 +7436,27 @@ std::uint32_t FingerprintOf(const Items::ItemInfo& item) {
 	std::lock_guard guard(Lock);
 	if (!snapshot.fingerprint && MiscByCode.count(CodeText(item.code))) snapshot.fingerprint = SimplePrint(item.code); // a misc base: its base is its identity
 	Fingerprints[item.runtimeId] = snapshot.fingerprint;
+	Pictures[item.runtimeId]     = PictureInBytes(snapshot.bytes, snapshot.itemLevel, snapshot.quality);
 	return snapshot.fingerprint;
+}
+
+// An item's picture (-1: none), from its save bytes (read once per item).
+void NeedPicture(std::uint32_t runtimeId);
+// Its picture, from its save bytes. Only the game thread reads them: from any
+// other, -1 now and the game thread reads it soon (the next look has it).
+int PictureOfItem(const Items::ItemInfo& item) {
+	{
+		std::lock_guard guard(Lock);
+		if (const auto known = Pictures.find(item.runtimeId); known != Pictures.end()) return known->second;
+	}
+	Snapshot snapshot { .itemLevel = item.itemLevel, .quality = static_cast<std::uint32_t>(item.quality) };
+	snapshot.code = item.code;
+	if (!ItemApi || ItemApi->editNativeItem(Context, item.handle, TakeSnapshot, &snapshot) != Items::Result::Success || !snapshot.ok) {
+		NeedPicture(item.runtimeId);
+		return -1;
+	}
+	std::lock_guard guard(Lock);
+	return Pictures[item.runtimeId] = PictureInBytes(snapshot.bytes, snapshot.itemLevel, snapshot.quality);
 }
 
 // A runeword's Runes row in an item's save bytes, -1 for none: after the
@@ -6301,7 +7482,7 @@ std::vector<std::pair<int, std::uint32_t>> RunewordsInBytes(const std::vector<st
 	const std::size_t total = bytes.size() * 8;
 	if (total < 32 || !get(26, 1)) return rows;
 	for (std::size_t at = 64 + 32; at + 11 <= total && at < 64 + 32 + 160; ++at) {
-		if (get(at, 7) != (itemLevel & 0x7F) || get(at + 7, 4) != (quality & 0xF)) continue;
+		if (!SavedLevel(get(at, 7), itemLevel) || get(at + 7, 4) != (quality & 0xF)) continue;
 		std::size_t pos = at + 11;
 		if (pos + 2 > total) break;
 		pos += get(pos, 1) ? 4 : 1;
@@ -6405,12 +7586,15 @@ int RunewordRowOf(const Items::ItemInfo& item) {
 // tooltip, which the game thread cannot build). Guarded by Lock.
 std::map<std::uint32_t, bool> UiPerfect;
 
+void TagVariant(Record& record, const void* unit);
+void MarkFound(const Record& record);
 // Lock held. A new record for page item `item` of entry `u`.
 bool RecordItem(const Items::ItemInfo& item, int u, bool eth, bool perfect) {
 	if (Uniques[u].misc) perfect = true; // nothing on a misc item varies: every copy is perfect
 	if (const auto known = UiPerfect.find(item.runtimeId); known != UiPerfect.end()) perfect = perfect || known->second, UiPerfect.erase(known);
 	Snapshot snapshot { .itemLevel = item.itemLevel, .quality = static_cast<std::uint32_t>(item.quality) };
 	snapshot.code = item.code;
+	if (const int b = Uniques[u].variant ? Uniques[u].variantOf : u; b >= 0 && !Uniques[b].affixes.empty()) snapshot.variants = &Uniques[b].affixes;
 	const auto read = ItemApi->editNativeItem(Context, item.handle, TakeSnapshot, &snapshot);
 	// A misc base (gems, runes...): every copy is the same, its base is its identity.
 	if (read == Items::Result::Success && snapshot.ok && !snapshot.fingerprint && Uniques[u].misc) snapshot.fingerprint = SimplePrint(item.code);
@@ -6427,13 +7611,18 @@ bool RecordItem(const Items::ItemInfo& item, int u, bool eth, bool perfect) {
 		return false; // it would take the other item's place
 	}
 	const auto base = BaseFor.find(item.runtimeId);
-	Record     record { .id = Uniques[u].id, .eth = eth, .perfect = perfect, .base = base != BaseFor.end() && base->second == u, .fingerprint = snapshot.fingerprint, .code = item.code,
+	Record     record { .id = Uniques[Uniques[u].variant ? Uniques[u].variantOf : u].id, .eth = eth, .perfect = perfect, .base = base != BaseFor.end() && base->second == u, .fingerprint = snapshot.fingerprint, .code = item.code,
 		            .quality = static_cast<std::uint32_t>(item.quality), .itemLevel = item.itemLevel, .stateFlags = item.stateFlags, .qualityRecordId = item.qualityRecordId,
 		            .bytes = std::move(snapshot.bytes) };
 	Fingerprints[item.runtimeId] = record.fingerprint;
 	Tombstones.erase(record.fingerprint);
 	if (record.base) record.perfect = false;
 	else FoundIds.insert(record.id); // a base finds nothing
+	// Its choice: the snapshot's (read on the item the game saved), else the client's item, else the entry's.
+	record.variant = snapshot.variant;
+	if (record.variant.empty()) TagVariant(record, ClientItem(item.runtimeId));
+	if (record.variant.empty() && Uniques[u].variant && Uniques[u].affix >= 0) record.variant = ChoiceKey(Uniques[u].affixes[Uniques[u].affix]);
+	MarkFound(record);
 	Records[record.fingerprint] = std::move(record);
 	return true;
 }
@@ -6487,6 +7676,7 @@ void* DecodeInstead(void* game, void*, int) noexcept {
 
 // Game thread: the record's item, made again where `destination` says.
 Items::ItemCreateSpec RecordSpec(const Record& record, const Items::ItemDestination& destination);
+int RecordPicture(const Record& record);
 Items::Result Materialize(D2RL::PlayerHandle player, const Record& record, const Items::ItemDestination& destination, D2RL::ItemHandle* made) {
 	auto* slot = reinterpret_cast<void**>(CoreModule + Store::CoreSlot);
 	DWORD old  = 0;
@@ -6509,6 +7699,12 @@ Items::Result Materialize(D2RL::PlayerHandle player, const Record& record, const
 	*slot = original;
 	VirtualProtect(slot, sizeof(void*), old, &old);
 	Decode = {};
+	// Its picture is the record's: known at once (no save bytes to read).
+	if (Items::ItemInfo info { .structSize = Items::ItemInfoSize }; result == Items::Result::Success && made && *made && GetInfo(Context, *made, &info) == Items::Result::Success) {
+		std::lock_guard guard(Lock);
+		if (const int picture = RecordPicture(record); picture >= 0) Pictures[info.runtimeId] = picture;
+		VariantUnits.erase(info.runtimeId);
+	}
 	return result;
 }
 
@@ -6522,7 +7718,7 @@ Items::ItemCreateSpec RecordSpec(const Record& record, const Items::ItemDestinat
 	spec.qualityRecordId = (spec.quality == Items::Quality::Unique || spec.quality == Items::Quality::Set) && record.qualityRecordId >= 0 ? static_cast<std::uint32_t>(record.qualityRecordId)
 	                                                                                                                                     : Items::RandomQualityRecord;
 	if (spec.quality == Items::Quality::Unique) spec.flags = Items::ItemCreateFlagBit(Items::ItemCreateFlag::AllowDuplicateUnique);
-	spec.itemLevel   = record.itemLevel;
+	spec.itemLevel   = std::min<std::uint32_t>(record.itemLevel, 99); // D2RLoader refuses more (a Torch dropped at 110); the save bytes hold 99 anyway
 	spec.seedMode    = Items::SeedMode::Random;
 	spec.quantity    = Items::DefaultValue;
 	spec.durability  = Items::DefaultValue;
@@ -6546,6 +7742,7 @@ std::set<std::uint32_t>        GhostWanted; // guarded by Lock
 std::atomic<bool>              GhostQueued {}, GhostsFreeing {};
 std::atomic<std::uint64_t>     GhostEpoch {};   // counts ghost frees: a freed ghost's address can come back as another item
 std::set<std::uint32_t>        PerfectChecked;  // records whose ghost told whether they are perfect (this launch); guarded by Lock
+std::set<std::uint32_t>        VariantChecked;  // records whose ghost told their variant (this launch); guarded by Lock
 std::set<std::uint32_t>        SweepGhosts;     // ghosts made only for that check, freed after it; guarded by Lock
 
 // The server game, learnt from a createItem whose decode makes nothing.
@@ -6577,6 +7774,19 @@ void* LearnGame(D2RL::PlayerHandle player, std::uint32_t code) {
 	Decode = {};
 	if (result == Items::Result::Success && made) (void)DestroyItem(player, made); // should not happen
 	return ServerGame.load();
+}
+
+// Game thread, Lock not held. A record's bytes decoded by the game's save
+// loader into a loose server item (in no inventory), or null.
+void* GhostFromBytes(void* game, const std::vector<std::uint8_t>& bytes) {
+	if (!game || bytes.empty()) return nullptr;
+	alignas(16) std::uint8_t header[0x100] {};
+	const auto               flag = *reinterpret_cast<std::uint8_t*>(static_cast<char*>(game) + Store::GameFlag);
+	(void)ReadHeader(flag, bytes.data(), bytes.size(), 1, header, Store::Version);
+	std::int32_t first = 0;
+	std::memcpy(&first, header, 4);
+	int read = 0;
+	return first != -1 ? LoadItem(game, nullptr, bytes.data(), static_cast<int>(bytes.size()), 1, header, &read, Store::Version) : nullptr;
 }
 
 void __cdecl MakeGhosts(const D2RL::PluginContext*, void*) noexcept {
@@ -6700,6 +7910,8 @@ Items::Result Materialize(D2RL::PlayerHandle player, const Record& record, const
 void TakeOut(std::uint32_t fingerprint);
 bool DestroyItem(D2RL::PlayerHandle player, D2RL::ItemHandle item);
 void GiveBackOrphans(D2RL::PlayerHandle player) {
+	// Records without a tile now show in the Lost items menu: nothing is made.
+	return;
 	std::vector<Record> orphans;
 	{
 		std::lock_guard guard(Lock);
@@ -6707,8 +7919,9 @@ void GiveBackOrphans(D2RL::PlayerHandle player) {
 		OrphansChecked = true;
 		for (const auto& [fingerprint, record] : Records) {
 			if (record.id.rfind("m:", 0) == 0 || record.id.rfind("o:", 0) == 0) continue;
+			// (A variant base's: its base's tile, whatever the Variants setting shows.)
 			const auto entry = EntryById.find(record.id);
-			if (entry == EntryById.end() || !HasTile(entry->second, record.eth)) orphans.push_back(record);
+			if (entry == EntryById.end() || !BaseHasTile(entry->second, record.eth)) orphans.push_back(record);
 		}
 	}
 	int back = 0, kept = 0;
@@ -6821,10 +8034,60 @@ bool DestroyItem(D2RL::PlayerHandle player, D2RL::ItemHandle item) {
 }
 
 // Lock held. The record of a tile, or null.
+// (The first one by fingerprint: with Variants off, every variant's copy
+// is its base's, the others stay in the file, hidden.)
+int RecordEntry(const Record& record);
 Record* RecordAt(int u, bool eth) {
 	for (auto& [fingerprint, record] : Records)
-		if (record.eth == eth && EntryById.count(record.id) && EntryById.at(record.id) == u) return &record;
+		if (record.eth == eth && RecordEntry(record) == u) return &record;
 	return nullptr;
+}
+
+// Lock held. The entry whose tile shows a record, or -1: a variant base's
+// record is its variant's with Variants on (none while its variant is not
+// known), its base's with it off.
+int PictureInBytes(const std::vector<std::uint8_t>& bytes, std::uint32_t itemLevel, std::uint32_t quality);
+// A record's picture (read from its bytes once).
+int RecordPicture(const Record& record) {
+	if (record.picture == -2) record.picture = PictureInBytes(record.bytes, record.itemLevel, record.quality);
+	return record.picture;
+}
+void ResizeRolls();
+int NormalEntry(const Record& record);
+int RecordEntry(const Record& record) {
+	if (const auto lost = LostOf.find(record.fingerprint); lost != LostOf.end()) return lost->second;
+	return NormalEntry(record);
+}
+// The tile a record goes in as the lists and settings say (lost items aside).
+int NormalEntry(const Record& record) {
+	const auto entry = EntryById.find(record.id);
+	if (entry == EntryById.end()) return -1;
+	const int u = entry->second;
+	if (Uniques[u].variants.empty() || record.base) return u;
+	const int a = AffixOn(u) ? AffixIndexOfKey(u, record.variant) : -1, p = GraphicOn(u) ? RecordPicture(record) : -1;
+	return VariantOf(u, a, p);
+}
+
+// Lock held. Every variant a record is (whatever the settings show) counts as found.
+void MarkFound(const Record& record) {
+	if (record.base) return;
+	const auto entry = EntryById.find(record.id);
+	if (entry == EntryById.end() || Uniques[entry->second].variants.empty()) return;
+	const int u = entry->second, a = AffixIndexOfKey(u, record.variant), p = Uniques[u].pictures > 1 ? RecordPicture(record) : -1;
+	for (const int v : Uniques[u].variants) {
+		const auto& variant = Uniques[v];
+		if ((variant.affix < 0 || variant.affix == a) && (variant.picture < 0 || variant.picture == p)) FoundIds.insert(variant.id);
+	}
+}
+
+// Lock held. Tags a record of an item with a choice roll with its choice
+// (read on `unit`, its item); its variants count as found.
+void TagVariant(Record& record, const void* unit) {
+	if (!record.variant.empty() || !unit) return;
+	const auto entry = EntryById.find(record.id);
+	if (entry == EntryById.end() || Uniques[entry->second].affixes.empty()) return;
+	if (const int a = AffixIndex(entry->second, unit); a >= 0) record.variant = ChoiceKey(Uniques[entry->second].affixes[a]);
+	MarkFound(record);
 }
 
 // Lock held. An item left the grail: its record goes, its fingerprint stays.
@@ -6843,23 +8106,112 @@ void TakeOut(std::uint32_t fingerprint) {
 // Lock held. What the views show from the records: each tile's item (its
 // runtime id when on the page, else 0), the entries found, the perfect ones.
 std::uint64_t GrailChanges {}; // counts the grail's rebuilds, for what is kept about its copies
+// Lock held. Whether a record still is the item its entry says (the game's
+// files may have changed: another row, another base).
+bool RecordMatches(const Record& record, int u) {
+	const auto& entry = Uniques[u];
+	if (entry.runeword || entry.objective || entry.lost) return true;
+	if (entry.misc || entry.secret) return CodeText(record.code) == entry.code;
+	const auto quality = static_cast<Items::Quality>(record.quality);
+	if (quality != (entry.set ? Items::Quality::Set : Items::Quality::Unique)) return false;
+	return CodeText(record.code) == entry.code && record.qualityRecordId == entry.row;
+}
+
+// Lock held. The Lost items tiles: one entry per lost record, after every
+// other entry (their indices are the last), in the Lost items menu's category.
+int LostCategory = -1;
+void UpdateMiscTracking();
+void BuildLost(const std::vector<std::uint32_t>& prints) {
+	while (!Uniques.empty() && Uniques.back().lost) {
+		EntryById.erase(Uniques.back().id);
+		Uniques.pop_back();
+	}
+	LostOf.clear();
+	if (LostCategory < 0 || LostCategory >= CategoryCount() || Categories[LostCategory].menu != LostMenu) {
+		LostCategory = -1;
+		for (int c = 0; c < CategoryCount(); ++c)
+			if (Categories[c].menu == LostMenu) LostCategory = c;
+	}
+	if (LostCategory < 0 && !prints.empty()) {
+		CategoryEntry category { LostMenu, "Lost items", "Lost items" };
+		category.icon = "d2rloader\\grail-on\\icon-lost";
+		LostCategory  = CategoryCount();
+		Categories.push_back(category);
+	}
+	for (const auto print : prints) {
+		const auto record = Records.find(print);
+		if (record == Records.end()) continue;
+		const auto& r    = record->second;
+		const auto  code = CodeText(r.code);
+		const auto  base = Bases.find(code);
+		const auto  was  = EntryById.find(r.id);
+		UniqueEntry entry;
+		entry.category = LostCategory;
+		entry.row      = -1;
+		entry.lost     = true;
+		char id[16] {};
+		std::snprintf(id, sizeof(id), "l:%08X", print);
+		entry.id      = id;
+		entry.kind    = base != Bases.end() ? base->second.kind : 2;
+		entry.width   = base != Bases.end() ? base->second.width : 1;
+		entry.height  = base != Bases.end() ? base->second.height : 1;
+		entry.eth     = entry.onlyEth = r.eth; // its own tile only: ethereal or not
+		entry.code    = code;
+		entry.base    = base != Bases.end() ? base->second.name : code;
+		entry.ghost   = base != Bases.end() ? base->second.asset : std::string();
+		entry.art     = entry.ghost;
+		entry.colorClass = base != Bases.end() ? base->second.colorClass : -1;
+		if (was != EntryById.end() && !Uniques[was->second].lost) {
+			const auto& known = Uniques[was->second];
+			entry.name = known.name, entry.color = known.color, entry.set = false;
+			if (known.code == code) entry.art = known.art;
+		} else entry.name = entry.base;
+		Uniques.push_back(entry);
+		EntryById[entry.id] = UniqueCount() - 1;
+		LostOf[print]       = UniqueCount() - 1;
+	}
+	ResizeRolls();
+	UpdateMiscTracking();
+}
+
 void RebuildStored() {
 	++GrailChanges;
+	// Lost items: records no tile can show (no entry any more, not the item
+	// their entry says, no tile of that kind, or a second copy of an item
+	// that has one tile). Settings never make items lost: misc types not
+	// tracked and copies of variants hidden while the Variants switches are
+	// off stay stored, hidden.
+	if (!Uniques.empty()) {
+		std::vector<std::uint32_t>     lost;
+		std::set<std::pair<int, bool>> taken;
+		for (const auto& [fingerprint, record] : Records) {
+			if (record.id.rfind("o:", 0) == 0) continue;
+			const auto found = EntryById.find(record.id);
+			const int  u     = found == EntryById.end() || Uniques[found->second].lost || Uniques[found->second].variant ? -1 : found->second;
+			bool       gone  = u < 0 || !RecordMatches(record, u) || (!Uniques[u].misc && (record.eth ? !Uniques[u].eth : Uniques[u].onlyEth));
+			if (!gone && !record.base && !Uniques[u].misc && Uniques[u].variants.empty()) gone = !taken.insert({ u, record.eth }).second;
+			if (gone) lost.push_back(fingerprint);
+		}
+		std::vector<std::uint32_t> before;
+		for (const auto& [print, entry] : LostOf) before.push_back(print);
+		if (lost != before) BuildLost(lost); // (both by fingerprint)
+	}
 	Stored.clear();
 	StoredCodes.clear();
 	Perfect.clear();
 	BaseTiles.clear();
 	Present.clear();
 	for (const auto& [fingerprint, record] : Records) {
-		const auto entry = EntryById.find(record.id);
-		if (entry == EntryById.end()) continue;
+		MarkFound(record);
+		const int u = RecordEntry(record);
+		if (u < 0 || Stored.count({ u, record.eth })) continue; // the tile's first record (RecordAt's); the others stay hidden
 		std::uint32_t id = 0;
 		for (const auto& [runtime, print] : Materialized)
 			if (print == fingerprint) id = runtime;
-		Stored[{ entry->second, record.eth }]      = id;
-		StoredCodes[{ entry->second, record.eth }] = CodeText(record.code);
-		if (record.base) BaseTiles.insert({ entry->second, record.eth });
-		else if (record.perfect || Uniques[entry->second].secret) Perfect.insert({ entry->second, record.eth });
+		Stored[{ u, record.eth }]      = id;
+		StoredCodes[{ u, record.eth }] = CodeText(record.code);
+		if (record.base) BaseTiles.insert({ u, record.eth });
+		else if (record.perfect || Uniques[u].secret) Perfect.insert({ u, record.eth });
 	}
 	for (const auto& id : FoundIds)
 		if (const auto entry = EntryById.find(id); entry != EntryById.end()) Present.insert(entry->second);
@@ -6881,8 +8233,7 @@ int StoredBaseEntry(std::uint32_t runtimeId) {
 	const auto print  = Materialized.find(runtimeId);
 	const auto record = print == Materialized.end() ? Records.end() : Records.find(print->second);
 	if (record == Records.end() || !record->second.base) return -1;
-	const auto entry = EntryById.find(record->second.id);
-	return entry == EntryById.end() ? -1 : entry->second;
+	return RecordEntry(record->second);
 }
 
 void SayOnce(bool& told, const char* format, unsigned value) {
@@ -6903,6 +8254,15 @@ void __cdecl Arrange(const D2RL::PluginContext* context, void* userData) noexcep
 	// out comes back, so its copy on the page is the record's again.
 	RestoreTakenOut(context, job->player);
 	GiveBackOrphans(job->player);
+	{
+		bool scan = false;
+		{
+			std::lock_guard guard(Lock);
+			scan = !PicturesScanned && Config.graphicVariants && ListsReady;
+			if (scan) PicturesScanned = true;
+		}
+		if (scan) ReadPictures(job->player, true); // once per character: what is on it
+	}
 	// A Ctrl+clicked item whose twin is stored but not on the page (its tile is
 	// cut or elsewhere): the twin is made where the clicked item is, and leaves
 	// the grail, so the clicked one can take its tile.
@@ -7102,13 +8462,14 @@ void __cdecl Arrange(const D2RL::PluginContext* context, void* userData) noexcep
 				seen.insert(step.fingerprint);
 				{
 					Materialized[item->runtimeId] = step.fingerprint;
-					const auto entry              = EntryById.find(record->second.id);
-					if (entry != EntryById.end() && !settings && place(entry->second, record->second.eth, CodeText(item->code), tile, x, y) && !taken[tile]) {
+					// Only its tile's own record (a hidden variant copy goes back to the file).
+					const int entry = RecordEntry(record->second);
+					if (entry >= 0 && !settings && RecordAt(entry, record->second.eth) == &record->second && place(entry, record->second.eth, CodeText(item->code), tile, x, y) && !taken[tile]) {
 						taken[tile] = true;
 						step.x = x, step.y = y;
 						step.action = item->x == x && item->y == y ? Action::Stay : Action::Cell;
 					} else step.action = settings ? Action::Stay : Action::Unload;
-					if (entry != EntryById.end()) claimed.insert({ entry->second, record->second.eth });
+					if (entry >= 0) claimed.insert({ entry, record->second.eth });
 				}
 				steps.push_back(step);
 				continue;
@@ -7139,9 +8500,9 @@ void __cdecl Arrange(const D2RL::PluginContext* context, void* userData) noexcep
 		// The records of the tiles on screen with no item there: made again.
 		if (!settings)
 			for (const auto& [fingerprint, record] : Records) {
-				const auto entry = EntryById.find(record.id);
-				int        tile = -1, x = 0, y = 0;
-				if (seen.count(fingerprint) || entry == EntryById.end() || !place(entry->second, record.eth, CodeText(record.code), tile, x, y) || taken[tile]) continue;
+				const int entry = RecordEntry(record);
+				int       tile = -1, x = 0, y = 0;
+				if (seen.count(fingerprint) || entry < 0 || RecordAt(entry, record.eth) != &record || !place(entry, record.eth, CodeText(record.code), tile, x, y) || taken[tile]) continue;
 				taken[tile] = true;
 				makes.push_back({ record, x, y });
 			}
@@ -7471,6 +8832,54 @@ bool FindItem(D2RL::PlayerHandle player, std::uint32_t id, Items::ItemInfo& foun
 			return true;
 		}
 	return false;
+}
+
+// Game thread: the pictures of the items graphic variants need, so a look
+// from the UI thread (a tooltip, a middle click, a drop) finds the right tile.
+constexpr std::uint32_t PictureContainers = Items::ContainerBit(Items::ItemContainer::Equipment) | Items::ContainerBit(Items::ItemContainer::Cursor)
+                                          | Items::ContainerBit(Items::ItemContainer::Belt) | Items::ContainerBit(Items::ItemContainer::Inventory)
+                                          | Items::ContainerBit(Items::ItemContainer::Cube) | Items::ContainerBit(Items::ItemContainer::PersonalStash)
+                                          | Items::ContainerBit(Items::ItemContainer::SharedStash) | Items::ContainerBit(Items::ItemContainer::CustomPage)
+                                          | Items::ContainerBit(Items::ItemContainer::Ground);
+std::set<std::uint32_t> PictureWanted; // runtime ids; guarded by Lock
+std::atomic<bool>       PictureQueued {};
+void ReadPictures(D2RL::PlayerHandle player, bool all) {
+	std::vector<Items::ItemInfo>      items;
+	const D2RL::Inventory::ItemFilter filter { .structSize = D2RL::Inventory::ItemFilterSize, .containerMask = PictureContainers };
+	if (!player || Inventory->forEachInventoryItem(Context, player, &filter, Collect, &items) != D2RL::Inventory::Result::Success) return;
+	std::set<std::uint32_t> wanted;
+	{
+		std::lock_guard guard(Lock);
+		wanted.swap(PictureWanted);
+	}
+	for (const auto& item : items) {
+		{
+			std::lock_guard guard(Lock);
+			if (Pictures.count(item.runtimeId) || (!all && !wanted.count(item.runtimeId))) continue;
+			const auto base = Bases.find(CodeText(item.code));
+			if (base == Bases.end() || base->second.pictures < 2) continue;
+		}
+		Snapshot snapshot { .itemLevel = item.itemLevel, .quality = static_cast<std::uint32_t>(item.quality) };
+		snapshot.code = item.code;
+		if (ItemApi->editNativeItem(Context, item.handle, TakeSnapshot, &snapshot) == Items::Result::Success && snapshot.ok) {
+			std::lock_guard guard(Lock);
+			Pictures[item.runtimeId] = PictureInBytes(snapshot.bytes, snapshot.itemLevel, snapshot.quality);
+			VariantUnits.erase(item.runtimeId);
+		}
+	}
+}
+void __cdecl ReadWantedPictures(const D2RL::PluginContext*, void*) noexcept {
+	PictureQueued = false;
+	ReadPictures(LocalPlayer.load(), false);
+}
+// Any thread, Lock held or not.
+void NeedPicture(std::uint32_t runtimeId) {
+	if (!runtimeId || !Threads) return;
+	{
+		std::lock_guard guard(Lock);
+		if (!PictureWanted.insert(runtimeId).second && PictureQueued) return;
+	}
+	if (!PictureQueued.exchange(true) && Threads->runOnGameThread(Context, ReadWantedPictures, nullptr) != D2RL::Threads::Result::Success) PictureQueued = false;
 }
 
 // A free spot for a `code` item on the page, out of the shown tiles if it can.
@@ -7848,7 +9257,7 @@ void KickPending() {
 
 void Queue(const std::string& command);
 void LearnBar(int step);
-int  StepRow(int step, int maxScroll);
+int  StepRow(int step, int maxScroll, int steps = ScrollSteps);
 Drop PendingDrop; // guarded by Lock
 
 // Any thread: arranges the page now instead of on the next tick, once the
@@ -7962,12 +9371,15 @@ Snapshot SnapshotOf(const Items::ItemInfo& item, const PageHost::RequestAnswer& 
 // Lock held. A record from saved bytes (RecordItem's, without the game thread).
 bool RecordFromSnapshot(const Items::ItemInfo& item, int u, bool eth, Snapshot snapshot) {
 	if (!snapshot.ok || !snapshot.fingerprint || Records.count(snapshot.fingerprint)) return false;
-	Record record { .id = Uniques[u].id, .eth = eth, .perfect = PerfectNow(u, item.runtimeId, eth), .fingerprint = snapshot.fingerprint, .code = item.code,
+	Record record { .id = Uniques[Uniques[u].variant ? Uniques[u].variantOf : u].id, .eth = eth, .perfect = PerfectNow(u, item.runtimeId, eth), .fingerprint = snapshot.fingerprint, .code = item.code,
 		            .quality = static_cast<std::uint32_t>(item.quality), .itemLevel = item.itemLevel, .stateFlags = item.stateFlags, .qualityRecordId = item.qualityRecordId,
 		            .bytes = std::move(snapshot.bytes) };
 	Fingerprints[item.runtimeId] = record.fingerprint;
 	Tombstones.erase(record.fingerprint);
 	FoundIds.insert(record.id);
+	TagVariant(record, ClientItem(item.runtimeId));
+	if (record.variant.empty() && Uniques[u].variant && Uniques[u].affix >= 0) record.variant = ChoiceKey(Uniques[u].affixes[Uniques[u].affix]);
+	MarkFound(record);
 	Records[record.fingerprint] = std::move(record);
 	return true;
 }
@@ -8590,6 +10002,7 @@ using ReserveFn     = void (*)(GameString*, std::uint64_t) noexcept;
 using StatFn        = int (*)(void* unit, int stat, int layer) noexcept; // D2RCore ReadWideUnitStat
 
 std::uintptr_t Base {};
+void* ClientItem(std::uint32_t runtimeId) { return Base ? reinterpret_cast<GetUnitFn>(Base + Game::GetUnit)(runtimeId, Game::ItemUnit) : nullptr; }
 TooltipFn      Tooltip {};
 CompareFn      Compared {};
 ShowTooltipFn  ShowTooltip {};
@@ -8610,10 +10023,19 @@ std::vector<bool>              EdRolls; // the item has a variable Enhanced Defe
 // maxac (+1 with Enhanced Defense, as the game rolls it), x1.5 when ethereal,
 // plus the best flat defense. 0 when it has no defense. By index in Uniques.
 std::vector<std::pair<int, int>> BestDefense;
+// Lock held. The roll tables follow Uniques (lost entries appended).
+void ResizeRolls() {
+	if (!Rolls.empty()) Rolls.resize(Uniques.size()), EdRolls.resize(Uniques.size()), BestDefense.resize(Uniques.size());
+}
 
 // Lock held. The objectives' entries, after every other (their indices are the
 // last, so the others' never change), in their own category of the Objectives menu.
 void BuildObjectives() {
+	while (!Uniques.empty() && Uniques.back().lost) { // made again after them (RebuildStored)
+		EntryById.erase(Uniques.back().id);
+		Uniques.pop_back();
+	}
+	LostOf.clear();
 	while (!Uniques.empty() && Uniques.back().objective) {
 		EntryById.erase(Uniques.back().id);
 		Uniques.pop_back();
@@ -8804,7 +10226,13 @@ int EntryOf(const void* item, bool& eth) {
 		return runeword->second;
 	}
 	if (!byRow || file < 0 || file >= static_cast<int>(byRow->size())) return -1;
-	return (*byRow)[file];
+	// Its variant: its choice on it, its picture as last read.
+	const int b = (*byRow)[file];
+	if (b < 0 || Uniques[b].variants.empty()) return b;
+	const auto picture = Pictures.find(At<std::uint32_t>(item, Game::UnitId));
+	if (picture == Pictures.end() && GraphicOn(b)) NeedPicture(At<std::uint32_t>(item, Game::UnitId)); // read on the game thread: the next look has it
+	const int v = VariantOf(b, AffixIndex(b, item), picture == Pictures.end() ? -1 : picture->second);
+	return v < 0 ? b : v;
 }
 
 // The stored copy of an entry in the same ethereal state: an ethereal unique
@@ -9139,6 +10567,7 @@ void HookShowTooltip(void* widget, void* item) noexcept {
 			const int entry = Identified(item) ? EntryOf(item, eth) : -1;
 			HoverEntry      = entry >= 0 && HasTile(entry, eth) ? entry : -1;
 			HoverEntryEth   = eth;
+			if (entry >= 0 && !Uniques[entry].variants.empty() && !HasTile(entry, eth)) seen = 0; // its variant not known yet: looked at again
 		}
 		GridHoverId = id, GridHoverAt = GetTickCount64();
 	}
@@ -9230,6 +10659,7 @@ using VisibleFn = bool (*)(void* filter, void* unit) noexcept;
 struct LootRow {
 	int          item = -1; // the base's Items row: the unit's class must match
 	std::uint8_t hide {};   // 1: hidden plain, 2: hidden ethereal
+	std::uint8_t check {};  // the same bits: shown only when an upgrade of its grail copy (Filter unidentified stats, Hide perfect)
 	bool operator==(const LootRow&) const = default;
 };
 struct LootTable {
@@ -9239,6 +10669,7 @@ struct LootTable {
 	std::vector<std::uint8_t> uniqueBases, setBases;
 	bool                      exact {};   // unidentified items by their row
 	bool                      unidOnly {}; // identified items are never hidden
+	bool                      unidStats {}; // unidentified items as good as their grail copy show
 	bool operator==(const LootTable&) const = default;
 };
 std::atomic<std::shared_ptr<const LootTable>> LootRows;
@@ -9246,6 +10677,162 @@ std::atomic<bool>                             LootOn {};
 VisibleFn                                     LootBefore[std::size(Loot::Sites)] {};
 std::uint8_t*                                 LootSite[std::size(Loot::Sites)] {};
 bool                                          LootTried {};
+
+
+// ---- unidentified drops against their grail copy (game thread) ----
+// The game sends no stats of an unidentified item to the client: the server's
+// copy has them (in process in single player and in games this player hosts).
+// A ground item whose tile asks for it (Filter unidentified stats under Hide
+// perfect) is looked up there once and compared with its grail copy's ghost;
+// shown only when it beats it, hidden while unknown.
+std::mutex                                UpgradeLock;
+std::map<std::uint32_t, int>              UnidUpgrade;  // ground item id -> 1 an upgrade of its grail copy, 0 not (or not known), -1 asked; guarded by UpgradeLock
+std::vector<std::uint32_t>                UpgradeAsked; // guarded by UpgradeLock
+std::atomic<bool>                         UpgradeWanted {}, UpgradeRunning {};
+std::map<std::uint32_t, std::vector<int>> CopyValues;   // a record's roll values, by fingerprint; game thread only
+
+// A stat as the item's own magic stat lists hold it (Compare Indicators reads
+// them the same way): the unit's stat list at +0x88 (flags at +0x1C negative),
+// its lists chained from +0x90 and +0x98 by +0x68, each with its flags at +0x1C
+// (0x40: magic properties), state at +0x20 and stats at +0x30 {pointer, count}
+// of 16 bytes {u32 layer, u32 stat, i32 value, u32}. The game's reader gives 0
+// for Enhanced Damage and Enhanced Defense; these lists keep them.
+int RawStat(const void* unit, int stat, int layer) {
+	const auto* ex = unit ? At<const std::uint8_t*>(unit, 0x88) : nullptr;
+	if (!ex || At<std::int32_t>(ex, 0x1C) >= 0) return 0;
+	const auto sum = [&](bool magicOnly, bool& found) {
+		int total = 0;
+		for (const std::ptrdiff_t chain : { 0x90, 0x98 }) {
+			int guard = 0;
+			for (const auto* list = At<const std::uint8_t*>(ex, chain); list && guard < 32; list = At<const std::uint8_t*>(list, 0x68), ++guard) {
+				const auto  flags   = At<std::uint32_t>(list, 0x1C), state = At<std::uint32_t>(list, 0x20);
+				const auto* entries = At<const std::uint8_t*>(list, 0x30);
+				const auto  count   = At<std::uint64_t>(list, 0x38);
+				if (state != 0 || (magicOnly && !(flags & 0x40)) || (!magicOnly && static_cast<std::int32_t>(flags) < 0) || !entries || count > 512) continue;
+				for (std::uint64_t i = 0; i < count; ++i) {
+					const auto* entry = entries + i * 16;
+					if (At<std::uint32_t>(entry, 4) == static_cast<std::uint32_t>(stat) && At<std::uint32_t>(entry, 0) == static_cast<std::uint32_t>(layer)) total += At<std::int32_t>(entry, 8), found = true;
+				}
+			}
+		}
+		return total;
+	};
+	bool found = false;
+	const int magic = sum(true, found);
+	if (found) return magic;
+	return sum(false, found);
+}
+
+// Lock held. Each varying roll's value on `unit`: its defense first (0 when
+// it has none), then Rolls[u]'s, in order.
+std::vector<int> RollValues(int u, void* unit, bool eth) {
+	std::vector<int> out;
+	if (u < 0 || u >= static_cast<int>(Rolls.size()) || !unit) return out;
+	out.push_back(BestDefenseOf(u, eth) > 0 ? Stat(unit, DefenseStat, 0) : 0);
+	for (const auto& roll : Rolls[u]) {
+		const int stat = roll.stats[0];
+		out.push_back(stat == DefenseStat               ? 0
+		              : stat == 16 || stat == 17 || stat == 18 ? RawStat(unit, stat, roll.layer)
+		                                                       : Display(stat, Stat(unit, stat, roll.layer)));
+	}
+	return out;
+}
+
+// Lock held. Whether `drop` beats `copy`: every varying roll the same or
+// better, and at least one better.
+bool Upgrade(int u, const std::vector<int>& drop, const std::vector<int>& copy) {
+	if (drop.empty() || drop.size() != copy.size() || drop.size() != Rolls[u].size() + 1) return false;
+	if (drop[0] < copy[0]) return false;
+	bool better = drop[0] > copy[0];
+	for (std::size_t r = 0; r < Rolls[u].size(); ++r) {
+		const auto& roll   = Rolls[u][r];
+		const bool  higher = roll.best >= roll.worst;
+		const int   a = drop[r + 1], b = copy[r + 1];
+		if (higher ? a < b : a > b) return false;
+		better = better || a != b;
+	}
+	return better;
+}
+
+std::string ValuesText(const std::vector<int>& values) {
+	std::string out;
+	for (const int value : values) out += (out.empty() ? "" : " ") + std::to_string(value);
+	return out;
+}
+
+void __cdecl CheckUpgrades(const D2RL::PluginContext*, void*) noexcept {
+	std::vector<std::uint32_t> ids;
+	{
+		std::lock_guard guard(UpgradeLock);
+		ids.swap(UpgradeAsked);
+	}
+	const auto player = LocalPlayer.load();
+	void*      game   = ServerGame.load();
+	if (!game && player && !Remote() && !ids.empty()) {
+		std::uint32_t code = 0;
+		{
+			std::lock_guard guard(Lock);
+			if (!Records.empty()) code = Records.begin()->second.code;
+		}
+		if (code) game = LearnGame(player, code);
+	}
+	static int told = 0;
+	std::vector<std::pair<std::uint32_t, int>> results;
+	for (const auto id : ids) {
+		int   result = 0;
+		void* unit   = game && UnitById ? UnitById(game, Game::ItemUnit, id) : nullptr;
+		const void* data = unit ? At<const void*>(unit, Game::UnitData) : nullptr;
+		if (data) {
+			// Which entry it is, and its grail copy.
+			int                       u = -1;
+			bool                      eth = false, tileEth = false, known = false;
+			std::uint32_t             print = 0;
+			std::vector<std::uint8_t> bytes;
+			{
+				std::lock_guard guard(Lock);
+				const auto      quality = At<std::uint32_t>(data, Game::DataQuality);
+				const int       file    = At<std::int32_t>(data, Game::DataFile);
+				const auto&     byRow   = quality == Game::UniqueQuality ? UniqueByRow : SetByRow;
+				if ((quality == Game::UniqueQuality || quality == Game::SetQuality) && file >= 0 && file < static_cast<int>(byRow.size())) u = byRow[file];
+				if (u >= 0 && !Uniques[u].variants.empty()) {
+					const auto picture = Pictures.find(id);
+					if (const int v = VariantOf(u, AffixIndex(u, unit), picture == Pictures.end() ? -1 : picture->second); v >= 0) u = v;
+				}
+				eth     = (At<std::uint32_t>(data, Game::DataFlags) & Game::Ethereal) != 0;
+				tileEth = u >= 0 && HasTile(u, eth) ? eth : !eth;
+				if (const Record* record = u >= 0 ? RecordAt(u, tileEth) : nullptr) print = record->fingerprint, bytes = record->bytes, known = CopyValues.count(print) != 0;
+			}
+			if (print && !known) {
+				void* copy = GhostFromBytes(game, bytes);
+				{
+					std::lock_guard guard(Lock);
+					CopyValues[print] = RollValues(u, copy, tileEth);
+				}
+				if (copy) FreeItem(game, copy);
+			}
+			if (print) {
+				std::lock_guard guard(Lock);
+				const auto      drop = RollValues(u, unit, eth);
+				const auto&     copy = CopyValues[print];
+				result               = Upgrade(u, drop, copy) ? 1 : 0;
+				if (told < 12) {
+					++told;
+					Say(false, "grailon: unidentified %s%s on the ground: rolls %s, grail copy %s (defense first): %s", Uniques[u].name.c_str(), eth ? " (ethereal)" : "", ValuesText(drop).c_str(),
+					    ValuesText(copy).c_str(), result ? "an upgrade, shown" : "no upgrade, hidden");
+				}
+			}
+		} else if (told < 12) {
+			++told;
+			Say(false, "grailon: unidentified item %u: no server copy here (%s); hidden as its grail tile says", id, game ? "not found" : "no game");
+		}
+		results.push_back({ id, result });
+	}
+	{
+		std::lock_guard guard(UpgradeLock);
+		for (const auto& [id, result] : results) UnidUpgrade[id] = result;
+	}
+	UpgradeRunning = false;
+}
 
 bool LootDecide(const void* unit, const void* data, const LootTable& table, std::uint32_t quality, int& file) noexcept {
 	const auto* rows = quality == Game::UniqueQuality ? &table.uniques : &table.sets;
@@ -9275,8 +10862,25 @@ bool LootHidden(const void* unit) noexcept {
 	if (!table) return false;
 	const auto quality = At<std::uint32_t>(data, Game::DataQuality);
 	if (quality != Game::UniqueQuality && quality != Game::SetQuality) return false;
-	int        file   = -1;
-	const bool hidden = LootDecide(unit, data, *table, quality, file);
+	int  file   = -1;
+	bool hidden = LootDecide(unit, data, *table, quality, file);
+	// Filter unidentified stats, Hide perfect, a grail copy not perfect: shown
+	// only when it beats that copy (asked once; hidden until known).
+	const auto flags = At<std::uint32_t>(data, Game::DataFlags);
+	if (!hidden && table->unidStats && !((flags & Loot::Identified) && table->unidOnly)) {
+		const auto* rows = quality == Game::UniqueQuality ? &table->uniques : &table->sets;
+		const int   row  = At<std::int32_t>(data, Game::DataFile);
+		const int   bit  = (flags & Game::Ethereal) ? 2 : 1;
+		if (row >= 0 && row < static_cast<int>(rows->size()) && ((*rows)[row].check & bit) && (*rows)[row].item == static_cast<int>(At<std::uint32_t>(unit, Loot::UnitClass))) {
+			const auto       id = At<std::uint32_t>(unit, Game::UnitId);
+			std::unique_lock lock(UpgradeLock, std::try_to_lock);
+			hidden = true;
+			if (lock.owns_lock()) {
+				if (const auto known = UnidUpgrade.find(id); known == UnidUpgrade.end()) UnidUpgrade[id] = -1, UpgradeAsked.push_back(id), UpgradeWanted = true;
+				else if (known->second == 1) hidden = false;
+			}
+		}
+	}
 	return hidden;
 }
 
@@ -9349,8 +10953,15 @@ void PublishLootTable() {
 	if (!LootOn) return;
 	auto       table = std::make_shared<LootTable>();
 	const auto hides = [&](int u, bool eth, int policy) {
+		if (Excluded(u, eth)) return false; // the player's choice: never hidden
 		const std::pair key { u, eth };
 		return policy == LootFound ? Stored.count(key) && !BaseTiles.count(key) : policy == LootPerfect && Perfect.count(key);
+	};
+	// Filter unidentified stats under Hide perfect: a copy in the grail, not
+	// perfect, lets through only drops that beat it.
+	const auto checks = [&](int u, bool eth, int policy) {
+		const std::pair key { u, eth };
+		return Config.lootUnidStats && policy == LootPerfect && !Excluded(u, eth) && Stored.count(key) && !BaseTiles.count(key) && !Perfect.count(key);
 	};
 	const auto itemRow = [&](int u) {
 		const auto base = Bases.find(Uniques[u].code);
@@ -9363,6 +10974,16 @@ void PublishLootTable() {
 		auto& row = table->uniques[r];
 		row.item  = itemRow(u);
 		row.hide  = (HasTile(u, false) && hides(u, false, Config.loot[0]) ? 1 : 0) | (HasTile(u, true) && hides(u, true, Config.loot[1]) ? 2 : 0);
+		row.check = (HasTile(u, false) && checks(u, false, Config.loot[0]) ? 1 : 0) | (HasTile(u, true) && checks(u, true, Config.loot[1]) ? 2 : 0);
+		// Variants with tiles: hidden once every one is (the drop's is not known here).
+		if (!Uniques[u].variants.empty() && !HasTile(u, false) && !HasTile(u, true)) {
+			int all = 3;
+			for (const int v : Uniques[u].variants)
+				if (HasTile(v, false) || HasTile(v, true))
+					all &= (!HasTile(v, false) || hides(v, false, Config.loot[0]) ? 1 : 0) | (!HasTile(v, true) || hides(v, true, Config.loot[1]) ? 2 : 0);
+			row.hide  = (BaseHasTile(u, false) ? all & 1 : 0) | (BaseHasTile(u, true) ? all & 2 : 0);
+			row.check = 0;
+		}
 	}
 	// A set item has one tile, ethereal or not.
 	table->sets.resize(SetByRow.size());
@@ -9372,6 +10993,14 @@ void PublishLootTable() {
 		auto& row = table->sets[r];
 		row.item  = itemRow(u);
 		row.hide  = hides(u, false, Config.loot[2]) || hides(u, true, Config.loot[2]) ? 3 : 0;
+		row.check = checks(u, false, Config.loot[2]) ? 3 : 0;
+		if (!Uniques[u].variants.empty() && !HasTile(u, false)) {
+			bool all = true, any = false;
+			for (const int v : Uniques[u].variants)
+				if (HasTile(v, false)) any = true, all = all && hides(v, false, Config.loot[2]);
+			row.hide  = any && all ? 3 : 0;
+			row.check = 0;
+		}
 	}
 	// Per base: every unique (set item) that can be it, plain and ethereal.
 	const auto byBase = [&](const std::vector<LootRow>& rows, const std::vector<int>& entries, std::vector<std::uint8_t>& bases) {
@@ -9381,7 +11010,7 @@ void PublishLootTable() {
 			if (item < 0 || u < 0 || u >= UniqueCount()) continue;
 			if (static_cast<int>(bases.size()) <= item) bases.resize(item + 1, 3), seen.resize(item + 1, 0);
 			// What it can be: plain unless only ethereal, ethereal when it can be (a set item's one tile is both).
-			const std::uint8_t can = Uniques[u].set ? 3 : (HasTile(u, false) ? 1 : 0) | (HasTile(u, true) ? 2 : 0);
+			const std::uint8_t can = Uniques[u].set ? 3 : (BaseHasTile(u, false) ? 1 : 0) | (BaseHasTile(u, true) ? 2 : 0);
 			bases[item] &= static_cast<std::uint8_t>(rows[r].hide | ~can);
 			seen[item] |= can;
 		}
@@ -9390,8 +11019,24 @@ void PublishLootTable() {
 	byBase(table->uniques, UniqueByRow, table->uniqueBases);
 	byBase(table->sets, SetByRow, table->setBases);
 	table->exact    = Config.lootAmbiguous;
-	table->unidOnly = Config.lootUnidOnly;
-	if (const auto now = LootRows.load(); !now || !(*now == *table)) LootRows.store(std::move(table), std::memory_order_release);
+	table->unidOnly  = Config.lootUnidOnly;
+	table->unidStats = Config.lootUnidStats;
+	if (const auto now = LootRows.load(); !now || !(*now == *table)) {
+		{
+			std::lock_guard guard(UpgradeLock);
+			UnidUpgrade.clear(); // the grail changed: asked again
+		}
+		LootRows.store(std::move(table), std::memory_order_release);
+	}
+}
+
+// Lock held. The variants' settings changed: tiles, stored items' tiles, the loot filter follow.
+void VariantsChanged() {
+	VariantUnits.clear();
+	PicturesScanned = false; // graphic variants just on: the items' pictures read on the next arrange
+	UpdateMiscTracking();
+	RebuildStored();
+	if (LootOn) PublishLootTable();
 }
 
 void ApplyLootSettings() {
@@ -9517,17 +11162,34 @@ void NoteUiPerfect(int u, std::uint32_t runtimeId, bool eth) {
 }
 
 // Lock held. Whether the perfect tiles changed.
+// Lock held. The entry whose rolls a record's perfection is checked with:
+// its variant's when known (its choice's value counts), else its own.
+int PerfectEntry(const Record& record) {
+	const auto entry = EntryById.find(record.id);
+	if (entry == EntryById.end()) return -1;
+	const int u = entry->second, a = AffixIndexOfKey(u, record.variant);
+	if (a >= 0)
+		for (const int v : Uniques[u].variants)
+			if (Uniques[v].affix == a && Uniques[v].picture < 0) return v;
+	return u;
+}
+
 bool RefreshPerfect() {
 	if (!RollsReady || !ReadStat) return false;
 	// Only items on the page can be read; the records keep the others' flag.
 	bool changed = false;
 	for (const auto& [runtime, fingerprint] : Materialized) {
 		const auto record = Records.find(fingerprint);
-		const auto entry  = record == Records.end() ? EntryById.end() : EntryById.find(record->second.id);
-		if (entry == EntryById.end() || record->second.base) continue;
+		if (record == Records.end() || record->second.base) continue;
 		void* unit = reinterpret_cast<GetUnitFn>(Base + Game::GetUnit)(runtime, Game::ItemUnit);
 		if (!unit) continue;
-		const bool perfect = Uniques[entry->second].secret || IsPerfect(entry->second, unit, record->second.eth);
+		if (record->second.variant.empty()) {
+			TagVariant(record->second, unit);
+			changed = changed || !record->second.variant.empty();
+		}
+		const int entry = PerfectEntry(record->second);
+		if (entry < 0) continue;
+		const bool perfect = Uniques[entry].secret || IsPerfect(entry, unit, record->second.eth);
 		if (perfect != record->second.perfect) record->second.perfect = perfect, changed = true;
 	}
 	// The others: a record stored while its tile was a picture, or while its
@@ -9538,6 +11200,26 @@ bool RefreshPerfect() {
 		for (const auto& [runtime, fingerprint] : Materialized) onPage.insert(fingerprint);
 		auto* done  = new std::vector<Ghost>;
 		int   asked = 0;
+		// Stored before variants were known (or while their item could not be
+		// read): their ghost tells which choice they have.
+		for (auto& [fingerprint, record] : Records) {
+			if (record.base || !record.variant.empty() || onPage.count(fingerprint) || VariantChecked.count(fingerprint)) continue;
+			const auto entry = EntryById.find(record.id);
+			if (entry == EntryById.end() || Uniques[entry->second].affixes.empty()) continue;
+			const auto ghost = Ghosts.find(fingerprint);
+			if (ghost == Ghosts.end()) {
+				if (asked < 8 && !GhostWanted.count(fingerprint)) ++asked, SweepGhosts.insert(fingerprint), (void)GhostOf(fingerprint);
+				continue;
+			}
+			VariantChecked.insert(fingerprint);
+			TagVariant(record, ghost->second.unit);
+			if (!record.variant.empty()) {
+				changed = true;
+				PerfectChecked.erase(fingerprint); // checked again with its choice's roll
+				static int told = 0;
+				if (told++ < 40) Say(false, "grailon: stored %s is variant %s", record.id.c_str(), record.variant.c_str());
+			}
+		}
 		for (auto& [fingerprint, record] : Records) {
 			if (record.perfect || record.base || onPage.count(fingerprint) || PerfectChecked.count(fingerprint)) continue;
 			const auto entry = EntryById.find(record.id);
@@ -9554,7 +11236,8 @@ bool RefreshPerfect() {
 				PerfectChecked.insert(fingerprint);
 				continue;
 			}
-			const bool perfect = Uniques[entry->second].secret || IsPerfect(entry->second, ghost->second.unit, record.eth);
+			const int  rolls   = PerfectEntry(record);
+			const bool perfect = Uniques[rolls].secret || IsPerfect(rolls, ghost->second.unit, record.eth);
 			PerfectChecked.insert(fingerprint);
 			if (perfect) record.perfect = true, changed = true;
 			if (SweepGhosts.erase(fingerprint) && ghost->second.unit != PeekShown) done->push_back(ghost->second), Ghosts.erase(ghost);
@@ -9793,7 +11476,7 @@ std::atomic<bool>  ObjTyping {}, ObjTypedChanged {}, ObjEnter {};
 std::atomic<int>   TypeTarget {};
 std::atomic<std::uint64_t> TypeClickAt {}, TypeHitAt {}; // the last mouse click, the last click on a text box
 std::mutex         ObjTypedLock;
-std::wstring       TypedTexts[2]; // by target
+std::wstring       TypedTexts[4]; // by target
 std::wstring&      ObjTyped = TypedTexts[0];
 HWND               ObjEdit {};
 HHOOK              ObjHook {};
@@ -9807,7 +11490,7 @@ void TypedNow() { (void)Threads->runOnUiThread(Context, TypedOnUi, nullptr); }
 
 std::string TypedText(int target) {
 	std::lock_guard guard(ObjTypedLock);
-	const auto& typed = TypedTexts[target & 1];
+	const auto& typed = TypedTexts[TypeSlot(target)];
 	if (typed.empty()) return {};
 	const int   size = WideCharToMultiByte(CP_UTF8, 0, typed.c_str(), static_cast<int>(typed.size()), nullptr, 0, nullptr, nullptr);
 	std::string out(static_cast<std::size_t>(std::max(0, size)), '\0');
@@ -9818,7 +11501,7 @@ std::string ObjTypedText() { return TypedText(TypeObjective); }
 void ClearTyped(int target) {
 	{
 		std::lock_guard guard(ObjTypedLock);
-		TypedTexts[target & 1].clear();
+		TypedTexts[TypeSlot(target)].clear();
 	}
 	if (const DWORD id = ObjThreadId.load(); id && TypeTarget == target) PostThreadMessageW(id, ObjMsgClear, 0, 0);
 }
@@ -9903,7 +11586,7 @@ DWORD WINAPI ObjInputMain(void*) {
 			std::wstring text;
 			{
 				std::lock_guard guard(ObjTypedLock);
-				text = TypedTexts[TypeTarget & 1];
+				text = TypedTexts[TypeSlot(TypeTarget)];
 			}
 			if (ObjEdit) SetWindowTextW(ObjEdit, text.c_str()), SendMessageW(ObjEdit, EM_SETSEL, text.size(), text.size());
 			continue;
@@ -9917,7 +11600,7 @@ DWORD WINAPI ObjInputMain(void*) {
 			wchar_t buffer[256] {};
 			GetWindowTextW(ObjEdit, buffer, static_cast<int>(std::size(buffer)));
 			std::lock_guard guard(ObjTypedLock);
-			auto&           typed = TypedTexts[TypeTarget & 1];
+			auto&           typed = TypedTexts[TypeSlot(TypeTarget)];
 			if (typed != buffer) typed = buffer, ObjTypedChanged = true, TypedNow();
 		}
 	}
@@ -9950,18 +11633,28 @@ void ObjStopThread() {
 
 // UI thread, each tick: the page follows the typing; Enter adds.
 void ObjInputTick() {
-	const bool search = TypeTarget == TypeSearch;
-	if (ObjTyping && (!ViewOpen() || (!search && (CurrentCategory != SettingsView || SettingsPage != 4)))) ObjTyping = false, ObjTypedChanged = true;
+	const int  target = TypeTarget;
+	const bool search = target == TypeSearch;
+	const bool here   = search || (CurrentCategory == SettingsView && (SettingsPage == (target == TypeExclude || target == TypeListName ? 2 : 4) || (target == TypeExclude && VarEditing)));
+	if (ObjTyping && (!ViewOpen() || !here)) ObjTyping = false, ObjTypedChanged = true;
 	// A click anywhere but on the box: the box lets the keys go (the box's own
 	// click comes as its command right after the click).
 	if (const auto click = TypeClickAt.load(); ObjTyping && click && GetTickCount64() - click > 120) {
 		TypeClickAt = 0;
 		if (TypeHitAt.load() < click) ObjTyping = false, ObjTypedChanged = true;
 	}
-	if (ObjEnter.exchange(false) && ObjTyping) Queue(search ? "searchnext" : "objadd");
+	if (ObjEnter.exchange(false) && ObjTyping && target != TypeExclude) {
+		if (target == TypeListName) ObjTyping = false, ObjTypedChanged = true; // the name is done
+		else Queue(search ? "searchnext" : "objadd");
+	}
 	if (!ObjTypedChanged.exchange(false) || !ViewOpen()) return;
 	if (search) {
 		Queue("search"); // the matches again, the first shown
+		return;
+	}
+	if (target == TypeExclude) ExclFirst = 0; // the list from its top for a new search
+	if (target == TypeListName) {
+		Queue("exlname"); // the list's name follows, the page with it
 		return;
 	}
 	// The label alone when the runtime can change it, else the page again.
@@ -9976,10 +11669,17 @@ void __cdecl TypedOnUi(const D2RL::PluginContext*, void*) noexcept { ObjInputTic
 
 void RunCommand(const std::string& command) {
 	// The objectives' box: active on its click, inactive on any other.
-	if (command == "objtype" || command == "searchtype") {
-		ObjStartTyping(command[0] == 's' ? TypeSearch : TypeObjective);
+	if (command == "objtype" || command == "searchtype" || command == "excltype") {
+		ObjStartTyping(command[0] == 's' ? TypeSearch : command[0] == 'e' ? TypeExclude : TypeObjective);
 		ShowView();
 		return;
+	}
+	// Delete clicked once: anything else clicked on the settings forgets it.
+	if (ExclDeleteArmed >= 0 && command.rfind("exldel", 0) != 0
+	    && (command.rfind("ex", 0) == 0 || command.rfind("spage", 0) == 0 || command.rfind("menu", 0) == 0 || command.rfind("drop", 0) == 0 || command.rfind("toggle", 0) == 0 || command.rfind("loot", 0) == 0)) {
+		std::lock_guard guard(Lock);
+		ExclDeleteArmed = -1;
+		++Config.version;
 	}
 	if ((command.rfind("menu", 0) == 0 || command.rfind("toggle", 0) == 0 || (command.rfind("obj", 0) == 0 && command != "objadd" && command != "objtype")) && ObjTyping) ObjTyping = false, ObjTypedChanged = true;
 	if (command == "search" || command == "searchnext" || command == "searchprev" || command == "searchclear") {
@@ -10197,12 +11897,186 @@ void RunCommand(const std::string& command) {
 		ShowView();
 		return;
 	}
+	// The Loot page's exclusions: a group opened or closed, a group's or an
+	// item's box, a step of the list's scroll bar, another list chosen, the
+	// list cleared (a built-in one: back to its preset).
+	if (command.rfind("exs", 0) == 0 && command.size() > 3) {
+		const int step = std::atoi(command.c_str() + 3);
+		{
+			std::lock_guard guard(Lock);
+			if (step < 0 || step >= ExclSteps) return;
+			LearnBar(step);
+			ExclFirst = StepRow(step, ExclMax, ExclSteps);
+		}
+		ShowView();
+		return;
+	}
+	// The lists: switched on or off, renamed (its name typed in place),
+	// moved, added, deleted, opened in the editor; the editor saved or left.
+	const auto listCommand = [&](const char* prefix) {
+		const auto size = std::strlen(prefix);
+		return command.size() > size && command.compare(0, size, prefix) == 0 && std::isdigit(static_cast<unsigned char>(command[size])) ? std::atoi(command.c_str() + size) : -1;
+	};
+	if (const int i = listCommand("exlren"); i >= 0) {
+		{
+			std::lock_guard guard(Lock);
+			if (i >= static_cast<int>(ExclLists.size())) return;
+			OpenDrop        = -1;
+			ExclDeleteArmed = -1;
+			if (!(ObjTyping && TypeTarget == TypeListName && ExclRenaming == i)) {
+				const std::string utf = ExclLists[i].name;
+				std::wstring      wide(static_cast<std::size_t>(std::max(0, MultiByteToWideChar(CP_UTF8, 0, utf.c_str(), static_cast<int>(utf.size()), nullptr, 0))), L'\0');
+				if (!wide.empty()) MultiByteToWideChar(CP_UTF8, 0, utf.c_str(), static_cast<int>(utf.size()), wide.data(), static_cast<int>(wide.size()));
+				std::lock_guard typedGuard(ObjTypedLock);
+				TypedTexts[TypeListName] = wide;
+			}
+			ExclRenaming = i;
+			++Config.version;
+		}
+		ObjStartTyping(TypeListName);
+		ShowView();
+		return;
+	}
+	if (command == "exlname") { // the name typed so far (an empty one keeps the old name)
+		std::string typed = TypedText(TypeListName);
+		std::erase_if(typed, [](char c) { return c == '\n' || c == '\r' || c == '\t'; });
+		bool changed = false;
+		{
+			std::lock_guard guard(Lock);
+			if (!typed.empty() && ExclRenaming >= 0 && ExclRenaming < static_cast<int>(ExclLists.size()) && ExclLists[ExclRenaming].name != typed)
+				ExclLists[ExclRenaming].name = typed, changed = true;
+			++Config.version;
+		}
+		if (changed) SaveSettings();
+		ShowView();
+		return;
+	}
+	// The Variants section's lists: varedit1 (affix) / varedit2 (graphic) opens
+	// the editor on the items in it; its Save keeps the ones unticked out.
+	if (command == "varedit1" || command == "varedit2" || (VarEditing && (command == "exlsave" || command == "exlcancel"))) {
+		bool changed = false;
+		{
+			std::lock_guard guard(Lock);
+			OpenDrop = -1;
+			if (command[0] == 'v') {
+				VarEditing = command.back() - '0';
+				ExclDraft  = { VarEditing == 1 ? "Affix variants" : "Graphic variants" };
+				const auto& off = VarEditing == 1 ? AffixOff : GraphicOff;
+				for (int u = 0; u < UniqueCount(); ++u)
+					if (VariantCandidate(u, VarEditing) && !off.count(Uniques[u].id)) ExclDraft.items.insert(Uniques[u].id);
+				ExclFirst = 0;
+				ExclOpen.clear();
+				ClearTyped(TypeExclude);
+				if (ObjTyping && TypeTarget == TypeExclude) ObjTyping = false;
+			} else {
+				if (command == "exlsave") {
+					auto& off = VarEditing == 1 ? AffixOff : GraphicOff;
+					for (int u = 0; u < UniqueCount(); ++u) {
+						if (!VariantCandidate(u, VarEditing)) continue;
+						if (ExclDraft.items.count(Uniques[u].id)) off.erase(Uniques[u].id);
+						else off.insert(Uniques[u].id);
+					}
+					changed = true;
+				}
+				VarEditing = 0;
+				if (changed) VariantsChanged();
+			}
+			++Config.version;
+		}
+		if (changed) SaveSettings();
+		ShowView();
+		return;
+	}
+	{
+		const int on = listCommand("exlon"), up = listCommand("exlup"), down = listCommand("exldown"), del = listCommand("exldel"), add = listCommand("exladd"), edit = listCommand("exledit");
+		const bool save = command == "exlsave", cancel = command == "exlcancel";
+		if (on >= 0 || up >= 0 || down >= 0 || del >= 0 || add >= 0 || edit >= 0 || save || cancel) {
+			bool typeName = false, changed = false;
+			int  renameAt = -1;
+			{
+				std::lock_guard guard(Lock);
+				OpenDrop        = -1;
+				const int count = static_cast<int>(ExclLists.size());
+				const int armed = std::exchange(ExclDeleteArmed, -1);
+				if (ObjTyping && TypeTarget == TypeListName) ObjTyping = false;
+				if (on >= 0 && on < count) ExclLists[on].active = !ExclLists[on].active, changed = true;
+				else if (up > 0 && up < count) std::swap(ExclLists[up], ExclLists[up - 1]), changed = true;
+				else if (down >= 0 && down + 1 < count) std::swap(ExclLists[down], ExclLists[down + 1]), changed = true;
+				else if (del >= 0 && del < count) {
+					if (armed != del) ExclDeleteArmed = del; // the second click deletes
+					else ExclLists.erase(ExclLists.begin() + del), changed = true;
+				} else if (add >= 0) {
+					const int preset = std::clamp(add, 0, 2) - 1;
+					ExclLists.push_back({ FreeListName(preset < 0 ? "New list" : PresetNames[preset]), preset });
+					changed  = true;
+					typeName = preset < 0;
+					renameAt = static_cast<int>(ExclLists.size()) - 1;
+				} else if (edit >= 0 && edit < count) {
+					ExclEditing = edit, ExclDraft = ExclLists[edit], ExclFirst = 0;
+					ExclOpen.clear();
+					ClearTyped(TypeExclude);
+				} else if (save && ExclEditing >= 0 && ExclEditing < count) {
+					ExclDraft.active = ExclLists[ExclEditing].active, ExclDraft.name = ExclLists[ExclEditing].name;
+					ExclLists[ExclEditing] = ExclDraft, ExclEditing = -1, changed = true;
+				} else if (save || cancel) ExclEditing = -1;
+				++Config.version;
+			}
+			if (changed) SaveSettings();
+			if (typeName) {
+				RunCommand("exlren" + std::to_string(renameAt));
+				return;
+			}
+			ShowView();
+			return;
+		}
+	}
+	// The editor: a group opened or closed, a group's or an item's box, the
+	// list cleared (a preset's: back to the preset's items). Saved by Save.
+	if (command == "excltypeclear") {
+		{
+			std::lock_guard guard(Lock);
+			ClearTyped(TypeExclude);
+			if (ObjTyping && TypeTarget == TypeExclude) ObjTyping = false;
+			ExclFirst = 0;
+		}
+		ShowView();
+		return;
+	}
+	if (command.rfind("exo", 0) == 0 || command.rfind("exg", 0) == 0 || command.rfind("exi", 0) == 0 || command == "excludeclear") {
+		{
+			std::lock_guard guard(Lock);
+			if (ExclEditing < 0 && !VarEditing) return;
+			OpenDrop          = -1;
+			const auto key    = command.size() > 3 ? command.substr(3) : std::string();
+			const auto typed  = TypedText(TypeExclude);
+			if (command == "excludeclear") {
+				auto& list = ExclDraft;
+				if (list.preset >= 0) list.own = false; // its preset again
+				list.items.clear();
+			} else if (command[2] == 'o' && (key[0] == 'm' || key[0] == 'c' || key[0] == 's')) {
+				if (!typed.empty()) return; // a search shows every group open
+				if (!ExclOpen.erase(key)) ExclOpen.insert(key);
+			} else {
+				// A box: an item's flips; a group's ticks all of it, or clears it when all of it is ticked.
+				const auto tiles = ExclRowTiles(key, typed);
+				const bool all   = std::all_of(tiles.begin(), tiles.end(), [](const auto& tile) { return Drafted(tile.first, tile.second); });
+				if (!tiles.empty()) OwnBuiltin();
+				for (const auto& [u, eth] : tiles) {
+					if (all) ExclDraft.items.erase(DraftKey(u, eth));
+					else ExclDraft.items.insert(DraftKey(u, eth));
+				}
+			}
+			++Config.version;
+		}
+		ShowView();
+		return;
+	}
 	// The settings' pages, and the misc tracking page's own pages.
 	if (command.rfind("spage", 0) == 0 || command.rfind("miscpage", 0) == 0) {
 		{
 			std::lock_guard guard(Lock);
 			OpenDrop = -1;
-			if (command[0] == 's') SettingsPage = std::clamp(std::atoi(command.c_str() + 5), 0, SettingsPageCount - 1);
+			if (command[0] == 's') SettingsPage = std::clamp(std::atoi(command.c_str() + 5), 0, SettingsPageCount - 1), VarEditing = 0;
 			else MiscFirst = std::max(0, MiscFirst + (command.back() == '-' ? -MiscPerPage : MiscPerPage));
 			++Config.version;
 		}
@@ -10260,6 +12134,10 @@ void RunCommand(const std::string& command) {
 		ApplyTooltipSettings();
 		SaveSettings();
 		if (command == "toggle:compact") CompactChanged();
+		if (command == "toggle:affix_variants" || command == "toggle:graphic_variants") {
+			std::lock_guard guard(Lock);
+			VariantsChanged();
+		}
 		if (command == "toggle:objectives") {
 			std::lock_guard guard(Lock);
 			BuildObjectives();
@@ -10275,7 +12153,7 @@ void RunCommand(const std::string& command) {
 			const int menu = std::atoi(command.c_str() + 4);
 			constexpr int none = -100;
 			int           pick = menu == ConfigMenu ? SettingsView : menu == StatsMenu ? StatsView : none;
-			if (menu >= WeaponMenu && menu <= ObjMenu) {
+			if (menu >= WeaponMenu && menu <= LostMenu) {
 				if (const auto last = LastInMenu.find(menu); last != LastInMenu.end()) pick = last->second;
 				for (int c = 0; c < CategoryCount() && pick < 0; ++c)
 					if (InMenu(c, menu) && pick == none) pick = c;
@@ -10286,7 +12164,11 @@ void RunCommand(const std::string& command) {
 			CurrentCategory = pick;
 			ViewEth         = IsEthMenu(menu);
 			Scroll          = 0;
-		} else if (command.rfind("row", 0) == 0) Scroll = std::clamp(std::atoi(command.c_str() + 3), 0, MaxScroll);
+		} else if (command.rfind("row", 0) == 0) {
+			// A drag of the scroll bar: the view's rows, or the Loot page's exclusions list.
+			if (CurrentCategory == SettingsView && (SettingsPage == 2 || VarEditing)) ExclFirst = std::clamp(std::atoi(command.c_str() + 3), 0, ExclMax);
+			else Scroll = std::clamp(std::atoi(command.c_str() + 3), 0, MaxScroll);
+		}
 		else if (command.rfind("step", 0) == 0) {
 			const int step = std::clamp(std::atoi(command.c_str() + 4), 0, ScrollSteps - 1);
 			LearnBar(step);
@@ -10460,11 +12342,11 @@ void LearnBar(int step) {
 	const double scale = UiScale();
 	if (!scale || !GetCursorPos(&cursor) || !ScreenToClient(GameWindow, &cursor)) return;
 	BarOffsetX = cursor.x - (BarLeft + BarWidth / 2.0) * scale;
-	BarOffsetY = cursor.y - (BarTop + (step + 0.5) * StepHeight) * scale;
+	BarOffsetY = cursor.y - (BarY + (step + 0.5) * StepHeight) * scale;
 	if (!BarLearned.exchange(true)) Say(false, "grailon: scroll bar found at %ld, %ld in the window", cursor.x, cursor.y);
 }
 
-int StepRow(int step, int maxScroll) { return (maxScroll * step + (ScrollSteps - 1) / 2) / (ScrollSteps - 1); }
+int StepRow(int step, int maxScroll, int steps) { return steps > 1 ? (maxScroll * step + (steps - 1) / 2) / (steps - 1) : 0; }
 
 // The step under a window point, or -1 when the point is off the bar (with
 // `loose`, any height counts: a drag goes on above and below the bar).
@@ -10472,16 +12354,17 @@ int StepAt(POINT point, bool loose) {
 	const double scale = UiScale();
 	if (!scale) return -1;
 	const auto [ox, oy] = PanelOffset();
-	const double x = (point.x - ox) / scale, y = (point.y - oy) / scale - BarTop;
-	if (!loose && (x < BarLeft - 12 || x > BarLeft + BarWidth + 12 || y < 0 || y >= BarHeight)) return -1;
-	return std::clamp(static_cast<int>(std::floor(y / StepHeight)), 0, ScrollSteps - 1);
+	const int    steps = BarSteps;
+	const double x = (point.x - ox) / scale, y = (point.y - oy) / scale - BarY;
+	if (!loose && (x < BarLeft - 12 || x > BarLeft + BarWidth + 12 || y < 0 || y >= steps * StepHeight)) return -1;
+	return std::clamp(static_cast<int>(std::floor(y / StepHeight)), 0, steps - 1);
 }
 
 void DragTo(POINT point) {
 	const int max  = BarMax;
 	const int step = StepAt(point, true);
 	if (max <= 0 || step < 0) return;
-	const int row = StepRow(step, max);
+	const int row = StepRow(step, max, BarSteps);
 	if (DragLast.exchange(row) != row) Queue("row" + std::to_string(row));
 }
 
@@ -10580,7 +12463,11 @@ void __cdecl RunPending(const D2RL::PluginContext*, void*) noexcept {
 		CommandScheduled = false;
 	}
 	if (!command.empty()) RunCommand(command);
-	if (rows && ViewOpen()) RunScroll(rows);
+	if (rows && ViewOpen() && CurrentCategory == SettingsView && (SettingsPage == 2 || VarEditing)) {
+		// The wheel over the Loot page scrolls its exclusions list (two rows a notch: about a grail row).
+		ExclFirst = std::clamp(ExclFirst + 2 * rows, 0, ExclMax);
+		ShowView();
+	} else if (rows && ViewOpen()) RunScroll(rows);
 }
 
 // Registers every text the views use, replacing the previous ones.
@@ -10837,6 +12724,11 @@ void __cdecl UiTick(const D2RL::PluginContext* context, void*) noexcept {
 		}
 		seen = player;
 		Ghosts.clear(), GhostWanted.clear(); // that game's: freed with it
+		VariantUnits.clear(), Pictures.clear();
+		{
+			std::lock_guard upgrades(UpgradeLock);
+			UnidUpgrade.clear(), UpgradeAsked.clear(); // its items' ids
+		}
 		ServerGame = nullptr;
 		if (player) OpenStoreFor(player), StaleChecked = false;
 	}
@@ -10844,6 +12736,13 @@ void __cdecl UiTick(const D2RL::PluginContext* context, void*) noexcept {
 	if (LootOn) {
 		std::lock_guard guard(Lock);
 		PublishLootTable();
+	}
+	// Unidentified drops to compare with their grail copies (game thread; a
+	// joined game has no server copies: answered "not known" at once).
+	if (UpgradeWanted && !UpgradeRunning.exchange(true)) {
+		UpgradeWanted = false;
+		if (Remote()) CheckUpgrades(context, nullptr);
+		else if (Threads->runOnGameThread(context, CheckUpgrades, nullptr) != D2RL::Threads::Result::Success) UpgradeRunning = false, UpgradeWanted = true;
 	}
 	// The lists come from the game's tables, read on the game thread once
 	// they are loaded; their texts and slots are registered here after.
@@ -11280,14 +13179,15 @@ void Register() {
 	if (!RegisterPanelArt()) Say(true, "grail-on: could not unpack the stash frame");
 	if (!RegisterSprite("category", CategoryButton(false, CatSize, CatSize)) || !RegisterSprite("categoryOn", CategoryButton(true, CatSize, CatSize))
 	    || !RegisterSprite("menu", CategoryButton(false, MenuSize, MenuSize)) || !RegisterSprite("menuOn", CategoryButton(true, MenuSize, MenuSize))
-	    || !RegisterSprite("stattile", CategoryButton(false, StatTile, StatTile))
+	    || !RegisterSprite("stattile", CategoryButton(false, StatTile, StatTile)) || !RegisterSprite("squarebtn", CategoryButton(false, DropHeight, DropHeight))
 	    || !RegisterSprite("check", CheckBox(false)) || !RegisterSprite("checkOn", CheckBox(true)) || !RegisterSprite("divider", { Divider(HeaderWidth, 4) }))
 		Say(true, "grail-on: could not register the buttons");
 	// The menu and category icons (game-icons.net), in the game's gold text colour.
 	for (const auto& mask : IconMasks) {
 		Picture icon { IconSize, IconSize, std::vector<unsigned char>(static_cast<std::size_t>(IconSize) * IconSize * 4) };
 		for (int p = 0; p < IconSize * IconSize; ++p) {
-			icon.rgba[p * 4] = 215, icon.rgba[p * 4 + 1] = 200, icon.rgba[p * 4 + 2] = 150;
+			const bool lost = std::string_view(mask.name) == "lost"; // the Lost items menu: red
+			icon.rgba[p * 4] = lost ? 200 : 215, icon.rgba[p * 4 + 1] = lost ? 30 : 200, icon.rgba[p * 4 + 2] = lost ? 30 : 150;
 			icon.rgba[p * 4 + 3] = mask.alpha[p];
 		}
 		if (!RegisterSprite(std::string("icon-") + mask.name, { icon })) Say(true, "grail-on: could not register icon %s", mask.name);
