@@ -32,6 +32,8 @@
 #include "toml_edit.h"
 #include <D2RLPlugin/api.h>
 #include <windows.h>
+#include <shellapi.h>
+#include <winhttp.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -49,7 +51,7 @@
 namespace {
 
 constexpr const char* PluginId      = "i-hate-tomls";
-constexpr const char* PluginVersion = "1.0.1";
+constexpr const char* PluginVersion = "1.1.0";
 constexpr const char* CommandPrefix = "i-hate-tomls/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -148,6 +150,70 @@ std::string Json(std::string_view text) {
 		else if (static_cast<unsigned char>(c) >= 0x20) out += c;
 	}
 	return out + '"';
+}
+
+// Text for the game's font. A character the font lacks (box drawing,
+// arrows, curly quotes) makes the game draw the whole text box in another,
+// much bigger font, which runs over the rows below and is slow to draw, so
+// those are written with plain characters. A rule of box lines
+// ("── Title ────") keeps only its title.
+std::string GameText(std::string_view text) {
+	std::string out;
+	out.reserve(text.size());
+	bool rule = false; // box lines skipped since the last plain character
+	for (std::size_t i = 0; i < text.size();) {
+		const auto     c = static_cast<unsigned char>(text[i]);
+		char32_t       u = c;
+		std::size_t    n = 1;
+		if (c >= 0xF0 && i + 3 < text.size()) u = ((c & 7u) << 18) | ((text[i + 1] & 0x3Fu) << 12) | ((text[i + 2] & 0x3Fu) << 6) | (text[i + 3] & 0x3Fu), n = 4;
+		else if (c >= 0xE0 && i + 2 < text.size()) u = ((c & 0xFu) << 12) | ((text[i + 1] & 0x3Fu) << 6) | (text[i + 2] & 0x3Fu), n = 3;
+		else if (c >= 0xC0 && i + 1 < text.size()) u = ((c & 0x1Fu) << 6) | (text[i + 1] & 0x3Fu), n = 2;
+		const std::string_view raw = text.substr(i, n);
+		i += n;
+		if (u == '\r') continue;
+		if (u >= 0x2500 && u <= 0x259F) { // box drawing and blocks
+			if (u == 0x2502 || u == 0x2503 || u == 0x2551) out += '|';
+			else rule = true;
+			continue;
+		}
+		if (rule) {
+			rule = false;
+			if (u != '\n' && u != ' ' && !out.empty() && out.back() != ' ' && out.back() != '\n') out += ' ';
+		}
+		switch (u) {
+		case 0x00A0: case 0x2002: case 0x2003: case 0x2009: case 0x202F: out += ' '; break;
+		case 0x2010: case 0x2011: case 0x2012: case 0x2013: case 0x2014: case 0x2015: case 0x2212: out += '-'; break;
+		case 0x2018: case 0x2019: case 0x201A: case 0x2032: out += '\''; break;
+		case 0x201C: case 0x201D: case 0x201E: case 0x2033: out += '"'; break;
+		case 0x2026: out += "..."; break;
+		case 0x2022: case 0x2023: case 0x25CF: case 0x2043: out += '*'; break;
+		case 0x2190: case 0x21D0: out += "<-"; break;
+		case 0x2192: case 0x21D2: case 0x279C: case 0x27A4: out += "->"; break;
+		case 0x2194: case 0x21D4: out += "<->"; break;
+		case 0x2191: out += '^'; break;
+		case 0x2193: out += 'v'; break;
+		case 0x2264: out += "<="; break;
+		case 0x2265: out += ">="; break;
+		case 0x2260: out += "!="; break;
+		case 0x2248: out += '~'; break;
+		case 0x2713: case 0x2714: out += "yes"; break;
+		case 0x2717: case 0x2718: out += "no"; break;
+		default:
+			if (u >= 0x2000 && u < 0x3000) out += '?'; // other symbols
+			else if (u >= 0x1F000) out += '?';        // emoji
+			else out += raw;
+		}
+	}
+	// spaces left at line ends by removed rules
+	std::string clean;
+	clean.reserve(out.size());
+	for (const char c : out) {
+		if (c == '\n')
+			while (!clean.empty() && clean.back() == ' ') clean.pop_back();
+		clean += c;
+	}
+	while (!clean.empty() && clean.back() == ' ') clean.pop_back();
+	return clean;
 }
 
 std::string Trim(std::string_view text) {
@@ -307,7 +373,7 @@ struct Setting {
 
 struct Client {
 	uint64_t             handle {};
-	std::string          plugin, title;
+	std::string          plugin, title, hub; // hub: its slug on the D2RLoader Hub, when not built from its name
 	std::vector<Setting> settings;
 	PluginMenu::GetFn    get {};
 	PluginMenu::SetFn    set {};
@@ -363,6 +429,7 @@ void ReadSchema(const char* text, Client& client) {
 			if (const auto hash = value.find('#'); hash != std::string::npos) value = Trim(std::string_view(value).substr(0, hash));
 		if (!current) {
 			if (key == "title") client.title = Unquote(value);
+			else if (key == "hub") client.hub = Unquote(value);
 			continue;
 		}
 		if (key == "key") current->key = Unquote(value);
@@ -437,7 +504,7 @@ void FindRunningPlugins() {
 		const auto get = reinterpret_cast<InfoFn>(reinterpret_cast<void*>(GetProcAddress(module, D2RL_PLUGIN_GET_INFO_EXPORT)));
 		if (!get) continue;
 		const D2RL::PluginInfo* info = get();
-		if (!info || info->infoSize < D2RL::PluginInfoRequiredSize || !info->id || !info->id[0] || std::strcmp(info->id, PluginId) == 0) continue;
+		if (!info || info->infoSize < D2RL::PluginInfoRequiredSize || !info->id || !info->id[0]) continue;
 		if (std::any_of(Running.begin(), Running.end(), [&](const Plugin& p) { return p.id == info->id; })) continue;
 		Plugin plugin { .id = info->id, .name = info->name && info->name[0] ? info->name : info->id, .version = info->version ? info->version : "", .author = info->author ? info->author : "" };
 		wchar_t path[MAX_PATH * 2] {};
@@ -626,12 +693,281 @@ void Restore() {
 }
 } // namespace Backup
 
+// ---- updates on the D2RLoader Hub ----
+// Once per launch, on a thread of its own, the Hub's public catalog
+// (d2rloader.net/api/v1/hub/plugins, no login) is read a page at a time; each
+// running plugin is found by its slug, built from its name as the Hub builds
+// it (lowercase, every run of other characters one "-", none at the ends). A
+// joined plugin may give its own (`hub = "<slug>"` in its schema). Off with
+// check_updates = false in i-hate-tomls.toml.
+namespace Hub {
+std::mutex                         Lock;
+std::map<std::string, std::string> Latest; // slug -> latest version on the Hub
+std::atomic<bool>                  Done {};
+enum class State { Off, Checking, Failed, Done };
+std::atomic<State>                 Now { State::Off };
+
+std::string SlugOf(const std::string& name) {
+	std::string slug;
+	bool        dash = false;
+	for (const unsigned char c : name) {
+		const char lower = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+		if ((lower >= 'a' && lower <= 'z') || (lower >= '0' && lower <= '9')) {
+			if (dash && !slug.empty()) slug += '-';
+			slug += lower, dash = false;
+		} else dash = true;
+	}
+	return slug;
+}
+
+// A small JSON reader: just enough to walk the catalog.
+struct Json {
+	std::string_view s;
+	std::size_t      i = 0;
+	void             Skip() { while (i < s.size() && (s[i] == ' ' || s[i] == '\n' || s[i] == '\r' || s[i] == '\t')) ++i; }
+	bool             String(std::string& out) {
+        Skip();
+        if (i >= s.size() || s[i] != '"') return false;
+        out.clear();
+        for (++i; i < s.size(); ++i) {
+            if (s[i] == '"') return ++i, true;
+            if (s[i] == '\\' && i + 1 < s.size()) {
+                const char e = s[++i];
+                out += e == 'n' ? '\n' : e == 't' ? '\t' : e == 'u' ? (i += 4, '?') : e;
+            } else out += s[i];
+        }
+        return false;
+	}
+	// Skips one value; with `fields`, keeps an object's string fields.
+	bool Value(std::map<std::string, std::string>* fields = nullptr, const std::string& prefix = {}, int depth = 0) {
+		Skip();
+		if (i >= s.size() || depth > 32) return false;
+		const char c = s[i];
+		if (c == '"') {
+			std::string text;
+			return String(text);
+		}
+		if (c == '{' || c == '[') {
+			const char close = c == '{' ? '}' : ']';
+			++i;
+			for (bool first = true;; first = false) {
+				Skip();
+				if (i < s.size() && s[i] == close) return ++i, true;
+				if (!first) {
+					if (i >= s.size() || s[i] != ',') return false;
+					++i;
+				}
+				std::string key;
+				if (c == '{') {
+					if (!String(key)) return false;
+					Skip();
+					if (i >= s.size() || s[i] != ':') return false;
+					++i;
+					Skip();
+					if (fields && i < s.size() && s[i] == '"') {
+						std::string text;
+						if (!String(text)) return false;
+						(*fields)[prefix + key] = text;
+						continue;
+					}
+				}
+				if (!Value(c == '{' && fields ? fields : nullptr, prefix + key + ".", depth + 1)) return false;
+			}
+		}
+		while (i < s.size() && s[i] != ',' && s[i] != '}' && s[i] != ']') ++i; // number, true, false, null
+		return true;
+	}
+};
+
+// The catalog page's items as their string fields ("slug", "latestRelease.version"...); false when unreadable.
+bool Items(const std::string& body, std::vector<std::map<std::string, std::string>>& items, int& total) {
+	Json json { body };
+	json.Skip();
+	if (json.i >= body.size() || body[json.i] != '{') return false;
+	++json.i;
+	for (bool first = true;; first = false) {
+		json.Skip();
+		if (json.i < body.size() && body[json.i] == '}') return true;
+		if (!first) {
+			if (json.i >= body.size() || body[json.i] != ',') return false;
+			++json.i;
+		}
+		std::string key;
+		if (!json.String(key)) return false;
+		json.Skip();
+		if (json.i >= body.size() || body[json.i] != ':') return false;
+		++json.i;
+		json.Skip();
+		if (key == "items" && json.i < body.size() && body[json.i] == '[') {
+			++json.i;
+			for (bool firstItem = true;; firstItem = false) {
+				json.Skip();
+				if (json.i < body.size() && body[json.i] == ']') {
+					++json.i;
+					break;
+				}
+				if (!firstItem) {
+					if (json.i >= body.size() || body[json.i] != ',') return false;
+					++json.i;
+				}
+				items.emplace_back();
+				if (!json.Value(&items.back())) return false;
+			}
+		} else if (key == "total") {
+			total = std::atoi(body.c_str() + json.i);
+			if (!json.Value()) return false;
+		} else if (!json.Value()) return false;
+	}
+}
+
+bool Get(const std::wstring& path, std::string& body) {
+	body.clear();
+	HINTERNET session = WinHttpOpen(L"I Hate TOMLs", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+	if (!session) session = WinHttpOpen(L"I Hate TOMLs", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+	if (!session) return false;
+	WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
+	bool      ok      = false;
+	HINTERNET connect = WinHttpConnect(session, L"d2rloader.net", INTERNET_DEFAULT_HTTPS_PORT, 0);
+	HINTERNET request = connect ? WinHttpOpenRequest(connect, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
+	if (request && WinHttpSendRequest(request, L"Accept: application/json\r\n", static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(request, nullptr)) {
+		DWORD status = 0, size = sizeof(status);
+		WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
+		for (DWORD available = 0; WinHttpQueryDataAvailable(request, &available) && available && body.size() < (4u << 20);) {
+			std::string chunk(available, '\0');
+			DWORD       read = 0;
+			if (!WinHttpReadData(request, chunk.data(), available, &read)) break;
+			body.append(chunk.data(), read);
+		}
+		ok = status == 200;
+		if (!ok) Log(true, "hub: %ls answered %lu", path.c_str(), status);
+	}
+	if (request) WinHttpCloseHandle(request);
+	if (connect) WinHttpCloseHandle(connect);
+	WinHttpCloseHandle(session);
+	return ok;
+}
+
+// Whether `hub` is newer than `running`: both as numbers when they read so
+// ("v" and a "-dev-N" suffix ignored, a dev build counts as its version),
+// else whenever they differ.
+bool Newer(std::string hub, std::string running) {
+	const auto clean = [](std::string v) {
+		if (!v.empty() && (v[0] == 'v' || v[0] == 'V')) v.erase(0, 1);
+		return v;
+	};
+	hub = clean(hub), running = clean(running);
+	if (hub.empty() || hub == running) return false;
+	const auto numbers = [](const std::string& v, std::vector<long>& out) {
+		std::size_t at = 0;
+		while (at < v.size()) {
+			if (v[at] < '0' || v[at] > '9') return at > 0 && v[at] == '-' && !out.empty(); // a suffix such as -dev-3
+			char* end = nullptr;
+			out.push_back(std::strtol(v.c_str() + at, &end, 10));
+			at = static_cast<std::size_t>(end - v.c_str());
+			if (at < v.size() && v[at] == '.') ++at;
+			else if (at < v.size() && v[at] != '-') return false;
+			else if (at < v.size()) return true;
+		}
+		return !out.empty();
+	};
+	std::vector<long> a, b;
+	if (!numbers(hub, a) || !numbers(running, b)) return true;
+	while (a.size() < b.size()) a.push_back(0);
+	while (b.size() < a.size()) b.push_back(0);
+	return a > b;
+}
+
+// A switch of i-hate-tomls.toml (on unless "false").
+bool Wanted(const char* key = "check_updates") {
+	if (!Context->pluginConfigPath) return true;
+	std::string text;
+	HANDLE      file = CreateFileW(Context->pluginConfigPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (file == INVALID_HANDLE_VALUE) return true;
+	char  buffer[4096] {};
+	DWORD read = 0;
+	(void)ReadFile(file, buffer, sizeof(buffer) - 1, &read, nullptr);
+	CloseHandle(file);
+	const auto doc = TomlDoc::Parse(std::string(buffer, read));
+	for (const auto& item : doc.items)
+		if (item.kind == TomlDoc::Kind::Key && item.text == key) return item.value.text != "false";
+	return true;
+}
+
+void __cdecl Refresh(const D2RL::PluginContext*, void*) noexcept;
+
+void Start() {
+	if (!Wanted()) return Log(false, "hub: update check off (check_updates = false)");
+	Now = State::Checking;
+	std::thread([] {
+		std::map<std::string, std::string> found;
+		int                                pages = 0;
+		for (int page = 1, total = 1; page <= 10 && (page - 1) * 50 < total; ++page) {
+			if (page > 1) Sleep(1500); // the Hub limits quick requests
+			std::string body;
+			if (!Get(L"/api/v1/hub/plugins?sort=updated&type=plugin&pageSize=50&page=" + std::to_wstring(page), body)) break;
+			std::vector<std::map<std::string, std::string>> items;
+			total = 0;
+			if (!Items(body, items, total)) {
+				Log(true, "hub: page %d could not be read", page);
+				break;
+			}
+			++pages;
+			for (const auto& item : items) {
+				const auto slug = item.find("slug"), version = item.find("latestRelease.version");
+				if (slug != item.end() && version != item.end()) found[slug->second] = version->second;
+			}
+			if (items.empty()) break;
+		}
+		{
+			std::lock_guard<std::mutex> hold(Lock);
+			Latest = std::move(found);
+		}
+		Log(false, "hub: %zu plugins read from %d pages", Latest.size(), pages);
+		Done = true;
+		Now  = pages > 0 && !Latest.empty() ? State::Done : State::Failed;
+		if (Threads) (void)Threads->runOnUiThread(Context, Refresh, nullptr);
+	}).detach();
+}
+
+// The newer version on the Hub of a running plugin, or "".
+std::string UpdateFor(const std::string& slug, const std::string& version) {
+	if (!Done) return {};
+	std::lock_guard<std::mutex> hold(Lock);
+	const auto                  it = Latest.find(slug);
+	return it != Latest.end() && Newer(it->second, version) ? it->second : std::string();
+}
+
+// Whether the Hub lists the plugin at this version or an older one.
+bool UpToDate(const std::string& slug, const std::string& version) {
+	if (Now != State::Done) return false;
+	std::lock_guard<std::mutex> hold(Lock);
+	const auto                  it = Latest.find(slug);
+	return it != Latest.end() && !Newer(it->second, version);
+}
+
+// The check's state, for the list's header.
+std::string StateText() {
+	switch (Now.load()) {
+	case State::Checking: return "checking updates...";
+	case State::Failed: return "update check failed";
+	case State::Done: return "up to date";
+	default: return {};
+	}
+}
+
+void Open(const std::string& slug) {
+	const std::wstring url = L"https://d2rloader.net/hub/plugins/" + Wide(slug);
+	ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+} // namespace Hub
+
 enum class Mode { None, Toml, Menu, Window };
 
 struct Entry {
 	std::string  id, name, version, author;
 	std::wstring config;
 	Mode         mode = Mode::None;
+	std::string  slug; // on the D2RLoader Hub
 };
 
 int ClientIndex(const std::string& plugin) {
@@ -655,9 +991,99 @@ std::vector<Entry> Entries() {
 	};
 	for (const auto& c : Clients) add(c.plugin, c.title);
 	for (const auto& w : Windows) add(w.plugin, w.plugin);
-	for (auto& e : list) e.mode = WindowOf(e.id) ? Mode::Window : ClientIndex(e.id) >= 0 ? Mode::Menu : !e.config.empty() ? Mode::Toml : Mode::None;
-	std::sort(list.begin(), list.end(), [](const Entry& a, const Entry& b) { return _stricmp(a.name.c_str(), b.name.c_str()) < 0; });
+	for (auto& e : list) {
+		e.mode = WindowOf(e.id) ? Mode::Window : ClientIndex(e.id) >= 0 ? Mode::Menu : !e.config.empty() ? Mode::Toml : Mode::None;
+		const int client = ClientIndex(e.id);
+		e.slug = client >= 0 && !Clients[static_cast<std::size_t>(client)].hub.empty() ? Clients[static_cast<std::size_t>(client)].hub : Hub::SlugOf(e.name);
+	}
+	// I Hate TOMLs first, then by name
+	std::sort(list.begin(), list.end(), [](const Entry& a, const Entry& b) {
+		const bool selfA = a.id == PluginId, selfB = b.id == PluginId;
+		return selfA != selfB ? selfA : _stricmp(a.name.c_str(), b.name.c_str()) < 0;
+	});
 	return list;
+}
+
+// ---- "N plugins can be updated" in the chat ----
+// Once per launch, when the first game's player is ready (or when the Hub
+// answers after that), a local notice on the chat's current channel, as Loot
+// Filter Plus prints its drop lines: the game's own ChatData push.
+namespace Chat {
+constexpr std::uint64_t InstanceRva = 0x85E5C0;  // ChatData* ChatData_Instance() (3.3.93787 = 94995)
+constexpr std::uint8_t  InstanceStart[] { 0x48, 0x83, 0xEC, 0x28, 0x65, 0x48, 0x8B, 0x04, 0x25, 0x58, 0x00, 0x00, 0x00, 0x8B, 0x0D, 0xF5, 0x5E, 0xD5, 0x02, 0xBA, 0x6C, 0x12, 0x00, 0x00 };
+constexpr std::uint64_t PushRva = 0x3E2B7F0;     // thunk of ChatData_PushEntry
+constexpr std::uintptr_t KeyOffset = 0xC3AC0;    // the current channel's key: type, then its name
+struct BcString {
+	const char*   data;
+	std::size_t   size;
+	std::uint64_t capacity; // bit 63: not owned by the game
+	char          inline_[16];
+};
+struct Key {
+	std::int32_t type, pad;
+	BcString     name;
+};
+struct Option {
+	std::uint64_t value;
+	bool          has;
+	std::uint8_t  pad[7];
+};
+using InstanceFn = void* (*)() noexcept;
+using PushFn     = void (*)(void*, const BcString*, int, bool, const Key*, Option*, Option*, Option*, Option*, bool) noexcept;
+
+bool Readable(std::uintptr_t at, std::size_t size) {
+	MEMORY_BASIC_INFORMATION info {};
+	if (!VirtualQuery(reinterpret_cast<const void*>(at), &info, sizeof(info)) || info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+	return at + size <= reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+}
+
+std::atomic<bool> PlayerReady {}, Told {}, InGame {}; // InGame: from the player ready to leaving the game
+
+void Print(const std::string& text) {
+	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
+	if (!base || !Readable(base + InstanceRva, sizeof(InstanceStart)) || std::memcmp(reinterpret_cast<const void*>(base + InstanceRva), InstanceStart, sizeof(InstanceStart)) != 0
+	    || !Readable(base + PushRva, 2) || reinterpret_cast<const std::uint8_t*>(base + PushRva)[0] != 0xFF || reinterpret_cast<const std::uint8_t*>(base + PushRva)[1] != 0x25) {
+		Log(true, "chat: the game's chat is not where this build expects it; %s", text.c_str());
+		Say("%s", text.c_str());
+		return;
+	}
+	void* chat = reinterpret_cast<InstanceFn>(base + InstanceRva)();
+	if (!chat) return;
+	const BcString line { text.data(), text.size(), 0x8000000000000000ull, {} };
+	Key            key {};
+	const auto     at = reinterpret_cast<std::uintptr_t>(chat) + KeyOffset;
+	if (Readable(at, 8 + sizeof(BcString))) std::memcpy(&key.type, reinterpret_cast<const void*>(at), 4), std::memcpy(&key.name, reinterpret_cast<const void*>(at + 8), 24);
+	key.name.capacity |= 0x8000000000000000ull; // borrowed: never freed through this copy
+	if (!key.name.data) key.name.size = 0, key.name.data = key.name.inline_;
+	Option none[4] {};
+	reinterpret_cast<PushFn>(base + PushRva)(chat, &line, 1, false, &key, &none[0], &none[1], &none[2], &none[3], false);
+}
+
+int UpdateCount();
+
+// UI thread: once both the player and the Hub's answer are there.
+void Try() {
+	if (Told || !PlayerReady || Hub::Now == Hub::State::Checking) return;
+	Told = true;
+	const int count = UpdateCount();
+	Log(false, "chat: %d plugins can be updated", count);
+	if (count > 0 && Hub::Wanted("chat_updates")) Print(std::to_string(count) + (count == 1 ? " plugin can be updated" : " plugins can be updated"));
+}
+
+void __cdecl OnPlayerReady(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent*, void*) noexcept {
+	PlayerReady = true;
+	InGame      = true;
+	Try();
+}
+
+void __cdecl OnGameLeft(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent*, void*) noexcept { InGame = false; }
+} // namespace Chat
+
+int Chat::UpdateCount() {
+	int count = 0;
+	for (const auto& e : Entries())
+		if (!Hub::UpdateFor(e.slug, e.version).empty()) ++count;
+	return count;
 }
 
 // ---- the window's state ----
@@ -726,6 +1152,70 @@ uint64_t __cdecl RegisterClient(const D2RL::PluginContext* caller, const PluginM
 	return handle;
 }
 
+// I Hate TOMLs' own page in its list: its settings, kept in i-hate-tomls.toml.
+namespace Self {
+constexpr const char* Schema = R"(title = "I Hate TOMLs"
+[[setting]]
+type = "header"
+label = "Updates"
+[[setting]]
+key = "check_updates"
+type = "bool"
+label = "Check the D2RLoader Hub for updates"
+note = "At each launch, in the background. Plugins with a newer version on the Hub get a button in the list."
+[[setting]]
+key = "chat_updates"
+type = "bool"
+label = "Say in the chat when updates are out"
+note = "Once per launch, when the first game starts: how many plugins can be updated."
+[[setting]]
+type = "header"
+label = "Config copies"
+[[setting]]
+type = "text"
+label = "Every plugin config is copied to <game>\d2rloader\I Hate TOMLs\<mod>\ and written back at each start, so a D2RMM install does not reset your settings."
+)";
+
+bool __cdecl Get(const char* key, char* out, uint32_t size, void*) noexcept {
+	if (!key || (std::strcmp(key, "check_updates") != 0 && std::strcmp(key, "chat_updates") != 0)) return false;
+	std::snprintf(out, size, "%s", Hub::Wanted(key) ? "true" : "false");
+	return true;
+}
+
+bool __cdecl Set(const char* key, const char* value, char* error, uint32_t size, void*) noexcept {
+	if (!key || !value || (std::strcmp(key, "check_updates") != 0 && std::strcmp(key, "chat_updates") != 0) || !Context->pluginConfigPath) return false;
+	const std::string wanted = Unquote(Trim(value)) == "true" ? "true" : "false";
+	std::string       text;
+	(void)Backup::ReadAll(Context->pluginConfigPath, text);
+	const auto doc = TomlDoc::Parse(text);
+	bool       put = false;
+	if (doc.error.empty())
+		for (const auto& item : doc.items)
+			if (item.kind == TomlDoc::Kind::Key && item.text == key) {
+				text.replace(item.value.start, item.value.end - item.value.start, wanted);
+				put = true;
+				break;
+			}
+	if (!put) {
+		if (!doc.error.empty()) text.clear();
+		if (!text.empty() && text.back() != '\n') text += '\n';
+		text += std::strcmp(key, "check_updates") == 0 ? "# Check the D2RLoader Hub for plugin updates at each launch.\ncheck_updates = " + wanted + "\n"
+		                                               : "# Say in the chat, once per launch, how many plugins can be updated.\nchat_updates = " + wanted + "\n";
+	}
+	if (!Backup::WriteAll(Context->pluginConfigPath, text)) {
+		std::snprintf(error, size, "could not write i-hate-tomls.toml");
+		return false;
+	}
+	if (std::strcmp(key, "check_updates") == 0 && wanted == "true" && Hub::Now == Hub::State::Off) Hub::Start(); // at once, no restart needed
+	return true;
+}
+
+void Join() {
+	const PluginMenu::ClientInfo info { .structSize = sizeof(PluginMenu::ClientInfo), .schemaToml = Schema, .get = Get, .set = Set };
+	(void)RegisterClient(Context, &info);
+}
+} // namespace Self
+
 uint64_t __cdecl RegisterInterface(const D2RL::PluginContext* caller, const PluginMenu::InterfaceInfo* info) noexcept {
 	if (!caller || !caller->pluginId || !info || info->structSize < sizeof(PluginMenu::InterfaceInfo) || !info->open) {
 		Log(true, "a plugin's settings window was refused: incomplete");
@@ -749,6 +1239,10 @@ void __cdecl UnregisterClient(uint64_t handle) noexcept {
 
 void __cdecl ValueChanged(uint64_t, const char*) noexcept { QueueRefresh(); }
 
+namespace Camera {
+void Hold();
+} // namespace Camera
+
 void __cdecl OpenFor(uint64_t handle) noexcept {
 	for (std::size_t i = 0; i < Clients.size(); ++i)
 		if (Clients[i].handle == handle) Shown = static_cast<int>(i), ClientScroll = 0, Current = View::Client;
@@ -758,6 +1252,7 @@ void __cdecl OpenFor(uint64_t handle) noexcept {
 		    [](const D2RL::PluginContext*, void*) noexcept {
 			    if (!MenuOpen()) CloseLeftPanels();
 			    ShowView();
+			    Camera::Hold();
 		    },
 		    nullptr);
 }
@@ -931,7 +1426,10 @@ void BuildTomlRows() {
 	for (const auto& item : Toml.doc.items) {
 		switch (item.kind) {
 		case TomlDoc::Kind::Comment: {
-			std::string line = item.text;
+			const bool  boxed = item.text.find("\xE2\x94") != std::string::npos || item.text.find("\xE2\x95") != std::string::npos;
+			std::string line  = GameText(item.text);
+			if (boxed) line = Trim(line);
+			if (boxed && line.empty()) break; // a rule line only
 			if (!line.empty() && line[0] == ' ') line.erase(0, 1);
 			while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
 			// a sentence the file wrapped by hand flows on in the window
@@ -946,7 +1444,7 @@ void BuildTomlRows() {
 			std::string title = item.text;
 			if (item.kind == TomlDoc::Kind::ArrayTable) title += "  #" + std::to_string(++seen[item.text]);
 			rows.push_back({ .type = TomlRow::Type::Section, .height = 96, .text = title });
-			if (!item.comment.empty()) rows.push_back({ .type = TomlRow::Type::Note, .height = Lines(item.comment) * NoteLine + 12, .text = item.comment });
+			if (!item.comment.empty()) rows.push_back({ .type = TomlRow::Type::Note, .height = Lines(GameText(item.comment)) * NoteLine + 12, .text = GameText(item.comment) });
 			break;
 		}
 		case TomlDoc::Kind::Key: {
@@ -955,8 +1453,9 @@ void BuildTomlRows() {
 			// a check box is at the row's end: its key has the room before it
 			const int  room    = f.editor == TomlEdit::Editor::Check ? ContentRight - ContentLeft - 90 : TomlControl - ContentLeft - 16;
 			const bool stacked = static_cast<int>(item.text.size()) * LabelChar > room;
-			const int  notes   = item.comment.empty() ? 0 : Lines(item.comment);
-			rows.push_back({ .type = TomlRow::Type::Field, .field = field, .height = FieldHeight + (stacked ? LabelLine : 0) + notes * NoteLine, .stacked = stacked, .noteLines = notes });
+			const std::string note  = GameText(item.comment);
+			const int         notes = note.empty() ? 0 : Lines(note);
+			rows.push_back({ .type = TomlRow::Type::Field, .field = field, .height = FieldHeight + (stacked ? LabelLine : 0) + notes * NoteLine, .text = note, .stacked = stacked, .noteLines = notes });
 			if (f.editor == TomlEdit::Editor::List)
 				for (int k = 0; k < static_cast<int>(f.list.size()); ++k) rows.push_back({ .type = TomlRow::Type::Item, .field = field, .item = k, .height = ItemHeight });
 			++field;
@@ -1557,8 +2056,8 @@ std::string Tooltip(const std::string& tooltip) {
 }
 
 std::string Text(const std::string& name, int x, int y, int width, int height, const std::string& text, const char* style, const std::string& tooltip = {}) {
-	std::string widget = R"(, {"type": "TextBoxWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height) + R"(, "text": )" + Json(text) + R"(, "style": )" + style + "}";
-	if (!tooltip.empty()) widget += Tooltip(tooltip);
+	std::string widget = R"(, {"type": "TextBoxWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height) + R"(, "text": )" + Json(GameText(text)) + R"(, "style": )" + style + "}";
+	if (!tooltip.empty()) widget += Tooltip(GameText(tooltip));
 	return widget + "}";
 }
 
@@ -1888,6 +2387,11 @@ std::string ListLayout() {
 	for (int i = 0; i < static_cast<int>(list.size()); ++i)
 		if (Matches(list[static_cast<std::size_t>(i)], query)) shown.push_back(i);
 	std::string out = Text("Count", ContentLeft, HeaderY, ContentRight - ContentLeft, 90, std::to_string(list.size()) + (list.size() == 1 ? " plugin running" : " plugins running"), NameStyle);
+	if (Hub::Now == Hub::State::Checking || Hub::Now == Hub::State::Failed) {
+		const bool failed = Hub::Now == Hub::State::Failed;
+		out += Text("HubState", ContentLeft, HeaderY + 86, ContentRight - ContentLeft, 50, Hub::StateText(), failed ? WarnStyle : NoteStyle,
+		            failed ? "The D2RLoader Hub could not be reached; see i-hate-tomls.log" : "Versions checked on the D2RLoader Hub at launch");
+	}
 
 	// the search bar: a clear button and the count found while something is typed
 	const int barWidth = ContentRight - ContentLeft;
@@ -1920,9 +2424,13 @@ std::string ListLayout() {
 		if (!e.author.empty()) under += (under.empty() ? "by " : "  by ") + e.author;
 		out += Text("Name" + id, ContentLeft + 92, y + 4, 700, 40, e.name, PluginNameStyle, e.id);
 		out += Text("Under" + id, ContentLeft + 92, y + 40, 700, 30, under, SmallLeftStyle);
+		if (const std::string update = Hub::UpdateFor(e.slug, e.version); !update.empty())
+			out += TextButton("Update" + id, ContentRight - GearSize - 250, y + (ListRowBack - BoxHeight) / 2, update + " out", "U" + std::to_string(index), "A newer version is on the D2RLoader Hub: click to open its page");
+		else if (Hub::UpToDate(e.slug, e.version))
+			out += Text("UpToDate" + id, ContentRight - GearSize - 250, y, 230, ListRowBack, "up to date", SmallRightStyle, "Same version as on the D2RLoader Hub");
 		const std::string open = "O" + std::to_string(index), tip = e.mode == Mode::Window ? "Open its settings window" : "Open its settings";
-		if (e.mode == Mode::None) out += Text("NoSettings" + id, ContentRight - 260, y, 230, ListRowBack, "no settings", NoteStyle);
-		else if (GearReady) out += Button("Open" + id, ContentRight - GearSize - 10, y + (ListRowBack - GearSize) / 2, GearFile, 0, 2, 1, open, tip);
+		if (e.mode == Mode::None) {
+		} else if (GearReady) out += Button("Open" + id, ContentRight - GearSize - 10, y + (ListRowBack - GearSize) / 2, GearFile, 0, 2, 1, open, tip);
 		else out += Button("Open" + id, ContentRight - 76, y + (ListRowBack - 68) / 2, OpenArrow, 0, 1, 3, open, tip);
 	}
 	out += Clip(ListTop, room, rows);
@@ -2010,7 +2518,6 @@ std::string TomlLayout() {
 			break;
 		case TomlRow::Type::Field: {
 			const auto& f    = Toml.fields[static_cast<std::size_t>(row.field)];
-			const auto& item = Toml.doc.items[static_cast<std::size_t>(f.item)];
 			std::string tip  = f.key + "\nType: " + TomlEdit::TypeName(f.type);
 			if (f.editor == TomlEdit::Editor::List && f.itemTypeKnown) tip += std::string(" of ") + TomlEdit::TypeName(f.itemType) + " items";
 			if (f.escaped) tip += "\nWrite a line break as \\n.";
@@ -2019,7 +2526,7 @@ std::string TomlLayout() {
 			const int fit        = static_cast<int>(f.key.size()) * LabelChar <= labelWidth;
 			out += Text("Label" + id, ContentLeft, y + 10, labelWidth, BoxHeight, f.key, fit ? LabelStyle : SmallLabelStyle, tip);
 			if (row.stacked) y += LabelLine;
-			if (!item.comment.empty()) out += Text("KeyNote" + id, ContentLeft, y + 10 + BoxHeight + 4, ContentRight - ContentLeft, row.noteLines * NoteLine, item.comment, CommentStyle);
+			if (!row.text.empty()) out += Text("KeyNote" + id, ContentLeft, y + 10 + BoxHeight + 4, ContentRight - ContentLeft, row.noteLines * NoteLine, row.text, CommentStyle);
 			switch (f.editor) {
 			case TomlEdit::Editor::Check: out += Check("Check" + id, ContentRight - 70, y + 6, f.text == "true", "C" + id); break;
 			case TomlEdit::Editor::Text:
@@ -2057,7 +2564,7 @@ std::string TomlLayout() {
 }
 
 // The whole window for the view shown.
-std::string ViewLayout(const std::string& panelId, unsigned serial) {
+std::string ViewLayout(const std::string& panelId, unsigned probe) {
 	char open[2048] {};
 	std::snprintf(open, sizeof(open),
 	              R"({"type": "Panel", "name": "i-hate-tomls/%s", "fields": {"priority": 10, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": "$LeftPanelAnchor"}, "children": [)"
@@ -2075,7 +2582,7 @@ std::string ViewLayout(const std::string& panelId, unsigned serial) {
 	layout += R"(, {"type": "TextBoxWidget", "name": "Title", "fields": {"rect": "$InGamePanelTitleRect", "text": "Plugins", "style": "$StyleTitleBlock"}})";
 	layout += R"(, {"type": "ButtonWidget", "name": "CloseButton", "fields": {"rect": {"x": 1075, "y": 9}, "filename": "PANEL\\closebtn_4x", "hoveredFrame": 3, "tooltipString": "@d2r:strClose", "sound": "cursor_close_window_hd", "onClickMessage": )"
 	        + Command("close") + "}}";
-	layout += R"(, {"type": "RectangleWidget", "name": "Probe)" + std::to_string(serial) + R"(", "fields": {"rect": {"x": 0, "y": 0, "width": 1, "height": 1}, "color": [0.0, 0.0, 0.0, 0.0]}})";
+	layout += R"(, {"type": "RectangleWidget", "name": "Probe)" + std::to_string(probe) + R"(", "fields": {"rect": {"x": 0, "y": 0, "width": 1, "height": 1}, "color": [0.0, 0.0, 0.0, 0.0]}})";
 
 	if (Current == View::Client && Clients.empty()) Current = View::List;
 	if (Current == View::List) layout += ListLayout();
@@ -2091,6 +2598,7 @@ struct ViewPanel {
 	D2RL::Panels::RegistrationHandle    panel  = D2RL::Panels::InvalidHandle;
 	D2RL::Resources::RegistrationHandle layout = D2RL::Resources::InvalidHandle;
 	bool                                opened {};
+	int                                 uses = 1; // layouts registered for it (its placeholder at load)
 };
 std::vector<ViewPanel> Panels;
 int                    ShownPanel = -1;
@@ -2098,6 +2606,8 @@ bool                   ReuseWorks = true;
 unsigned               Serial {};
 std::string            ProbeName, ProbePanel;
 ULONGLONG              ProbeUntil {};
+
+std::string PanelName(int panel) { return panel >= 0 && panel < static_cast<int>(Panels.size()) ? std::string(PluginId) + "/" + Panels[static_cast<std::size_t>(panel)].id : std::string(); }
 
 bool IsOpen(D2RL::Panels::RegistrationHandle handle) {
 	D2RL::Panels::PanelInfo info { .structSize = D2RL::Panels::PanelInfoSize };
@@ -2116,17 +2626,43 @@ void ClosePanels() {
 void StopTyping(bool keep);
 void CloseLeftPanels();
 
+namespace Camera {
+void Hold();
+void Release(bool now);
+} // namespace Camera
+
+void RetryReuse();
+
 void CloseMenu() {
 	StopTyping(true);
 	ClosePanels();
 	SetNotice({});
+	Camera::Release(true);
+	RetryReuse();
+}
+
+ULONGLONG     FallbackSince {};
+int       ProbeMisses {};
+
+// Leaving a page or closing the menu tries reopening panels again (one miss
+// gives it up again), so a slow stretch ends with the page.
+void RetryReuse() {
+	if (ReuseWorks) return;
+	ReuseWorks    = true;
+	ProbeMisses   = 1;
+	FallbackSince = 0;
+	Log(false, "trying to reopen panels again");
 }
 
 int NextPanel() {
 	const int count = static_cast<int>(Panels.size());
-	if (ReuseWorks || count < 3) return count < 2 ? 0 : ShownPanel == 0 ? 1 : 0;
-	for (int i = 2; i < count; ++i)
-		if (!Panels[static_cast<std::size_t>(i)].opened) return i;
+	// reuse is tried again a minute after it failed: one miss gives it up again
+	if (!ReuseWorks && FallbackSince && GetTickCount64() - FallbackSince > 60000) RetryReuse();
+	if (count < 2) return 0;
+	// views swap between 2 panels; after a lost layout, a fresh panel each
+	if (ReuseWorks) return ShownPanel == 0 ? 1 : 0;
+	for (int i = 0; i < count; ++i)
+		if (i != ShownPanel && !Panels[static_cast<std::size_t>(i)].opened) return i;
 	static bool told = false;
 	if (!told) Say("I Hate TOMLs: out of fresh panels; restart the game to see changes");
 	told = true;
@@ -2147,16 +2683,71 @@ std::string LoadingPanel, LoadingProbe;
 ULONGLONG   LoadingSince {};
 bool        ViewWanted {}, ViewQueued {};
 
+// ---- view trace (to find why a reopened panel keeps its old layout) ----
+// The last views opened, logged when a reopened panel misses its layout.
+namespace Ui {
+extern std::uint8_t Last[0x40];
+}
+struct ViewTrace {
+	unsigned    serial {};
+	unsigned    probe {};                // its probe's tag (0 or 1)
+	int         panel {};
+	bool        reused {}, early {}; // early: the view before was not loaded yet
+	char        origin {};           // w wheel, d drag, - other
+	std::size_t bytes {};
+	int         scroll {};
+	ULONGLONG   at {};
+	int         loadMs = -1;         // -1: never seen loaded
+	unsigned    registered {}, opened {};
+	int         uses {};                 // layouts the panel had been given
+	std::uint8_t labels {};          // ui state 0x0C when opened
+};
+std::vector<ViewTrace> Traces;
+char                   ViewOrigin = '-';
+
+std::string PanelName(int panel);
+int&        ScrollOf();
+
+// Notes when views finished loading (UI thread, often).
+void TraceLoads() {
+	const auto now = GetTickCount64();
+	for (std::size_t k = 0; k < Traces.size(); ++k) {
+		auto& t = Traces[k];
+		if (t.loadMs >= 0 || now - t.at > 20000) continue;
+		bool newest = true; // a later view on the same panel reuses the names
+		for (std::size_t j = k + 1; j < Traces.size(); ++j)
+			if (Traces[j].panel == t.panel) newest = false;
+		if (newest && Loaded(PanelName(t.panel), "Probe" + std::to_string(t.probe))) {
+			t.loadMs = static_cast<int>(now - t.at);
+			if (t.loadMs > 400) Log(false, "view #%u on panel %d took %d ms to load (%zu bytes, %s)", t.serial, t.panel, t.loadMs, t.bytes, t.reused ? "reopened" : "new");
+		}
+	}
+}
+
+void DumpTraces(const char* why) {
+	TraceLoads();
+	const auto now = GetTickCount64();
+	Log(true, "%s; the last %zu views, newest last:", why, Traces.size());
+	for (const auto& t : Traces) {
+		char load[32];
+		if (t.loadMs >= 0) std::snprintf(load, sizeof(load), "loaded in %d ms", t.loadMs);
+		else std::snprintf(load, sizeof(load), "never seen loaded");
+		Log(false, "  #%u %llu ms ago: panel %d %s (layout %d), by %c%s, scroll %d, %zu bytes, layout %u open %u, labels %u, %s", t.serial, static_cast<unsigned long long>(now - t.at), t.panel,
+		    t.reused ? "reopened" : "new", t.uses, t.origin, t.early ? ", before the last view loaded" : "", t.scroll, t.bytes, t.registered, t.opened, t.labels, load);
+	}
+}
+
 void ShowViewNow();
 
 // Rebuilds wait for the next frame (fast clicks and scrolls make one) and for
-// the last view's layout to be loaded (at most 500 ms): a panel opened while
+// the last view's layout to be loaded (at most 3 s): a panel opened while
 // another one is still loading can leave the game with a widget it failed to
-// create.
+// create, and a panel reopened before its load ended keeps its old layout
+// (dragging the scroll bar far in a long page did that with 500 ms).
 void __cdecl ViewTask(const D2RL::PluginContext*, void*) noexcept {
 	ViewQueued = false;
 	if (!ViewWanted) return;
-	if (!LoadingPanel.empty() && !Loaded(LoadingPanel, LoadingProbe) && GetTickCount64() - LoadingSince < 500) {
+	if (!LoadingPanel.empty() && (!Loaded(LoadingPanel, LoadingProbe) || GetTickCount64() - LoadingSince < 50) && GetTickCount64() - LoadingSince < 1000) {
 		ViewQueued = Threads && Threads->runOnUiThread(Context, ViewTask, nullptr) == D2RL::Threads::Result::Success;
 		if (ViewQueued) return;
 	}
@@ -2176,17 +2767,25 @@ void ShowViewNow() {
 		Say("I Hate TOMLs is not available (see i-hate-tomls.log)");
 		return;
 	}
-	const int index = NextPanel();
-	auto&     next  = Panels[static_cast<std::size_t>(index)];
+	const bool early = !LoadingPanel.empty() && !Loaded(LoadingPanel, LoadingProbe);
+	const int  index = NextPanel();
+	auto&      next  = Panels[static_cast<std::size_t>(index)];
 	++Serial;
+	// The probe's name alternates between 2 per panel, so it tells the new
+	// layout from the one before: every name looked up with findWidget takes a
+	// widget handle for good (WidgetService has no release), and the loader
+	// stops at 256 of them per plugin, after which no lookup succeeds. One new
+	// name per view (Probe<serial>) used them all up at view 255 (2 panels)
+	// or 197 (60 panels).
+	const unsigned tag = static_cast<unsigned>(next.uses) % 2;
 	static std::vector<std::string> kept; // the loader copies the bytes, but keep them anyway
 	if (kept.size() > 8) kept.erase(kept.begin());
-	kept.push_back(ViewLayout(next.id, Serial));
+	kept.push_back(ViewLayout(next.id, tag));
 	const std::string& layout = kept.back();
 	ClosePanels();
 	// Without reuse each view takes a fresh panel: the one left behind is
 	// unloaded, so loaded panels don't pile up.
-	if (!ReuseWorks && WidgetApi && ShownPanel >= 0 && ShownPanel != index && Panels[static_cast<std::size_t>(ShownPanel)].opened) {
+	if (WidgetApi && ShownPanel >= 0 && ShownPanel != index && Panels[static_cast<std::size_t>(ShownPanel)].opened) {
 		const std::string             name = std::string(PluginId) + "/" + Panels[static_cast<std::size_t>(ShownPanel)].id;
 		const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = name.c_str() };
 		(void)WidgetApi->dispatchUiAction(Context, &unload);
@@ -2206,12 +2805,18 @@ void ShowViewNow() {
 		.byteCount  = layout.size(),
 	};
 	const auto registered = ResourceApi->registerResource(Context, &resource, &next.layout);
+	++next.uses;
 	const auto opened     = PanelApi->openPanel(Context, next.panel);
 	if (registered != D2RL::Resources::Result::Success || opened != D2RL::Panels::Result::Success)
 		Log(true, "view on %s: layout result %u, open result %u (%zu bytes)", next.id.c_str(), static_cast<unsigned>(registered), static_cast<unsigned>(opened), layout.size());
 	LoadingPanel = std::string(PluginId) + "/" + next.id;
-	LoadingProbe = "Probe" + std::to_string(Serial);
+	LoadingProbe = "Probe" + std::to_string(tag);
 	LoadingSince = GetTickCount64();
+	ViewTrace trace { .serial = Serial, .probe = tag, .panel = index, .reused = next.opened, .early = early, .origin = ViewOrigin, .bytes = layout.size(), .scroll = ScrollOf(), .at = LoadingSince,
+		              .registered = static_cast<unsigned>(registered), .opened = static_cast<unsigned>(opened), .uses = next.uses, .labels = Ui::Last[0x0C] };
+	ViewOrigin = '-';
+	if (Traces.size() >= 30) Traces.erase(Traces.begin());
+	Traces.push_back(trace);
 	if (ReuseWorks && next.opened) {
 		ProbeName  = LoadingProbe;
 		ProbePanel = LoadingPanel;
@@ -2226,10 +2831,10 @@ void ShowViewNow() {
 
 // Each frame until done: once a reused panel is open, checks that it shows
 // the new layout. True to run again next frame.
-// Only a probe of the panel still shown, open for 3 s, counts; reuse is given
-// up after two such misses in a row.
-int ProbeMisses {};
+// Only a probe of the panel still shown, open for 1 s, counts; reuse is given
+// up after three such misses in a row.
 bool CheckProbe() {
+	TraceLoads();
 	if (ProbeName.empty() || !WidgetApi) return false;
 	if (Loaded(ProbePanel, ProbeName)) {
 		ProbeName.clear();
@@ -2241,18 +2846,41 @@ bool CheckProbe() {
 		if (!MenuOpen() || ProbeName != LoadingProbe) ProbeName.clear();
 		return !ProbeName.empty();
 	}
-	if (!ProbeUntil) ProbeUntil = GetTickCount64() + 3000;
+	if (!ProbeUntil) ProbeUntil = GetTickCount64() + 1000; // views load within a frame or two
 	if (GetTickCount64() < ProbeUntil) return true;
+	{
+		// what the panel shows instead: the view it had before, or nothing
+		const int   shown = ShownPanel;
+		std::string before;
+		(void)shown;
+		before = ProbeName == "Probe0" ? "Probe1" : "Probe0";
+		D2RL::Widgets::WidgetHandle root = D2RL::Widgets::InvalidHandle, widget = D2RL::Widgets::InvalidHandle;
+		const auto panelResult = WidgetApi->findPanel(Context, ProbePanel.c_str(), &root);
+		const auto newResult   = WidgetApi->findWidget(Context, root, ProbeName.c_str(), &widget);
+		const auto oldResult   = WidgetApi->findWidget(Context, root, before.c_str(), &widget);
+		Log(true, "reopened panel %s: findPanel %u, new %s findWidget %u, old %s findWidget %u, ui 0x0C %u", ProbePanel.c_str(), static_cast<unsigned>(panelResult), ProbeName.c_str(),
+		    static_cast<unsigned>(newResult), before.c_str(), static_cast<unsigned>(oldResult), Ui::Last[0x0C]);
+		static int dumps = 0;
+		if (dumps++ < 3) DumpTraces("a reopened panel missed its new layout");
+	}
 	ProbeName.clear();
-	if (++ProbeMisses < 2) {
-		Log(true, "a reopened panel did not show its new layout within 3 s; trying it again");
+	// a lost load now and then (dragging the bar fast): the view is shown again
+	if (++ProbeMisses < 3) {
+		Log(true, "a reopened panel did not show its new layout within 1 s; showing the view again");
 		ShowView();
 		return false;
 	}
-	ReuseWorks = false;
-	Log(true, "a reopened panel kept its old layout twice; each view now takes a new panel");
+	ReuseWorks    = false;
+	FallbackSince = GetTickCount64();
+	Log(true, "a reopened panel kept its old layout; each view takes a new panel for a minute");
 	ShowView();
 	return false;
+}
+
+// The Hub's answer came: the list shows it if it is on screen.
+void __cdecl Hub::Refresh(const D2RL::PluginContext*, void*) noexcept {
+	Chat::Try();
+	if (MenuOpen() && Current == View::List) ShowView();
 }
 
 void __cdecl ProbeTask(const D2RL::PluginContext*, void*) noexcept {
@@ -2497,13 +3125,14 @@ void __cdecl WheelTask(const D2RL::PluginContext*, void*) noexcept {
 	int&      scroll = ScrollOf();
 	const int before = scroll;
 	scroll           = std::clamp(scroll + rows * WheelStep, 0, std::max(0, BarMax.load()));
-	if (scroll != before) ShowView();
+	if (scroll != before) ViewOrigin = 'w', ShowView();
 }
 
 void __cdecl DragTask(const D2RL::PluginContext*, void*) noexcept {
 	const int row = DragRow.load();
 	if (row < 0 || !MenuOpen() || ScrollOf() == row) return;
 	ScrollOf() = row;
+	ViewOrigin = 'd';
 	ShowView();
 }
 
@@ -2514,6 +3143,58 @@ constexpr const char* LeftPanels[] { "CharacterStatsPanel", "QuestLogPanel",    
 	                                 "VendorPanelLayout",   "HoradricCubeLayout", "TradePanel",        "MessageLogPanel", "ImbueItemsPanel",        "HireMenuPanel" };
 bool LeftShown[std::size(LeftPanels)] {};
 
+// The game's UI state bytes (0xCE500(id) reads them; 1 = inventory, as in
+// Inventory Fill). D2RLoader 1.3.1 may lack getWidgetState, so the left
+// panels are also followed here (the ids below are the game's own list; the
+// older classic numbers in this note were wrong for D2R: 0x0C is Alt's item labels)
+// (2 character, 0x0C shop, 0x0F/0x11 quests, 0x14 waypoints, 0x16 party,
+// 0x17 trade, 0x18 messages, 0x19 stash, 0x1A cube, 0x24 merc). Every change
+// of bytes 0-0x3F is logged, to confirm them.
+namespace Ui {
+constexpr std::uint64_t StateRva = 0xCE500;
+constexpr std::uint8_t  StateStart[] { 0x48, 0x63, 0xC1, 0x48, 0x8D, 0x0D };
+// the states the game itself counts as a left panel when it moves the view (D2R+0xC01D0)
+constexpr int           LeftIds[] { 0x02, 0x0B, 0x0D, 0x0E, 0x0F, 0x13, 0x15, 0x18, 0x19, 0x1E };
+std::uint8_t            Last[0x40] {};
+bool                    Known {};
+using StateFn = std::uint8_t (*)(int) noexcept;
+
+StateFn State() {
+	static int ok = -1;
+	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
+	if (ok < 0) {
+		ok = base && Chat::Readable(base + StateRva, sizeof(StateStart)) && std::memcmp(reinterpret_cast<const void*>(base + StateRva), StateStart, sizeof(StateStart)) == 0;
+		Log(!ok, ok ? "ui states: read at D2R+0xCE500" : "ui states: not where this build expects them; left panels followed by their widgets only");
+		Log(false, "widget states: %s", WidgetApi && D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceGetWidgetStateFieldEnd) && WidgetApi->getWidgetState ? "available" : "missing in this D2RLoader");
+	}
+	return ok ? reinterpret_cast<StateFn>(base + StateRva) : nullptr;
+}
+
+bool LeftOpen(const std::uint8_t* states) {
+	for (const int id : LeftIds)
+		if (states[id]) return true;
+	return false;
+}
+
+// Reads the bytes; true when a left panel opened since the last read.
+bool Update() {
+	const auto read = State();
+	if (!read) return false;
+	std::uint8_t now[0x40] {};
+	for (int id = 0; id < 0x40; ++id) now[id] = read(id);
+	bool opened = false;
+	if (Known)
+		for (int id = 0; id < 0x40; ++id)
+			if (now[id] != Last[id]) {
+				Log(false, "ui state 0x%02X: %u -> %u%s", id, Last[id], now[id], MenuVisible ? " (menu open)" : "");
+				if (!Last[id] && now[id] && std::find(std::begin(LeftIds), std::end(LeftIds), id) != std::end(LeftIds)) opened = true;
+			}
+	std::memcpy(Last, now, sizeof(now));
+	Known = true;
+	return opened;
+}
+} // namespace Ui
+
 bool PanelVisible(const char* name) {
 	if (!WidgetApi || !D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceGetWidgetStateFieldEnd) || !WidgetApi->getWidgetState) return false;
 	D2RL::Widgets::WidgetHandle panel = D2RL::Widgets::InvalidHandle;
@@ -2522,21 +3203,83 @@ bool PanelVisible(const char* name) {
 }
 
 // UI thread: the game's left panels closed, before the menu opens.
+
+// ---- the camera ----
+// A game panel on the left moves the view a quarter of the screen to the
+// right: the game keeps a panel mode (0 none, 1 right, 2 left, 3 both) and
+// sets it with D2R+0xB9C20(mode), which moves its viewport. While the menu is
+// open it adds the left side the same way (again after the game sets the mode
+// for another panel), and takes it back once the menu is closed, unless one
+// of the game's left panels has it now.
+namespace Camera {
+constexpr std::uint64_t SetRva = 0xB9C20;
+constexpr std::uint8_t  Start[] { 0x48, 0x83, 0xEC, 0x38, 0x44, 0x8B, 0x0D }; // sub rsp, 38h; mov r9d, [width]
+constexpr std::uint8_t  Store[] { 0x89, 0x0D };                               // at +0x0F: mov [mode], ecx
+using SetFn = void (*)(int) noexcept;
+SetFn             Set {};
+const volatile int* Mode {};
+bool              Ours {};   // the left side is the menu's
+int               Closed {}; // watches in a row with the menu closed
+
+bool Find() {
+	static int ok = -1;
+	if (ok < 0) {
+		const auto base = static_cast<std::uintptr_t>(Context->exeBase);
+		ok              = base && Chat::Readable(base + SetRva, 0x15) && std::memcmp(reinterpret_cast<const void*>(base + SetRva), Start, sizeof(Start)) == 0
+		  && std::memcmp(reinterpret_cast<const void*>(base + SetRva + 0x0F), Store, sizeof(Store)) == 0;
+		if (ok) {
+			std::int32_t disp = 0;
+			std::memcpy(&disp, reinterpret_cast<const void*>(base + SetRva + 0x11), sizeof(disp));
+			Set  = reinterpret_cast<SetFn>(base + SetRva);
+			Mode = reinterpret_cast<const volatile int*>(base + SetRva + 0x15 + disp);
+			ok   = Chat::Readable(reinterpret_cast<std::uintptr_t>(Mode), sizeof(int));
+		}
+		Log(!ok, ok ? "camera: panel mode set at D2R+0xB9C20" : "camera: the panel mode is not where this build expects it; the view does not move for the menu");
+	}
+	return ok > 0;
+}
+
+// UI thread, the menu open.
+void Hold() {
+	Closed = 0;
+	if (!Chat::InGame || !Find()) return;
+	const int mode = *Mode;
+	if (mode < 0 || mode > 3 || (mode & 2)) return;
+	Set(mode | 2);
+	Ours = true;
+	static int sets = 0;
+	if (++sets % 25 == 0) Log(false, "camera: the view moved for the menu %d times", sets);
+}
+
+// UI thread, the menu closed; `now` when it surely is (not between views).
+void Release(bool now) {
+	if (!Ours || (!now && ++Closed < 2)) return;
+	Ours = false;
+	if (!Chat::InGame || !Find()) return;
+	if (Ui::Known && Ui::LeftOpen(Ui::Last)) return; // a game panel took the left side
+	const int mode = *Mode;
+	if (mode >= 0 && mode <= 3 && (mode & 2)) Set(mode & 1);
+}
+} // namespace Camera
+
 void CloseLeftPanels() {
+	const bool stateOpen = Ui::Update(), anyLeft = Ui::Known && Ui::LeftOpen(Ui::Last);
+	(void)stateOpen;
 	for (std::size_t k = 0; k < std::size(LeftPanels); ++k) {
 		// as seen now: only a panel opening from here on closes the menu
 		LeftShown[k] = PanelVisible(LeftPanels[k]);
-		if (!WidgetApi || !LeftShown[k]) continue;
+		if (!WidgetApi || !(LeftShown[k] || anyLeft)) continue;
 		const D2RL::Widgets::UiAction close { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "ClosePanel", .text = LeftPanels[k] };
 		(void)WidgetApi->dispatchUiAction(Context, &close);
 	}
 }
 
 void __cdecl WatchTask(const D2RL::PluginContext*, void*) noexcept {
+	TraceLoads();
 	MenuVisible = MenuOpen();
 	if (!MenuVisible && !TypingKey.empty()) StopTyping(true);
 	// a left panel that opens while the menu is open closes the menu
-	bool opened = false;
+	bool opened = Ui::Update() && MenuVisible;
 	for (std::size_t k = 0; k < std::size(LeftPanels); ++k) {
 		const bool shown = MenuVisible && PanelVisible(LeftPanels[k]);
 		opened           = opened || (shown && !LeftShown[k]);
@@ -2546,6 +3289,9 @@ void __cdecl WatchTask(const D2RL::PluginContext*, void*) noexcept {
 		CloseMenu();
 		MenuVisible = false;
 	}
+	if (MenuVisible) Camera::Hold();
+	// closed by the game (Escape): at once unless a new view is on its way
+	else Camera::Release(!ViewWanted && !ViewQueued && GetTickCount64() - LoadingSince > 400);
 }
 
 #ifdef _WIN32
@@ -2663,6 +3409,7 @@ void Toggle() {
 		WatchMouse();
 		CloseLeftPanels();
 		ShowView();
+		Camera::Hold(); // at once, not at the next watch
 	}
 	MenuVisible = MenuOpen();
 }
@@ -2713,6 +3460,12 @@ void OpenEntry(int index) {
 void RunListCommand(const std::string& command) {
 	if (command == "searchclear") SearchText.clear(), ListScroll = 0;
 	else if (command[0] == 'O') return OpenEntry(std::atoi(command.c_str() + 1));
+	else if (command[0] == 'U') {
+		const auto list  = Entries();
+		const int  index = std::atoi(command.c_str() + 1);
+		if (index >= 0 && index < static_cast<int>(list.size())) Hub::Open(list[static_cast<std::size_t>(index)].slug);
+		return;
+	}
 	else return;
 	ShowView();
 }
@@ -2725,6 +3478,7 @@ void RunClientCommand(const std::string& command) {
 	if (command == "back") {
 		Current = View::List;
 		SetNotice({});
+		RetryReuse();
 	} else if (command == "dropx") {
 	} else if (command.size() >= 2) {
 		const int index = std::atoi(command.c_str() + 1);
@@ -2796,6 +3550,7 @@ void RunTomlCommand(const std::string& command) {
 		} else {
 			Current = View::List;
 			SetNotice({});
+			RetryReuse();
 		}
 	} else if (command == "apply") ApplyToml();
 	else if (command == "reload") {
@@ -2951,6 +3706,7 @@ void __cdecl AfterAllLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::D
 	if (done) return;
 	done = true;
 	FindRunningPlugins();
+	Hub::Start();
 	for (int k = 0; k < ArtCount; ++k) {
 		std::string trouble;
 		ArtFiles[k] = ArchiveFile(ArtPaths[k], trouble);
@@ -3002,6 +3758,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		};
 		const auto result = comm->publishService(context, &request);
 		if (result != D2RL::PluginCommunication::Result::Success) Log(true, "could not offer the settings-menu service (result %u)", static_cast<unsigned>(result));
+		Self::Join(); // its own page, first in the list
 	}
 
 	if (!PanelApi || !ResourceApi || !Threads || !EventApi) {
@@ -3054,6 +3811,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		const D2RL::Lifecycle::DataTablesLoadedListener loaded { .structSize = sizeof(D2RL::Lifecycle::DataTablesLoadedListener), .callback = AfterAllLoaded };
 		D2RL::Lifecycle::ListenerHandle                 handle {};
 		(void)lifecycle->registerDataTablesLoadedListener(context, &loaded, &handle);
+		const D2RL::Lifecycle::GameplayEventListener ready { .structSize = D2RL::Lifecycle::GameplayEventListenerSize, .kind = D2RL::Lifecycle::GameplayEventKind::LocalPlayerReady, .callback = Chat::OnPlayerReady };
+		if (lifecycle->registerGameplayEventListener(context, &ready, &handle) != D2RL::Lifecycle::Result::Success) Log(true, "could not listen to games starting: no chat notice of updates, the view does not move for the menu");
+		const D2RL::Lifecycle::GameplayEventListener left { .structSize = D2RL::Lifecycle::GameplayEventListenerSize, .kind = D2RL::Lifecycle::GameplayEventKind::GameLeft, .callback = Chat::OnGameLeft };
+		(void)lifecycle->registerGameplayEventListener(context, &left, &handle);
 	}
 
 	if (const auto* input = Query<D2RL::InputService>("input"); input && D2RL::HasInputServiceField(input, D2RL::InputServiceRequiredSize)) {

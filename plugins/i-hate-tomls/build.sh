@@ -11,7 +11,7 @@ out=$here/build
 mkdir -p "$out"
 cc() { x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s -I"$sdk/include" "$@"; }
 x86_64-w64-mingw32-windres -I"$sdk/include" "$here/src/plugin.rc" -O coff -o "$out/plugin.res"
-cc "$here/src/plugin.cpp" "$out/plugin.res" -o "$out/aaa-i-hate-tomls.dll"
+cc "$here/src/plugin.cpp" "$out/plugin.res" -o "$out/aaa-i-hate-tomls.dll" -lwinhttp -lshell32
 x86_64-w64-mingw32-windres -I"$sdk/include" -I"$here/demo" "$here/demo/demo.rc" -O coff -o "$out/demo.res"
 cc "$here/demo/demo.cpp" "$out/demo.res" -o "$out/d2rl-i-hate-tomls-demo.dll"
 x86_64-w64-mingw32-windres -I"$sdk/include" "$here/demo/window_demo.rc" -O coff -o "$out/window_demo.res"

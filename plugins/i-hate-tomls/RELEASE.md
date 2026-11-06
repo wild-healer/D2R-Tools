@@ -1,3 +1,55 @@
+# I Hate TOMLs 1.1.0: release texts
+
+## Patch notes
+
+```
+**I Hate TOMLs 1.1.0**
+
+**New**
+
+* Update check: plugins with a newer version on the D2RLoader Hub get a button in the list that opens their Hub page.
+* chat_updates setting: the chat says how many plugins can be updated, once per launch, at the first game.
+* check_updates setting: turns the Hub check off.
+* I Hate TOMLs has its own entry, first in the list.
+* The view moves to the right while the window is open, as with the game's left panels.
+
+**Fixed**
+
+* Opening the character screen, a waypoint or another left panel now closes the window.
+* Scrolling a large config became slow after a while.
+* Comments drawn with box lines, as in the Item Sorting config, overlapped the rows below.
+
+**Removed**
+
+* The "no settings" label in the list.
+```
+
+## GitHub release
+
+- Tag: `i-hate-tomls-v1.1.0`
+- Title: `I Hate TOMLs 1.1.0`
+- Asset: `i-hate-tomls.zip`
+
+Body:
+
+```markdown
+**I Hate TOMLs** 1.1.0: Hub update check, camera like the game's left panels, scrolling fix.
+
+### New
+- Update check at each launch, in the background, from the D2RLoader Hub's public list. A plugin with a newer version gets an "x.y.z out" button that opens its Hub page. Plugins are found by their Hub URL, built from their name; a joined plugin can give its own with `hub = "<slug>"` in its schema.
+- `chat_updates` (default on): "N plugin(s) can be updated" in the chat once per launch. `check_updates = false` turns the check off.
+- I Hate TOMLs has its own entry, first in the list, with these settings.
+- The game view moves to the right while the window is open, as the game does for its left panels.
+
+### Fixed
+- Left panels (character, waypoints, quests...) now close the window; Alt no longer does.
+- Long scrolling in a large config made every view slow: each view took a widget handle for good and the loader's limit was reached. Views now reuse the same few names.
+- Box line characters, arrows and curly quotes in TOML comments are drawn as plain characters (the game switched to a bigger fallback font and rows overlapped).
+
+### Removed
+- The "no settings" label.
+```
+
 # I Hate TOMLs 1.0.1: release texts
 
 ## Patch notes
