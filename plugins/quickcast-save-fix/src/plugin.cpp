@@ -43,7 +43,7 @@
 namespace {
 
 constexpr const char* PluginId      = "quickcast-save-fix";
-constexpr const char* PluginVersion = "1.0.1";
+constexpr const char* PluginVersion = "1.0.2-dev-1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -361,6 +361,7 @@ void LoadConfig() {
 // ---- I Hate TOMLs ----
 
 constexpr const char* Schema = R"toml(title = "Quickcast Save Fix"
+hub = "quickcast-save-fix-1-0-0"
 [[setting]]
 key = "enabled"
 type = "bool"
