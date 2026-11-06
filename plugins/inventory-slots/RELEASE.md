@@ -1,9 +1,9 @@
-# Inventory Slots 1.0.5: release texts
+# Inventory Slots 1.0.4: release texts
 
 ## Patch notes
 
 ```
-**Inventory Slots 1.0.5**
+**Inventory Slots 1.0.4**
 
 **Fixed**
 
@@ -12,14 +12,14 @@
 
 ## GitHub release
 
-- Tag: `inventory-slots-v1.0.5`
-- Title: `Inventory Slots 1.0.5`
+- Tag: `inventory-slots-v1.0.4`
+- Title: `Inventory Slots 1.0.4`
 - Asset: `inventory-slots.zip`
 
 Body:
 
 ```markdown
-**Inventory Slots** 1.0.5: dedicated slots for the Horadric Cube, the two tomes and keys, outside the inventory grid.
+**Inventory Slots** 1.0.4: dedicated slots for the Horadric Cube, the two tomes and keys, outside the inventory grid.
 
 ### Features
 - Four slots next to the inventory (by default right of the mana orb), outside the grid, so mods that change the inventory size keep working.
