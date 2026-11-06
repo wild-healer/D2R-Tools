@@ -1,4 +1,34 @@
-# Quickcast Save Fix 1.0.1: release texts
+# Quickcast Save Fix 1.0.3: release texts
+
+## Patch notes
+
+```
+**Quickcast Save Fix 1.0.3**
+
+**Fixed**
+
+* The I Hate TOMLs update check now finds the plugin's D2RLoader Hub page.
+```
+
+## GitHub release
+
+- Tag: `quickcast-save-fix-v1.0.3`
+- Title: `Quickcast Save Fix 1.0.3`
+- Asset: `quickcast-save-fix.zip`
+
+Body:
+
+```markdown
+**Quickcast Save Fix** 1.0.3
+
+### Fixed
+- The I Hate TOMLs update check now finds the plugin's D2RLoader Hub page.
+
+### Install
+Load `quickcast-save-fix.zip` in D2RMM, or copy `d2rl-quickcast-save-fix.dll` to `<game>/d2rloader/plugins/`. Settings are unchanged.
+```
+
+# Quickcast Save Fix 1.0.1
 
 ## Patch notes
 

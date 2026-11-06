@@ -43,7 +43,7 @@
 namespace {
 
 constexpr const char* PluginId      = "quickcast-save-fix";
-constexpr const char* PluginVersion = "1.0.2-dev-1";
+constexpr const char* PluginVersion = "1.0.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
