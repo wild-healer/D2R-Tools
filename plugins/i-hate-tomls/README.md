@@ -2,6 +2,8 @@
 
 Plugin id `i-hate-tomls`: `aaa-i-hate-tomls.dll` in `i-hate-tomls.zip`, downloaded from its [D2RLoader Hub page](https://d2rloader.net/hub/plugins/i-hate-tomls).
 
+Plugin authors: see [INTEGRATION.md](INTEGRATION.md) to add a settings page to a plugin.
+
 One in-game window, drawn like the character screen, listing every running plugin (I Hate TOMLs itself first).
 It opens on the left like the game's left panels: it closes them, a left panel that opens closes it, and the
 view moves to the right while it is open, as the game does for its own panels.
