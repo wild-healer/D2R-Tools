@@ -23,7 +23,7 @@ It should fit every way people play: a collector who keeps everything, a trader 
 - **No ReadProcessMemory** anywhere, and nothing else that scanners distrust (no WIC image decoding, no unpacking to disk).
 - **Self-contained**: no companion D2RMM mod and no reliance on other installed mods. Names, pictures and stats come from the running game's own tables and files, so mods carry over.
 - **Plugin defaults, not user configs**: changes in behaviour ship as new defaults; existing TOMLs are never rewritten by an update.
-- **Versioning**: 0.0.1 during development, minor and patch raised freely until the first release, never the major. After release, dev builds are `1.x.y-dev-z` (z goes up with every build). The release number comes from Théo.
+- **Versioning**: 0.0.1 during development, minor and patch raised freely until the first release, never the major. After a release, dev builds are the current released version plus `-dev-z` (after 1.0.3: 1.0.3-dev-1, 1.0.3-dev-2...). The release number comes from Théo.
 - **No item loss** is the first requirement over every other one (section 13).
 
 ## 3. Concepts
