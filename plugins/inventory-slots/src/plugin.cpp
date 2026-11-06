@@ -57,7 +57,7 @@ namespace {
 namespace Widgets = D2RL::Widgets;
 
 constexpr const char* PluginId      = "inventory-slots";
-constexpr const char* PluginVersion = "1.0.3";
+constexpr const char* PluginVersion = "1.0.4-dev-1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1230,6 +1230,7 @@ void LoadConfig() {
 
 std::string BuildSchema() {
 	std::string schema = R"toml(title = "Inventory Slots"
+hub = "invetory-slots"
 [[setting]]
 key = "enabled"
 type = "bool"
