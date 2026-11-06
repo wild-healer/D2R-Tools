@@ -57,7 +57,7 @@ namespace {
 namespace Widgets = D2RL::Widgets;
 
 constexpr const char* PluginId      = "inventory-slots";
-constexpr const char* PluginVersion = "1.0.4-dev-1";
+constexpr const char* PluginVersion = "1.0.5";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
