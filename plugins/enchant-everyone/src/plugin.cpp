@@ -10,16 +10,22 @@
 //     after checking it still exists (path +0x70 unit, +0x78 type, +0x7C id).
 //   - IsAlly 0x48E4D0 (Game*, Unit*, Unit*) -> int: owners of pets resolved,
 //     players allied when in the same party, monsters by alignment.
+//   - ManaCost 0x33AA00 (u8 expansion, int skill, int level) -> int: the
+//     skill's mana cost in 1/256 mana, minmana included.
+//   - ChargeMana 0x436A80 (Unit*, int cost) -> int: takes the mana from a
+//     player (life under Blood Mana), 0 when there isn't enough.
 //   - UnitRoom 0x34B440 (Unit*) -> Room*; room +0x00 rooms rooms (itself
 //     included), +0x40 their count, +0xA8 first unit; unit +0x160 next unit.
 // The hook calls the game's own Enchant once more per friendly unit in range,
 // with the caster's path target pointed at that unit for the call and put
-// back right after. Mana is spent once, by the game, for the cast itself.
+// back right after. Each extra unit costs one more cast's mana, nearest units
+// first, until the mana runs out; with single_mana_cost the cast costs once.
 // It runs where the game's server runs: single player and games you host.
 
 #include <D2RLPlugin/api.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdarg>
@@ -36,7 +42,7 @@
 namespace {
 
 constexpr const char* PluginId      = "enchant-everyone";
-constexpr const char* PluginVersion = "1.0.0";
+constexpr const char* PluginVersion = "1.0.0-dev-1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -54,6 +60,7 @@ struct Settings {
 	std::atomic<int>  yards { 20 };
 	std::atomic<bool> players { true };
 	std::atomic<bool> minions { true };
+	std::atomic<bool> single { false }; // one mana cost for everyone
 } Config;
 
 // ---- native layout (Steam 3.3.94995) ----
@@ -66,6 +73,10 @@ constexpr std::uint64_t SkillTargetRva = 0x48FE20; // bytes 9..12 are a call dis
 constexpr Code SkillTargetBytes { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xDA, 0xE8, 0x22, 0x1D, 0x00, 0x00, 0x48, 0x8B };
 constexpr std::uint64_t IsAllyRva = 0x48E4D0;
 constexpr Code IsAllyBytes { 0x48, 0x89, 0x5C, 0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xCA, 0x49, 0x8B, 0xD8 };
+constexpr std::uint64_t ManaCostRva = 0x33AA00;
+constexpr Code ManaCostBytes { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x41, 0x8B, 0xF8, 0x33, 0xDB, 0xE8 };
+constexpr std::uint64_t ChargeManaRva = 0x436A80;
+constexpr Code ChargeManaBytes { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x8B, 0xFA, 0x48, 0x8B, 0xD9, 0xE8 };
 constexpr std::uint64_t UnitRoomRva = 0x34B440;
 constexpr Code UnitRoomBytes { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C };
 // Room accessors the game uses for its own area searches (0x2EFDE0, 0x2EFD90).
@@ -86,6 +97,7 @@ constexpr std::uintptr_t PathTargetUnit    = 0x70;  // Unit*
 constexpr std::uintptr_t PathTargetType    = 0x78;  // u32
 constexpr std::uintptr_t PathTargetId      = 0x7C;  // u32
 constexpr std::uintptr_t UnitIdOffset      = 0x08;  // u32
+constexpr std::uintptr_t GameExpansion     = 0x106; // u8, the data bank the game reads
 constexpr std::uint32_t  PlayerDeath = 0, PlayerDead = 17, MonsterDeath = 0, MonsterDead = 12;
 constexpr std::size_t    MaxTargets  = 128;
 constexpr int            MaxNearRooms = 64;
@@ -95,6 +107,8 @@ using EnchantDoFn   = int (*)(void* game, void* caster, int skill, int level) no
 using SkillTargetFn = void* (*)(void* game, void* unit) noexcept;
 using IsAllyFn      = int (*)(void* game, void* a, void* b) noexcept;
 using UnitRoomFn    = void* (*)(void* unit) noexcept;
+using ManaCostFn    = int (*)(std::uint8_t expansion, int skill, int level) noexcept;
+using ChargeManaFn  = int (*)(void* unit, int cost) noexcept;
 
 const D2RL::PluginContext* Context {};
 std::uintptr_t             Base {};
@@ -103,6 +117,8 @@ EnchantDoFn   EnchantDo {}; // original, after the hook
 SkillTargetFn SkillTarget {};
 IsAllyFn      IsAlly {};
 UnitRoomFn    UnitRoom {};
+ManaCostFn    ManaCost {};
+ChargeManaFn  ChargeMana {};
 
 void Log(bool warn, const char* format, ...) noexcept {
 	if (!Context) return;
@@ -158,7 +174,12 @@ bool Alive(void* unit, std::uint32_t type) noexcept {
 
 // Friendly, living players and monsters within the radius of the caster,
 // the one the cast already enchanted left out.
-void FindTargets(void* game, void* caster, void* done, std::vector<void*>& out) noexcept {
+struct Target {
+	void* unit;
+	int   distance2;
+};
+
+void FindTargets(void* game, void* caster, void* done, std::vector<Target>& out) noexcept {
 	int cx = 0, cy = 0;
 	if (!Position(caster, cx, cy)) return;
 	void* const room = UnitRoom(caster);
@@ -186,8 +207,8 @@ void FindTargets(void* game, void* caster, void* done, std::vector<void*>& out) 
 			if (!Position(current, x, y) || (x - cx) * (x - cx) + (y - cy) * (y - cy) > radius2) continue;
 			if (!Alive(current, type) || !IsAlly(game, caster, current)) continue;
 			bool duplicate = false;
-			for (void* known : out) duplicate |= known == current;
-			if (!duplicate) out.push_back(current);
+			for (const Target& known : out) duplicate |= known.unit == current;
+			if (!duplicate) out.push_back({ current, (x - cx) * (x - cx) + (y - cy) * (y - cy) });
 		}
 	}
 }
@@ -203,16 +224,27 @@ int HookEnchantDo(void* game, void* caster, int skill, int level) noexcept {
 	if (!result) return result;
 	void* path = nullptr;
 	if (!ReadField(caster, UnitPathOffset, path) || !path) return result;
-	std::vector<void*> targets;
+	std::vector<Target> targets;
 	targets.reserve(16);
 	FindTargets(game, caster, done, targets);
 	if (targets.empty()) return result;
+	std::sort(targets.begin(), targets.end(), [](const Target& a, const Target& b) { return a.distance2 < b.distance2; });
+	const bool single = Config.single.load(std::memory_order_relaxed);
+	std::uint8_t expansion = 0;
+	int          cost      = 0;
+	if (!single && ReadField(game, GameExpansion, expansion)) cost = ManaCost(expansion, skill, level);
 	void*         savedUnit = nullptr;
 	std::uint32_t savedType = 0, savedId = 0;
 	if (!ReadField(path, PathTargetUnit, savedUnit) || !ReadField(path, PathTargetType, savedType) || !ReadField(path, PathTargetId, savedId)) return result;
 	Inside      = true;
-	int applied = 0;
-	for (void* target : targets) {
+	int  applied = 0;
+	bool short_  = false;
+	for (const Target& entry : targets) {
+		void* const target = entry.unit;
+		if (cost > 0 && !ChargeMana(caster, cost)) {
+			short_ = true;
+			break;
+		}
 		std::uint32_t type = 0, id = 0;
 		if (!ReadField(target, UnitTypeOffset, type) || !ReadField(target, UnitIdOffset, id)) continue;
 		WriteField(path, PathTargetUnit, target);
@@ -228,7 +260,10 @@ int HookEnchantDo(void* game, void* caster, int skill, int level) noexcept {
 	WriteField(path, PathTargetType, savedType);
 	WriteField(path, PathTargetId, savedId);
 	Inside = false;
-	Log(false, "Enchant (level %d): %d more friendly unit%s enchanted", level, applied, applied == 1 ? "" : "s");
+	if (single) Log(false, "Enchant (level %d): %d more friendly unit%s enchanted, single mana cost", level, applied, applied == 1 ? "" : "s");
+	else
+		Log(false, "Enchant (level %d): %d more friendly unit%s enchanted, %d mana each%s", level, applied, applied == 1 ? "" : "s", cost >> 8,
+		    short_ ? ", stopped: out of mana" : "");
 	return result;
 }
 
@@ -239,7 +274,9 @@ bool Locate() noexcept {
 		std::uint64_t rva;
 		const Code*   bytes;
 	};
-	const std::array<Check, 6> checks { {
+	const std::array<Check, 8> checks { {
+		{ ManaCostRva, &ManaCostBytes },
+		{ ChargeManaRva, &ChargeManaBytes },
 		{ EnchantDoRva, &EnchantDoBytes },
 		{ SkillTargetRva, &SkillTargetBytes },
 		{ IsAllyRva, &IsAllyBytes },
@@ -256,6 +293,8 @@ bool Locate() noexcept {
 	SkillTarget = reinterpret_cast<SkillTargetFn>(Base + SkillTargetRva);
 	IsAlly      = reinterpret_cast<IsAllyFn>(Base + IsAllyRva);
 	UnitRoom    = reinterpret_cast<UnitRoomFn>(Base + UnitRoomRva);
+	ManaCost    = reinterpret_cast<ManaCostFn>(Base + ManaCostRva);
+	ChargeMana  = reinterpret_cast<ChargeManaFn>(Base + ChargeManaRva);
 	return true;
 }
 
@@ -285,6 +324,7 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 	if (key == "enabled") return flag(Config.enabled);
 	if (key == "players") return flag(Config.players);
 	if (key == "minions") return flag(Config.minions);
+	if (key == "single_mana_cost") return flag(Config.single);
 	if (key == "radius_yards") {
 		char*      end   = nullptr;
 		const long yards = std::strtol(value.c_str(), &end, 10);
@@ -300,6 +340,7 @@ std::string ValueOf(const std::string& key) {
 	if (key == "enabled") return flag(Config.enabled);
 	if (key == "players") return flag(Config.players);
 	if (key == "minions") return flag(Config.minions);
+	if (key == "single_mana_cost") return flag(Config.single);
 	if (key == "radius_yards") return std::to_string(Config.yards.load());
 	return {};
 }
@@ -321,7 +362,11 @@ radius_yards = )" + ValueOf("radius_yards") + R"(
 players = )" + ValueOf("players") + R"(
 
 # Enchant mercenaries, summons and revives (yours and your party's).
-minions = )" + ValueOf("minions") + "\n";
+minions = )" + ValueOf("minions") + R"(
+
+# false: each extra unit costs one more cast's mana, nearest first, until your
+# mana runs out. true: one cast's mana enchants everyone.
+single_mana_cost = )" + ValueOf("single_mana_cost") + "\n";
 }
 
 void SaveConfig() {
@@ -388,6 +433,11 @@ key = "minions"
 type = "bool"
 label = "Mercenaries and summons"
 note = "Mercenaries, summons and revives, yours and your party's."
+[[setting]]
+key = "single_mana_cost"
+type = "bool"
+label = "Single mana cost"
+note = "Off: each extra unit costs one more cast's mana, nearest first. On: one cast pays for everyone."
 )toml";
 
 PluginMenu::Connection Menu;

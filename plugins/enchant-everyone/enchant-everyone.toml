@@ -15,3 +15,7 @@ players = true
 
 # Enchant mercenaries, summons and revives (yours and your party's).
 minions = true
+
+# false: each extra unit costs one more cast's mana, nearest first, until your
+# mana runs out. true: one cast's mana enchants everyone.
+single_mana_cost = false

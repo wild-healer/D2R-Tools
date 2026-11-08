@@ -13,11 +13,11 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Enchant Everyone D2RLoader plugin"
-      VALUE "FileVersion", "1.0.0"
+      VALUE "FileVersion", "1.0.0-dev-1"
       VALUE "InternalName", "enchant-everyone"
       VALUE "OriginalFilename", "d2rl-enchant-everyone.dll"
       VALUE "ProductName", "Enchant Everyone"
-      VALUE "ProductVersion", "1.0.0"
+      VALUE "ProductVersion", "1.0.0-dev-1"
     END
   END
   BLOCK "VarFileInfo"
