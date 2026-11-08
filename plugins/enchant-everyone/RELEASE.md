@@ -1,40 +1,33 @@
-# Enchant Everyone 1.0.0: release texts
+# Enchant Everyone 1.0.1: release texts
 
 ## Patch notes
 
 ```
-**Enchant Everyone 1.0.0**
+**Enchant Everyone 1.0.1**
 
 **New**
 
-* Casting Enchant also enchants every friendly unit around you: yourself, your party, mercenaries, summons and revives.
-* radius_yards setting: how far around you Enchant reaches, 20 yards by default.
-* players setting: turn off to leave the other players of your party out.
-* minions setting: turn off to leave mercenaries, summons and revives out.
-* Every setting can be changed in game with I Hate TOMLs and applies at once.
+* Each extra unit Enchant reaches now costs one more cast's mana, nearest units first, until your mana runs out.
+* single_mana_cost setting: turn on to have one cast's mana enchant everyone, as in 1.0.0. Off by default.
 ```
 
 ## GitHub release
 
-- Tag: `enchant-everyone-v1.0.0`
-- Title: `Enchant Everyone 1.0.0`
+- Tag: `enchant-everyone-v1.0.1`
+- Title: `Enchant Everyone 1.0.1`
 - Asset: `enchant-everyone.zip`
 
 Body:
 
 ```markdown
-**Enchant Everyone** 1.0.0
-
-First release.
+**Enchant Everyone** 1.0.1
 
 ### New
-- Casting Enchant also enchants every friendly unit around you: yourself, your party, mercenaries, summons and revives.
-- `radius_yards`: how far around you Enchant reaches (20 yards by default, 1 to 25).
-- `players` and `minions`: leave party members, or mercenaries/summons/revives, out.
-- Every setting can be changed in game with I Hate TOMLs and applies at once.
+- Each extra unit Enchant reaches now costs one more cast's mana, nearest units first, until your mana runs out.
+- `single_mana_cost`: turn on to have one cast's mana enchant everyone, as in 1.0.0. Off by default.
 
 ### Install
-Load `enchant-everyone.zip` in D2RMM, or copy `d2rl-enchant-everyone.dll` to `<game>/d2rloader/plugins/`.
+Load `enchant-everyone.zip` in D2RMM, or copy `d2rl-enchant-everyone.dll` to `<game>/d2rloader/plugins/`. Your settings are kept; the new one starts off.
 ```
 
 ## D2RLoader Hub
@@ -52,7 +45,7 @@ Description:
 
 ### Features
 - **Everyone around you.** When you cast Enchant, your target gets it as usual, and so does every friendly unit near you: yourself, party members, your mercenary, summons and revives, and your party's mercenaries and summons.
-- **One cast, one mana cost.** Mana is spent once, for the cast itself.
+- **Fair mana cost.** Each extra unit costs one more cast's mana, nearest units first, until your mana runs out. Or turn on single mana cost and one cast pays for everyone.
 - **Only friends.** Enemies and town NPCs never get it. Other players get it only when they are in your party, like the game's own Enchant.
 - **Adjustable radius.** 20 yards by default, from 1 to 25.
 - **I Hate TOMLs support.** Change the settings in game; they apply at once.
@@ -70,7 +63,8 @@ Load `enchant-everyone.zip` in D2RMM, or copy `d2rl-enchant-everyone.dll` to `<g
 - `radius_yards`: how far around the caster Enchant reaches (20).
 - `players`: false leaves the other players of your party out.
 - `minions`: false leaves mercenaries, summons and revives out.
+- `single_mana_cost`: true makes one cast's mana enchant everyone (false: each extra unit costs one more cast).
 
 ### Log
-`d2rloader/logs/enchant-everyone.log` has one line per cast: how many more units it enchanted.
+`d2rloader/logs/enchant-everyone.log` has one line per cast: how many more units it enchanted, the mana each cost, and whether it ran out.
 ```

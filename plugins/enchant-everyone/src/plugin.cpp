@@ -42,7 +42,7 @@
 namespace {
 
 constexpr const char* PluginId      = "enchant-everyone";
-constexpr const char* PluginVersion = "1.0.0-dev-1";
+constexpr const char* PluginVersion = "1.0.1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
