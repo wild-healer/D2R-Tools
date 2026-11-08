@@ -1,9 +1,9 @@
 // Every mercenary of an act draws its name from the strings NameFirst..NameLast
 // of its hireling.txt rows (a range of string ids). A hired mercenary keeps the
-// position of its name in that range, so instead of narrowing the range, every
-// string in it is given the chosen name's text in all languages. New hires and
-// the mercenary you already have then both show the chosen name, and saves are
-// left untouched.
+// position of its name in that range, so the range is kept and its strings are
+// rewritten instead: the slots are shared out between the ticked names (text in
+// all languages). New hires and the mercenary you already have then all show
+// a ticked name, and saves are left untouched.
 
 const stringsPath = 'local\\lng\\strings\\mercenaries.json';
 const strings = D2RMM.readJson(stringsPath);
@@ -27,26 +27,33 @@ D2RMM.readTsv('global\\excel\\hireling.txt').rows.forEach((row) => {
 
 let changed = false;
 ['1', '2', '3', '5'].forEach((act) => {
-  const choice = config[`act${act}`];
-  if (!choice) return; // Random (vanilla)
-  const chosen = byKey[String(choice).toLowerCase()];
   const range = ranges[act];
-  if (!chosen || !range) {
-    console.warn(`Merc Names: act ${act}: name ${choice} or its range not found`);
+  if (!range) {
+    console.warn(`Merc Names: act ${act}: no name range in hireling.txt`);
     return;
   }
-  // Copy the language columns first: the loop below overwrites the entry
-  // itself when it falls inside the range.
-  const text = {};
-  Object.keys(chosen).forEach((column) => {
-    if (column !== 'id' && column !== 'Key') text[column] = chosen[column];
+  const slots = strings
+    .filter((entry) => entry.id >= range.from && entry.id <= range.to)
+    .sort((a, b) => a.id - b.id);
+  // Read every name's text before any slot is overwritten.
+  const ticked = slots
+    .filter((entry) => config[`act${act}_${entry.Key}`] !== false)
+    .map((entry) => {
+      const text = {};
+      Object.keys(entry).forEach((column) => {
+        if (column !== 'id' && column !== 'Key') text[column] = entry[column];
+      });
+      return text;
+    });
+  // All ticked or none ticked: the game's names.
+  if (ticked.length === 0 || ticked.length === slots.length) return;
+  // The game picks a slot of the range at random; slot i shows the i-th
+  // ticked name, cycling, so each ticked name gets an equal share of slots
+  // (one more or less when they don't divide evenly).
+  slots.forEach((entry, i) => {
+    Object.assign(entry, ticked[i % ticked.length]);
   });
-  strings.forEach((entry) => {
-    if (entry.id >= range.from && entry.id <= range.to) {
-      Object.assign(entry, text);
-      changed = true;
-    }
-  });
+  changed = true;
 });
 
 if (changed) {

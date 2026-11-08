@@ -1,654 +1,936 @@
 {
   "name": "Merc Names",
-  "description": "Choose one name per act's mercenary: every mercenary of that act you hire, and the one you already have, shows that name.",
+  "description": "Choose which names each act's mercenaries can spawn with. The mercenary you already have also takes one of the ticked names.",
   "author": "wild-healer",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "config": [
     {
       "id": "act1",
-      "type": "select",
+      "type": "section",
       "name": "Act 1 Rogue",
-      "description": "Name every Rogue mercenary gets. Random keeps the game's 41 names.",
-      "defaultValue": "",
-      "options": [
+      "description": "Tick the names Rogue mercenaries can spawn with. All ticked, or none, keeps the game's 41 names.",
+      "defaultExpanded": false,
+      "children": [
         {
-          "label": "Random (vanilla)",
-          "value": ""
+          "id": "act1_merc04",
+          "type": "checkbox",
+          "name": "Abhaya",
+          "defaultValue": true
         },
         {
-          "label": "Abhaya",
-          "value": "merc04"
+          "id": "act1_merc01",
+          "type": "checkbox",
+          "name": "Aliza",
+          "defaultValue": true
         },
         {
-          "label": "Aliza",
-          "value": "merc01"
+          "id": "act1_merc02",
+          "type": "checkbox",
+          "name": "Amplisa",
+          "defaultValue": true
         },
         {
-          "label": "Amplisa",
-          "value": "merc02"
+          "id": "act1_merc03",
+          "type": "checkbox",
+          "name": "Annor",
+          "defaultValue": true
         },
         {
-          "label": "Annor",
-          "value": "merc03"
+          "id": "act1_merc07",
+          "type": "checkbox",
+          "name": "Basanti",
+          "defaultValue": true
         },
         {
-          "label": "Basanti",
-          "value": "merc07"
+          "id": "act1_merc08",
+          "type": "checkbox",
+          "name": "Blaise",
+          "defaultValue": true
         },
         {
-          "label": "Blaise",
-          "value": "merc08"
+          "id": "act1_merc39",
+          "type": "checkbox",
+          "name": "Debi",
+          "defaultValue": true
         },
         {
-          "label": "Debi",
-          "value": "merc39"
+          "id": "act1_merc22",
+          "type": "checkbox",
+          "name": "Diane",
+          "defaultValue": true
         },
         {
-          "label": "Diane",
-          "value": "merc22"
+          "id": "act1_merc24",
+          "type": "checkbox",
+          "name": "Divo",
+          "defaultValue": true
         },
         {
-          "label": "Divo",
-          "value": "merc24"
+          "id": "act1_merc14",
+          "type": "checkbox",
+          "name": "Elexa",
+          "defaultValue": true
         },
         {
-          "label": "Elexa",
-          "value": "merc14"
+          "id": "act1_merc05",
+          "type": "checkbox",
+          "name": "Elly",
+          "defaultValue": true
         },
         {
-          "label": "Elly",
-          "value": "merc05"
+          "id": "act1_merc16",
+          "type": "checkbox",
+          "name": "Fiona",
+          "defaultValue": true
         },
         {
-          "label": "Fiona",
-          "value": "merc16"
+          "id": "act1_merc15",
+          "type": "checkbox",
+          "name": "Floria",
+          "defaultValue": true
         },
         {
-          "label": "Floria",
-          "value": "merc15"
+          "id": "act1_merc18",
+          "type": "checkbox",
+          "name": "Gaile",
+          "defaultValue": true
         },
         {
-          "label": "Gaile",
-          "value": "merc18"
+          "id": "act1_merc17",
+          "type": "checkbox",
+          "name": "Gwinni",
+          "defaultValue": true
         },
         {
-          "label": "Gwinni",
-          "value": "merc17"
+          "id": "act1_merc19",
+          "type": "checkbox",
+          "name": "Hannah",
+          "defaultValue": true
         },
         {
-          "label": "Hannah",
-          "value": "merc19"
+          "id": "act1_merc20",
+          "type": "checkbox",
+          "name": "Heather",
+          "defaultValue": true
         },
         {
-          "label": "Heather",
-          "value": "merc20"
+          "id": "act1_merc21",
+          "type": "checkbox",
+          "name": "Iantha",
+          "defaultValue": true
         },
         {
-          "label": "Iantha",
-          "value": "merc21"
+          "id": "act1_merc23",
+          "type": "checkbox",
+          "name": "Isolde",
+          "defaultValue": true
         },
         {
-          "label": "Isolde",
-          "value": "merc23"
+          "id": "act1_merc25",
+          "type": "checkbox",
+          "name": "Ithera",
+          "defaultValue": true
         },
         {
-          "label": "Ithera",
-          "value": "merc25"
+          "id": "act1_merc26",
+          "type": "checkbox",
+          "name": "Itonya",
+          "defaultValue": true
         },
         {
-          "label": "Itonya",
-          "value": "merc26"
+          "id": "act1_merc10",
+          "type": "checkbox",
+          "name": "Klaudia",
+          "defaultValue": true
         },
         {
-          "label": "Klaudia",
-          "value": "merc10"
+          "id": "act1_merc11",
+          "type": "checkbox",
+          "name": "Kundri",
+          "defaultValue": true
         },
         {
-          "label": "Kundri",
-          "value": "merc11"
+          "id": "act1_merc12",
+          "type": "checkbox",
+          "name": "Kyle",
+          "defaultValue": true
         },
         {
-          "label": "Kyle",
-          "value": "merc12"
+          "id": "act1_merc09",
+          "type": "checkbox",
+          "name": "Kyoko",
+          "defaultValue": true
         },
         {
-          "label": "Kyoko",
-          "value": "merc09"
+          "id": "act1_merc30",
+          "type": "checkbox",
+          "name": "Liaza",
+          "defaultValue": true
         },
         {
-          "label": "Liaza",
-          "value": "merc30"
+          "id": "act1_merc27",
+          "type": "checkbox",
+          "name": "Liene",
+          "defaultValue": true
         },
         {
-          "label": "Liene",
-          "value": "merc27"
+          "id": "act1_merc28",
+          "type": "checkbox",
+          "name": "Maeko",
+          "defaultValue": true
         },
         {
-          "label": "Maeko",
-          "value": "merc28"
+          "id": "act1_merc29",
+          "type": "checkbox",
+          "name": "Mahala",
+          "defaultValue": true
         },
         {
-          "label": "Mahala",
-          "value": "merc29"
+          "id": "act1_merc31",
+          "type": "checkbox",
+          "name": "Meghan",
+          "defaultValue": true
         },
         {
-          "label": "Meghan",
-          "value": "merc31"
+          "id": "act1_merc32",
+          "type": "checkbox",
+          "name": "Olena",
+          "defaultValue": true
         },
         {
-          "label": "Olena",
-          "value": "merc32"
+          "id": "act1_merc33",
+          "type": "checkbox",
+          "name": "Oriana",
+          "defaultValue": true
         },
         {
-          "label": "Oriana",
-          "value": "merc33"
+          "id": "act1_merc06",
+          "type": "checkbox",
+          "name": "Paige",
+          "defaultValue": true
         },
         {
-          "label": "Paige",
-          "value": "merc06"
+          "id": "act1_merc36",
+          "type": "checkbox",
+          "name": "Raissa",
+          "defaultValue": true
         },
         {
-          "label": "Raissa",
-          "value": "merc36"
+          "id": "act1_merc35",
+          "type": "checkbox",
+          "name": "Rozene",
+          "defaultValue": true
         },
         {
-          "label": "Rozene",
-          "value": "merc35"
+          "id": "act1_merc34",
+          "type": "checkbox",
+          "name": "Ryann",
+          "defaultValue": true
         },
         {
-          "label": "Ryann",
-          "value": "merc34"
+          "id": "act1_merc37",
+          "type": "checkbox",
+          "name": "Sharyn",
+          "defaultValue": true
         },
         {
-          "label": "Sharyn",
-          "value": "merc37"
+          "id": "act1_merc38",
+          "type": "checkbox",
+          "name": "Shikha",
+          "defaultValue": true
         },
         {
-          "label": "Shikha",
-          "value": "merc38"
+          "id": "act1_merc40",
+          "type": "checkbox",
+          "name": "Tylena",
+          "defaultValue": true
         },
         {
-          "label": "Tylena",
-          "value": "merc40"
+          "id": "act1_merc13",
+          "type": "checkbox",
+          "name": "Visala",
+          "defaultValue": true
         },
         {
-          "label": "Visala",
-          "value": "merc13"
-        },
-        {
-          "label": "Wendy",
-          "value": "merc41"
+          "id": "act1_merc41",
+          "type": "checkbox",
+          "name": "Wendy",
+          "defaultValue": true
         }
       ]
     },
     {
       "id": "act2",
-      "type": "select",
+      "type": "section",
       "name": "Act 2 Desert Mercenary",
-      "description": "Name every Desert Mercenary mercenary gets. Random keeps the game's 21 names.",
-      "defaultValue": "",
-      "options": [
+      "description": "Tick the names Desert Mercenary mercenaries can spawn with. All ticked, or none, keeps the game's 21 names.",
+      "defaultExpanded": false,
+      "children": [
         {
-          "label": "Random (vanilla)",
-          "value": ""
+          "id": "act2_merca204",
+          "type": "checkbox",
+          "name": "Ahsab",
+          "defaultValue": true
         },
         {
-          "label": "Ahsab",
-          "value": "merca204"
+          "id": "act2_merca202",
+          "type": "checkbox",
+          "name": "Alhizeer",
+          "defaultValue": true
         },
         {
-          "label": "Alhizeer",
-          "value": "merca202"
+          "id": "act2_merca203",
+          "type": "checkbox",
+          "name": "Azrael",
+          "defaultValue": true
         },
         {
-          "label": "Azrael",
-          "value": "merca203"
+          "id": "act2_merca205",
+          "type": "checkbox",
+          "name": "Chalan",
+          "defaultValue": true
         },
         {
-          "label": "Chalan",
-          "value": "merca205"
+          "id": "act2_merca216",
+          "type": "checkbox",
+          "name": "Durga",
+          "defaultValue": true
         },
         {
-          "label": "Durga",
-          "value": "merca216"
+          "id": "act2_merca208",
+          "type": "checkbox",
+          "name": "Emilio",
+          "defaultValue": true
         },
         {
-          "label": "Emilio",
-          "value": "merca208"
+          "id": "act2_merca210",
+          "type": "checkbox",
+          "name": "Fazel",
+          "defaultValue": true
         },
         {
-          "label": "Fazel",
-          "value": "merca210"
+          "id": "act2_merca213",
+          "type": "checkbox",
+          "name": "Gulzar",
+          "defaultValue": true
         },
         {
-          "label": "Gulzar",
-          "value": "merca213"
+          "id": "act2_merca206",
+          "type": "checkbox",
+          "name": "Haseen",
+          "defaultValue": true
         },
         {
-          "label": "Haseen",
-          "value": "merca206"
+          "id": "act2_merca201",
+          "type": "checkbox",
+          "name": "Hazade",
+          "defaultValue": true
         },
         {
-          "label": "Hazade",
-          "value": "merca201"
+          "id": "act2_merca218",
+          "type": "checkbox",
+          "name": "Ilzan",
+          "defaultValue": true
         },
         {
-          "label": "Ilzan",
-          "value": "merca218"
+          "id": "act2_merca211",
+          "type": "checkbox",
+          "name": "Jemali",
+          "defaultValue": true
         },
         {
-          "label": "Jemali",
-          "value": "merca211"
+          "id": "act2_merca212",
+          "type": "checkbox",
+          "name": "Kasim",
+          "defaultValue": true
         },
         {
-          "label": "Kasim",
-          "value": "merca212"
+          "id": "act2_merca215",
+          "type": "checkbox",
+          "name": "Leharas",
+          "defaultValue": true
         },
         {
-          "label": "Leharas",
-          "value": "merca215"
+          "id": "act2_merca214",
+          "type": "checkbox",
+          "name": "Mizan",
+          "defaultValue": true
         },
         {
-          "label": "Mizan",
-          "value": "merca214"
+          "id": "act2_merca217",
+          "type": "checkbox",
+          "name": "Neeraj",
+          "defaultValue": true
         },
         {
-          "label": "Neeraj",
-          "value": "merca217"
+          "id": "act2_merca209",
+          "type": "checkbox",
+          "name": "Pratham",
+          "defaultValue": true
         },
         {
-          "label": "Pratham",
-          "value": "merca209"
+          "id": "act2_merca207",
+          "type": "checkbox",
+          "name": "Razan",
+          "defaultValue": true
         },
         {
-          "label": "Razan",
-          "value": "merca207"
+          "id": "act2_merca221",
+          "type": "checkbox",
+          "name": "Vikhyat",
+          "defaultValue": true
         },
         {
-          "label": "Vikhyat",
-          "value": "merca221"
+          "id": "act2_merca220",
+          "type": "checkbox",
+          "name": "Waheed",
+          "defaultValue": true
         },
         {
-          "label": "Waheed",
-          "value": "merca220"
-        },
-        {
-          "label": "Zanarhi",
-          "value": "merca219"
+          "id": "act2_merca219",
+          "type": "checkbox",
+          "name": "Zanarhi",
+          "defaultValue": true
         }
       ]
     },
     {
       "id": "act3",
-      "type": "select",
+      "type": "section",
       "name": "Act 3 Iron Wolf",
-      "description": "Name every Iron Wolf mercenary gets. Random keeps the game's 20 names.",
-      "defaultValue": "",
-      "options": [
+      "description": "Tick the names Iron Wolf mercenaries can spawn with. All ticked, or none, keeps the game's 20 names.",
+      "defaultExpanded": false,
+      "children": [
         {
-          "label": "Random (vanilla)",
-          "value": ""
+          "id": "act3_merca228",
+          "type": "checkbox",
+          "name": "Ajheed",
+          "defaultValue": true
         },
         {
-          "label": "Ajheed",
-          "value": "merca228"
+          "id": "act3_merca223",
+          "type": "checkbox",
+          "name": "Barani",
+          "defaultValue": true
         },
         {
-          "label": "Barani",
-          "value": "merca223"
+          "id": "act3_merca225",
+          "type": "checkbox",
+          "name": "Devak",
+          "defaultValue": true
         },
         {
-          "label": "Devak",
-          "value": "merca225"
+          "id": "act3_merca240",
+          "type": "checkbox",
+          "name": "Flux",
+          "defaultValue": true
         },
         {
-          "label": "Flux",
-          "value": "merca240"
+          "id": "act3_merca232",
+          "type": "checkbox",
+          "name": "Geshef",
+          "defaultValue": true
         },
         {
-          "label": "Geshef",
-          "value": "merca232"
+          "id": "act3_merca234",
+          "type": "checkbox",
+          "name": "Haphet",
+          "defaultValue": true
         },
         {
-          "label": "Haphet",
-          "value": "merca234"
+          "id": "act3_merca224",
+          "type": "checkbox",
+          "name": "Jabari",
+          "defaultValue": true
         },
         {
-          "label": "Jabari",
-          "value": "merca224"
+          "id": "act3_merca239",
+          "type": "checkbox",
+          "name": "Jarulf",
+          "defaultValue": true
         },
         {
-          "label": "Jarulf",
-          "value": "merca239"
+          "id": "act3_merca222",
+          "type": "checkbox",
+          "name": "Jelani",
+          "defaultValue": true
         },
         {
-          "label": "Jelani",
-          "value": "merca222"
+          "id": "act3_merca230",
+          "type": "checkbox",
+          "name": "Khaleel",
+          "defaultValue": true
         },
         {
-          "label": "Khaleel",
-          "value": "merca230"
+          "id": "act3_merca229",
+          "type": "checkbox",
+          "name": "Narphet",
+          "defaultValue": true
         },
         {
-          "label": "Narphet",
-          "value": "merca229"
+          "id": "act3_merca231",
+          "type": "checkbox",
+          "name": "Phaet",
+          "defaultValue": true
         },
         {
-          "label": "Phaet",
-          "value": "merca231"
+          "id": "act3_merca226",
+          "type": "checkbox",
+          "name": "Raldin",
+          "defaultValue": true
         },
         {
-          "label": "Raldin",
-          "value": "merca226"
+          "id": "act3_merca237",
+          "type": "checkbox",
+          "name": "Rhadge",
+          "defaultValue": true
         },
         {
-          "label": "Rhadge",
-          "value": "merca237"
+          "id": "act3_merca241",
+          "type": "checkbox",
+          "name": "Scorch",
+          "defaultValue": true
         },
         {
-          "label": "Scorch",
-          "value": "merca241"
+          "id": "act3_merca227",
+          "type": "checkbox",
+          "name": "Telash",
+          "defaultValue": true
         },
         {
-          "label": "Telash",
-          "value": "merca227"
+          "id": "act3_merca235",
+          "type": "checkbox",
+          "name": "Thadar",
+          "defaultValue": true
         },
         {
-          "label": "Thadar",
-          "value": "merca235"
+          "id": "act3_merca233",
+          "type": "checkbox",
+          "name": "Vanji",
+          "defaultValue": true
         },
         {
-          "label": "Vanji",
-          "value": "merca233"
+          "id": "act3_merca238",
+          "type": "checkbox",
+          "name": "Yashied",
+          "defaultValue": true
         },
         {
-          "label": "Yashied",
-          "value": "merca238"
-        },
-        {
-          "label": "Yatiraj",
-          "value": "merca236"
+          "id": "act3_merca236",
+          "type": "checkbox",
+          "name": "Yatiraj",
+          "defaultValue": true
         }
       ]
     },
     {
       "id": "act5",
-      "type": "select",
+      "type": "section",
       "name": "Act 5 Barbarian",
-      "description": "Name every Barbarian mercenary gets. Random keeps the game's 67 names.",
-      "defaultValue": "",
-      "options": [
+      "description": "Tick the names Barbarian mercenaries can spawn with. All ticked, or none, keeps the game's 67 names.",
+      "defaultExpanded": false,
+      "children": [
         {
-          "label": "Random (vanilla)",
-          "value": ""
+          "id": "act5_MercX151",
+          "type": "checkbox",
+          "name": "Alaric",
+          "defaultValue": true
         },
         {
-          "label": "Alaric",
-          "value": "MercX151"
+          "id": "act5_MercX164",
+          "type": "checkbox",
+          "name": "Alban",
+          "defaultValue": true
         },
         {
-          "label": "Alban",
-          "value": "MercX164"
+          "id": "act5_MercX156",
+          "type": "checkbox",
+          "name": "Alcuin",
+          "defaultValue": true
         },
         {
-          "label": "Alcuin",
-          "value": "MercX156"
+          "id": "act5_MercX165",
+          "type": "checkbox",
+          "name": "Barloc",
+          "defaultValue": true
         },
         {
-          "label": "Barloc",
-          "value": "MercX165"
+          "id": "act5_MercX166",
+          "type": "checkbox",
+          "name": "Bill",
+          "defaultValue": true
         },
         {
-          "label": "Bill",
-          "value": "MercX166"
+          "id": "act5_MercX114",
+          "type": "checkbox",
+          "name": "Bohdan",
+          "defaultValue": true
         },
         {
-          "label": "Bohdan",
-          "value": "MercX114"
+          "id": "act5_MercX104",
+          "type": "checkbox",
+          "name": "Bors",
+          "defaultValue": true
         },
         {
-          "label": "Bors",
-          "value": "MercX104"
+          "id": "act5_MercX105",
+          "type": "checkbox",
+          "name": "Brom",
+          "defaultValue": true
         },
         {
-          "label": "Brom",
-          "value": "MercX105"
+          "id": "act5_MercX138",
+          "type": "checkbox",
+          "name": "Bulwye",
+          "defaultValue": true
         },
         {
-          "label": "Bulwye",
-          "value": "MercX138"
+          "id": "act5_MercX153",
+          "type": "checkbox",
+          "name": "Caden",
+          "defaultValue": true
         },
         {
-          "label": "Caden",
-          "value": "MercX153"
+          "id": "act5_MercX134",
+          "type": "checkbox",
+          "name": "Damien",
+          "defaultValue": true
         },
         {
-          "label": "Damien",
-          "value": "MercX134"
+          "id": "act5_MercX142",
+          "type": "checkbox",
+          "name": "Drus",
+          "defaultValue": true
         },
         {
-          "label": "Drus",
-          "value": "MercX142"
+          "id": "act5_MercX132",
+          "type": "checkbox",
+          "name": "Eadgils",
+          "defaultValue": true
         },
         {
-          "label": "Eadgils",
-          "value": "MercX132"
+          "id": "act5_MercX113",
+          "type": "checkbox",
+          "name": "Egtheow",
+          "defaultValue": true
         },
         {
-          "label": "Egtheow",
-          "value": "MercX113"
+          "id": "act5_MercX154",
+          "type": "checkbox",
+          "name": "Elgifu",
+          "defaultValue": true
         },
         {
-          "label": "Elgifu",
-          "value": "MercX154"
+          "id": "act5_MercX157",
+          "type": "checkbox",
+          "name": "Emund",
+          "defaultValue": true
         },
         {
-          "label": "Emund",
-          "value": "MercX157"
+          "id": "act5_MercX152",
+          "type": "checkbox",
+          "name": "Ethelred",
+          "defaultValue": true
         },
         {
-          "label": "Ethelred",
-          "value": "MercX152"
+          "id": "act5_MercX124",
+          "type": "checkbox",
+          "name": "Folcwald",
+          "defaultValue": true
         },
         {
-          "label": "Folcwald",
-          "value": "MercX124"
+          "id": "act5_MercX125",
+          "type": "checkbox",
+          "name": "Frisian",
+          "defaultValue": true
         },
         {
-          "label": "Frisian",
-          "value": "MercX125"
+          "id": "act5_MercX130",
+          "type": "checkbox",
+          "name": "Garmund",
+          "defaultValue": true
         },
         {
-          "label": "Garmund",
-          "value": "MercX130"
+          "id": "act5_MercX159",
+          "type": "checkbox",
+          "name": "Gorm",
+          "defaultValue": true
         },
         {
-          "label": "Gorm",
-          "value": "MercX159"
+          "id": "act5_MercX127",
+          "type": "checkbox",
+          "name": "Guthlaf",
+          "defaultValue": true
         },
         {
-          "label": "Guthlaf",
-          "value": "MercX127"
+          "id": "act5_MercX111",
+          "type": "checkbox",
+          "name": "Halgaunt",
+          "defaultValue": true
         },
         {
-          "label": "Halgaunt",
-          "value": "MercX111"
+          "id": "act5_MercX109",
+          "type": "checkbox",
+          "name": "Healfdane",
+          "defaultValue": true
         },
         {
-          "label": "Healfdane",
-          "value": "MercX109"
+          "id": "act5_MercX117",
+          "type": "checkbox",
+          "name": "Heatholaf",
+          "defaultValue": true
         },
         {
-          "label": "Heatholaf",
-          "value": "MercX117"
+          "id": "act5_MercX123",
+          "type": "checkbox",
+          "name": "Hengest",
+          "defaultValue": true
         },
         {
-          "label": "Hengest",
-          "value": "MercX123"
+          "id": "act5_MercX110",
+          "type": "checkbox",
+          "name": "Heorogar",
+          "defaultValue": true
         },
         {
-          "label": "Heorogar",
-          "value": "MercX110"
+          "id": "act5_MercX122",
+          "type": "checkbox",
+          "name": "Heremod",
+          "defaultValue": true
         },
         {
-          "label": "Heremod",
-          "value": "MercX122"
+          "id": "act5_MercX116",
+          "type": "checkbox",
+          "name": "Hild",
+          "defaultValue": true
         },
         {
-          "label": "Hild",
-          "value": "MercX116"
+          "id": "act5_MercX126",
+          "type": "checkbox",
+          "name": "Hnaef",
+          "defaultValue": true
         },
         {
-          "label": "Hnaef",
-          "value": "MercX126"
+          "id": "act5_MercX143",
+          "type": "checkbox",
+          "name": "Hoku",
+          "defaultValue": true
         },
         {
-          "label": "Hoku",
-          "value": "MercX143"
+          "id": "act5_MercX160",
+          "type": "checkbox",
+          "name": "Hollis",
+          "defaultValue": true
         },
         {
-          "label": "Hollis",
-          "value": "MercX160"
+          "id": "act5_MercX107",
+          "type": "checkbox",
+          "name": "Hrothgar",
+          "defaultValue": true
         },
         {
-          "label": "Hrothgar",
-          "value": "MercX107"
+          "id": "act5_MercX112",
+          "type": "checkbox",
+          "name": "Hygelac",
+          "defaultValue": true
         },
         {
-          "label": "Hygelac",
-          "value": "MercX112"
+          "id": "act5_MercX146",
+          "type": "checkbox",
+          "name": "Ip",
+          "defaultValue": true
         },
         {
-          "label": "Ip",
-          "value": "MercX146"
+          "id": "act5_MercX149",
+          "type": "checkbox",
+          "name": "Kaelim",
+          "defaultValue": true
         },
         {
-          "label": "Kaelim",
-          "value": "MercX149"
+          "id": "act5_MercX102",
+          "type": "checkbox",
+          "name": "Khan",
+          "defaultValue": true
         },
         {
-          "label": "Khan",
-          "value": "MercX102"
+          "id": "act5_MercX136",
+          "type": "checkbox",
+          "name": "Klar",
+          "defaultValue": true
         },
         {
-          "label": "Klar",
-          "value": "MercX136"
+          "id": "act5_MercX141",
+          "type": "checkbox",
+          "name": "Klatu",
+          "defaultValue": true
         },
         {
-          "label": "Klatu",
-          "value": "MercX141"
+          "id": "act5_MercX103",
+          "type": "checkbox",
+          "name": "Klisk",
+          "defaultValue": true
         },
         {
-          "label": "Klisk",
-          "value": "MercX103"
+          "id": "act5_MercX144",
+          "type": "checkbox",
+          "name": "Kord",
+          "defaultValue": true
         },
         {
-          "label": "Kord",
-          "value": "MercX144"
+          "id": "act5_MercX131",
+          "type": "checkbox",
+          "name": "Lanth",
+          "defaultValue": true
         },
         {
-          "label": "Lanth",
-          "value": "MercX131"
+          "id": "act5_MercX139",
+          "type": "checkbox",
+          "name": "Lief",
+          "defaultValue": true
         },
         {
-          "label": "Lief",
-          "value": "MercX139"
+          "id": "act5_MercX140",
+          "type": "checkbox",
+          "name": "Magnus",
+          "defaultValue": true
         },
         {
-          "label": "Magnus",
-          "value": "MercX140"
+          "id": "act5_MercX133",
+          "type": "checkbox",
+          "name": "Onela",
+          "defaultValue": true
         },
         {
-          "label": "Onela",
-          "value": "MercX133"
+          "id": "act5_MercX128",
+          "type": "checkbox",
+          "name": "Oslaf",
+          "defaultValue": true
         },
         {
-          "label": "Oslaf",
-          "value": "MercX128"
+          "id": "act5_MercX161",
+          "type": "checkbox",
+          "name": "Ragnar",
+          "defaultValue": true
         },
         {
-          "label": "Ragnar",
-          "value": "MercX161"
+          "id": "act5_MercX108",
+          "type": "checkbox",
+          "name": "Scyld",
+          "defaultValue": true
         },
         {
-          "label": "Scyld",
-          "value": "MercX108"
+          "id": "act5_MercX121",
+          "type": "checkbox",
+          "name": "Sigemund",
+          "defaultValue": true
         },
         {
-          "label": "Sigemund",
-          "value": "MercX121"
+          "id": "act5_MercX158",
+          "type": "checkbox",
+          "name": "Sigurd",
+          "defaultValue": true
         },
         {
-          "label": "Sigurd",
-          "value": "MercX158"
+          "id": "act5_MercX148",
+          "type": "checkbox",
+          "name": "Tharr",
+          "defaultValue": true
         },
         {
-          "label": "Tharr",
-          "value": "MercX148"
+          "id": "act5_MercX167",
+          "type": "checkbox",
+          "name": "Theodoric",
+          "defaultValue": true
         },
         {
-          "label": "Theodoric",
-          "value": "MercX167"
+          "id": "act5_MercX162",
+          "type": "checkbox",
+          "name": "Torkel",
+          "defaultValue": true
         },
         {
-          "label": "Torkel",
-          "value": "MercX162"
+          "id": "act5_MercX155",
+          "type": "checkbox",
+          "name": "Tostig",
+          "defaultValue": true
         },
         {
-          "label": "Tostig",
-          "value": "MercX155"
+          "id": "act5_MercX135",
+          "type": "checkbox",
+          "name": "Tryneus",
+          "defaultValue": true
         },
         {
-          "label": "Tryneus",
-          "value": "MercX135"
+          "id": "act5_MercX147",
+          "type": "checkbox",
+          "name": "Ulf",
+          "defaultValue": true
         },
         {
-          "label": "Ulf",
-          "value": "MercX147"
+          "id": "act5_MercX150",
+          "type": "checkbox",
+          "name": "Ulric",
+          "defaultValue": true
         },
         {
-          "label": "Ulric",
-          "value": "MercX150"
+          "id": "act5_MercX120",
+          "type": "checkbox",
+          "name": "Unferth",
+          "defaultValue": true
         },
         {
-          "label": "Unferth",
-          "value": "MercX120"
+          "id": "act5_MercX145",
+          "type": "checkbox",
+          "name": "Uther",
+          "defaultValue": true
         },
         {
-          "label": "Uther",
-          "value": "MercX145"
+          "id": "act5_MercX101",
+          "type": "checkbox",
+          "name": "Varaya",
+          "defaultValue": true
         },
         {
-          "label": "Varaya",
-          "value": "MercX101"
+          "id": "act5_MercX119",
+          "type": "checkbox",
+          "name": "Vikhyat",
+          "defaultValue": true
         },
         {
-          "label": "Vikhyat",
-          "value": "MercX119"
+          "id": "act5_MercX118",
+          "type": "checkbox",
+          "name": "Weder",
+          "defaultValue": true
         },
         {
-          "label": "Weder",
-          "value": "MercX118"
+          "id": "act5_MercX106",
+          "type": "checkbox",
+          "name": "Wiglaf",
+          "defaultValue": true
         },
         {
-          "label": "Wiglaf",
-          "value": "MercX106"
+          "id": "act5_MercX137",
+          "type": "checkbox",
+          "name": "Wulf",
+          "defaultValue": true
         },
         {
-          "label": "Wulf",
-          "value": "MercX137"
+          "id": "act5_MercX115",
+          "type": "checkbox",
+          "name": "Wulfgar",
+          "defaultValue": true
         },
         {
-          "label": "Wulfgar",
-          "value": "MercX115"
+          "id": "act5_MercX163",
+          "type": "checkbox",
+          "name": "Wulfstan",
+          "defaultValue": true
         },
         {
-          "label": "Wulfstan",
-          "value": "MercX163"
-        },
-        {
-          "label": "Yrmenlaf",
-          "value": "MercX129"
+          "id": "act5_MercX129",
+          "type": "checkbox",
+          "name": "Yrmenlaf",
+          "defaultValue": true
         }
       ]
     }
