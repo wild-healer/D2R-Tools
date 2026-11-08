@@ -1,3 +1,32 @@
+# I Hate TOMLs 1.1.1: release texts
+
+## Patch notes
+
+```
+**I Hate TOMLs 1.1.1**
+
+**Fixed**
+
+* TOML comments overlapped the rows around them with a font mod installed. The page now measures the game's font, mod fonts included, and sizes its lines from it.
+* The same overlaps with the game's Low Vision Mode option on.
+```
+
+## GitHub release
+
+- Tag: `i-hate-tomls-v1.1.1`
+- Title: `I Hate TOMLs 1.1.1`
+- Asset: `i-hate-tomls.zip`
+
+Body:
+
+```markdown
+**I Hate TOMLs** 1.1.1: layout fix for custom fonts and Low Vision Mode.
+
+### Fixed
+- With a font mod, TOML comments overlapped the rows around them. At load the plugin now reads the font the game uses (a mod's font included) and wraps comments word by word with that font's letter widths, with lines as tall as the font's.
+- Low Vision Mode (larger text) is detected each time the window opens, and the layout follows the text sizes of the game's profiles, including sizes a mod changes.
+```
+
 # I Hate TOMLs 1.1.0: release texts
 
 ## Patch notes

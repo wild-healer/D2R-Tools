@@ -51,7 +51,7 @@
 namespace {
 
 constexpr const char* PluginId      = "i-hate-tomls";
-constexpr const char* PluginVersion = "1.1.0";
+constexpr const char* PluginVersion = "1.1.1";
 constexpr const char* CommandPrefix = "i-hate-tomls/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -99,10 +99,21 @@ constexpr int ListTop = SearchY + BoxHeight + 18;      // the plugin list's firs
 constexpr int TextBoxWidth = ContentRight - TomlControl;   // a value's text box
 constexpr int ItemBoxWidth = TextBoxWidth - 70;            // a list item's, beside its remove button
 constexpr int FieldHeight = 76, ItemHeight = 66;
-constexpr int NoteLine = 34, NoteChars = 50;           // comment text: line height, characters per line (estimates: the game's
-                                                       // small caps font is wide, about 17 px a character)
-constexpr int LabelChar = 20, LabelLine = 50;          // a key's characters (estimate); a key too long for its column goes on
-                                                       // its own line above the box
+// Text metrics, set from the game's font at load (Font::Measure): comment
+// line height and characters per line, a key's width per character and the
+// height of a key stacked on its own line. The defaults fit the game's own
+// font (a wide small caps font, about 17 px a character); a font mod with
+// taller or wider letters raises them, never lowers them.
+int NoteLine = 34, NoteChars = 50;
+int LabelChar = 20, LabelLine = 50;
+// The Latin font's advance of each printable ASCII character, in ems (0 when
+// not measured), and the layout units an em of Small and Medium text spans.
+double Advance[95] {};
+double AdvanceMean {};
+double SmallEm = 30.45, MediumEm = 33.9;
+namespace Font {
+void Refresh();
+}
 constexpr int WheelStep = 120;                         // pixels per wheel notch
 constexpr int DropWidth = ContentRight - ControlLeft, TileHeight = 52; // a choice's drop-down box and its list's lines
 constexpr int ArrowSize = 56;                          // the up/down arrows of a position's X and Y
@@ -1370,16 +1381,62 @@ struct TomlPage {
 
 TomlPage Toml;
 
-int Lines(const std::string& text) {
-	int         lines = 0;
-	std::size_t start = 0;
-	while (start <= text.size()) {
-		const auto        end   = text.find('\n', start);
-		const std::string line  = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-		int               chars = 0;
-		for (const char c : line)
+// A character's advance in ems: printable ASCII from the font, anything else
+// (one count per UTF-8 character) at the font's mean.
+double Ems(std::string_view text) {
+	double sum = 0;
+	for (const char c : text) {
+		const auto u = static_cast<unsigned char>(c);
+		if ((u & 0xC0) == 0x80) continue;
+		sum += u >= 32 && u < 127 ? Advance[u - 32] : AdvanceMean;
+	}
+	return sum;
+}
+
+// Text's width in layout units, Medium (labels, values) or Small.
+int TextWidth(std::string_view text, bool medium = true) {
+	if (AdvanceMean <= 0) {
+		int chars = 0;
+		for (const char c : text)
 			if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) ++chars;
-		lines += std::max(1, (chars + NoteChars - 1) / NoteChars);
+		return chars * LabelChar;
+	}
+	return static_cast<int>(std::ceil(Ems(text) * (medium ? MediumEm : SmallEm)));
+}
+
+// Lines comment text takes in the comment box: word wrapped with the font's
+// own widths when it was measured, else from a count of characters.
+int Lines(const std::string& text) {
+	constexpr int Box   = ContentRight - ContentLeft;
+	int           lines = 0;
+	std::size_t   start = 0;
+	while (start <= text.size()) {
+		const auto        end  = text.find('\n', start);
+		const std::string line = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+		if (AdvanceMean > 0) {
+			const double room  = Box / SmallEm;
+			const double space = Advance[0];
+			double       used  = 0;
+			int          count = 1;
+			std::size_t  at    = 0;
+			while (at < line.size()) {
+				const auto        stop = line.find(' ', at);
+				const std::string word = line.substr(at, stop == std::string::npos ? std::string::npos : stop - at);
+				double            w    = Ems(word);
+				if (used > 0 && used + space + w > room) ++count, used = 0;
+				else if (used > 0) used += space;
+				while (w > room) ++count, w -= room; // a word longer than a line is cut
+				used += w;
+				if (stop == std::string::npos) break;
+				at = stop + 1;
+			}
+			lines += count;
+		} else {
+			int chars = 0;
+			for (const char c : line)
+				if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) ++chars;
+			lines += std::max(1, (chars + NoteChars - 1) / NoteChars);
+		}
 		if (end == std::string::npos) break;
 		start = end + 1;
 	}
@@ -1452,7 +1509,7 @@ void BuildTomlRows() {
 			const auto& f = Toml.fields[static_cast<std::size_t>(field)];
 			// a check box is at the row's end: its key has the room before it
 			const int  room    = f.editor == TomlEdit::Editor::Check ? ContentRight - ContentLeft - 90 : TomlControl - ContentLeft - 16;
-			const bool stacked = static_cast<int>(item.text.size()) * LabelChar > room;
+			const bool stacked = TextWidth(item.text) > room;
 			const std::string note  = GameText(item.comment);
 			const int         notes = note.empty() ? 0 : Lines(note);
 			rows.push_back({ .type = TomlRow::Type::Field, .field = field, .height = FieldHeight + (stacked ? LabelLine : 0) + notes * NoteLine, .text = note, .stacked = stacked, .noteLines = notes });
@@ -2269,7 +2326,7 @@ std::string RowWidgets(const Client& client, const Setting& setting, int row, in
 	const std::string label = setting.label + (setting.restart ? " *" : "");
 	// a position's controls start further left: its label has less room
 	const int labelWidth = (setting.kind == Kind::Position ? PositionLeft : ControlLeft) - ContentLeft - 20;
-	out += Text("Label" + id, ContentLeft, y, labelWidth, RowHeight - 6, label, static_cast<int>(label.size()) * LabelChar > labelWidth ? SmallLabelStyle : LabelStyle, setting.hint);
+	out += Text("Label" + id, ContentLeft, y, labelWidth, RowHeight - 6, label, TextWidth(label) > labelWidth ? SmallLabelStyle : LabelStyle, setting.hint);
 	if (!setting.note.empty()) out += Text("Note" + id, ContentLeft, y + RowHeight - 10, ContentRight - ContentLeft, Lines(setting.note) * NoteLine, setting.note, CommentStyle);
 	switch (setting.kind) {
 	case Kind::Bool: out += Check("Check" + id, ContentRight - 70, y + 14, Unquote(GetValue(client, setting)) == "true", "T" + id); break;
@@ -2279,7 +2336,7 @@ std::string RowWidgets(const Client& client, const Setting& setting, int row, in
 		out += Button("Left" + id, ControlLeft, y + 24, LeftArrow, 0, 1, 3, "L" + id, tip);
 		const std::string value = ShownValue(client, setting);
 		const int         width = ContentRight - ControlLeft - 120;
-		out += Text("Value" + id, ControlLeft + 60, y, width, RowHeight - 6, value, static_cast<int>(value.size()) * LabelChar > width ? SmallValueStyle : ValueStyle, tip);
+		out += Text("Value" + id, ControlLeft + 60, y, width, RowHeight - 6, value, TextWidth(value) > width ? SmallValueStyle : ValueStyle, tip);
 		out += Button("Right" + id, ContentRight - 50, y + 24, RightArrow, 0, 1, 3, "R" + id, tip);
 		break;
 	}
@@ -2291,7 +2348,7 @@ std::string RowWidgets(const Client& client, const Setting& setting, int row, in
 		if (DropReady)
 			out += R"(, {"type": "ButtonWidget", "name": "Drop)" + id + R"(", "fields": {)" + Rect(ControlLeft, boxY, DropWidth, BoxHeight)
 			     + R"(, "filename": "d2rloader\\i-hate-tomls\\dropbox", "normalFrame": 0, "pressedFrame": 1, "disabledFrame": 2, "hoveredFrame": 3, "textString": )" + Json(shown)
-			     + R"(, "textColor": "$FontColorLightGold", "text/style": {"pointSize": ")" + (static_cast<int>(shown.size()) * LabelChar > DropWidth - 110 ? "$SmallFontSize" : "$MediumFontSize")
+			     + R"(, "textColor": "$FontColorLightGold", "text/style": {"pointSize": ")" + (TextWidth(shown) > DropWidth - 110 ? "$SmallFontSize" : "$MediumFontSize")
 			     + R"(", "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "center", "v": "center"}}, "sound": "cursor_button_click_hd", "onClickMessage": )" + Command("D" + id) + "}}";
 		else {
 			out += Button("Left" + id, ControlLeft, y + 24, LeftArrow, 0, 1, 3, "D" + id);
@@ -2475,7 +2532,7 @@ std::string ClientLayout() {
 			const std::string& name = Drop.names[static_cast<std::size_t>(k)];
 			out += R"(, {"type": "ButtonWidget", "name": "DropItem)" + std::to_string(k) + R"(", "fields": {)" + Rect(Drop.x, Drop.y + k * TileHeight, DropWidth, TileHeight)
 			     + R"(, "filename": "d2rloader\\i-hate-tomls\\droptile", "normalFrame": 0, "pressedFrame": 1, "hoveredFrame": 1, "textString": )" + Json(name) + R"(, "textColor": ")"
-			     + (k == Drop.current ? "$FontColorGoldYellow" : "$FontColorWhite") + R"(", "text/style": {"pointSize": ")" + (static_cast<int>(name.size()) * LabelChar > DropWidth - 40 ? "$SmallFontSize" : "$MediumFontSize")
+			     + (k == Drop.current ? "$FontColorGoldYellow" : "$FontColorWhite") + R"(", "text/style": {"pointSize": ")" + (TextWidth(name) > DropWidth - 40 ? "$SmallFontSize" : "$MediumFontSize")
 			     + R"(", "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "center", "v": "center"}}, "sound": "cursor_button_click_hd", "onClickMessage": )"
 			     + Command("P" + std::to_string(OpenDrop) + ":" + std::to_string(k)) + "}}";
 		}
@@ -2523,7 +2580,7 @@ std::string TomlLayout() {
 			if (f.escaped) tip += "\nWrite a line break as \\n.";
 			// a long key on its own line, the value under it
 			const int labelWidth = row.stacked || f.editor == TomlEdit::Editor::Check ? ContentRight - ContentLeft - (row.stacked ? 0 : 90) : TomlControl - ContentLeft - 16;
-			const int fit        = static_cast<int>(f.key.size()) * LabelChar <= labelWidth;
+			const int fit        = TextWidth(f.key) <= labelWidth;
 			out += Text("Label" + id, ContentLeft, y + 10, labelWidth, BoxHeight, f.key, fit ? LabelStyle : SmallLabelStyle, tip);
 			if (row.stacked) y += LabelLine;
 			if (!row.text.empty()) out += Text("KeyNote" + id, ContentLeft, y + 10 + BoxHeight + 4, ContentRight - ContentLeft, row.noteLines * NoteLine, row.text, CommentStyle);
@@ -3405,6 +3462,7 @@ void Toggle() {
 	if (MenuOpen()) CloseMenu();
 	else {
 		SetNotice({});
+		Font::Refresh();
 		Current = View::List;
 		WatchMouse();
 		CloseLeftPanels();
@@ -3421,6 +3479,7 @@ void __cdecl ToggleTask(const D2RL::PluginContext*, void*) noexcept { Toggle(); 
 std::string Pending;
 
 void OpenEntry(int index) {
+	Font::Refresh();
 	const auto list = Entries();
 	if (index < 0 || index >= static_cast<int>(list.size())) return;
 	const auto& e = list[static_cast<std::size_t>(index)];
@@ -3701,11 +3760,179 @@ void FindRefreshButton() {
 	Log(false, "the lobby's refresh button was not found; the reset button is the plugin's own");
 }
 
+// ---- the game's font: its size, read from the font file the game loads ----
+
+namespace Font {
+
+bool   Measured {};
+double LineEms {};
+
+struct Metrics {
+	bool   ok {};
+	double line {};    // line height, in ems
+	double comment {}; // mean advance of comment text, in ems a character
+	double key {};     // mean advance of a TOML key, in ems a character
+	double advance[95] {}; // printable ASCII, in ems
+	int    em {}, ascent {}, descent {}, gap {};
+};
+
+std::uint16_t U16(const std::string& b, std::size_t at) { return at + 2 <= b.size() ? static_cast<std::uint16_t>((static_cast<unsigned char>(b[at]) << 8) | static_cast<unsigned char>(b[at + 1])) : 0; }
+std::uint32_t U32(const std::string& b, std::size_t at) { return (static_cast<std::uint32_t>(U16(b, at)) << 16) | U16(b, at + 2); }
+
+Metrics Read(const std::string& b) {
+	Metrics m;
+	if (b.size() < 12) return m;
+	std::size_t head = 0, hhea = 0, hmtx = 0, cmap = 0;
+	const int   tables = U16(b, 4);
+	for (int k = 0; k < tables; ++k) {
+		const std::size_t at = 12 + static_cast<std::size_t>(k) * 16;
+		if (at + 16 > b.size()) return m;
+		const std::string tag = b.substr(at, 4);
+		const std::size_t off = U32(b, at + 8);
+		if (tag == "head") head = off;
+		else if (tag == "hhea") hhea = off;
+		else if (tag == "hmtx") hmtx = off;
+		else if (tag == "cmap") cmap = off;
+	}
+	if (!head || !hhea || !hmtx || !cmap || hhea + 36 > b.size() || head + 20 > b.size()) return m;
+	m.em      = U16(b, head + 18);
+	m.ascent  = static_cast<std::int16_t>(U16(b, hhea + 4));
+	m.descent = static_cast<std::int16_t>(U16(b, hhea + 6));
+	m.gap     = static_cast<std::int16_t>(U16(b, hhea + 8));
+	const int metrics = U16(b, hhea + 34);
+	if (m.em < 16 || metrics < 1) return m;
+	// the Unicode character map: format 4 (BMP) or 12
+	std::size_t sub = 0;
+	int         format = 0;
+	for (int k = 0, count = U16(b, cmap + 2); k < count; ++k) {
+		const std::size_t at = cmap + 4 + static_cast<std::size_t>(k) * 8;
+		const int platform = U16(b, at), encoding = U16(b, at + 2);
+		const std::size_t off = cmap + U32(b, at + 4);
+		const int         f   = U16(b, off);
+		if ((platform == 3 && (encoding == 1 || encoding == 10)) || platform == 0) {
+			if (f == 12 || (f == 4 && format != 12)) sub = off, format = f;
+		}
+	}
+	if (!sub) return m;
+	const auto glyph = [&](std::uint32_t c) -> int {
+		if (format == 4) {
+			const int segs = U16(b, sub + 6) / 2;
+			const std::size_t ends = sub + 14, starts = ends + segs * 2 + 2, deltas = starts + segs * 2, ranges = deltas + segs * 2;
+			for (int k = 0; k < segs; ++k) {
+				if (c > U16(b, ends + k * 2)) continue;
+				const std::uint32_t start = U16(b, starts + k * 2);
+				if (c < start) return 0;
+				const int delta = U16(b, deltas + k * 2), range = U16(b, ranges + k * 2);
+				if (!range) return (c + delta) & 0xFFFF;
+				const int g = U16(b, ranges + k * 2 + range + (c - start) * 2);
+				return g ? (g + delta) & 0xFFFF : 0;
+			}
+			return 0;
+		}
+		const std::uint32_t groups = U32(b, sub + 12);
+		for (std::uint32_t k = 0; k < groups && sub + 16 + (k + 1) * 12 <= b.size(); ++k) {
+			const std::size_t at = sub + 16 + k * 12;
+			if (c >= U32(b, at) && c <= U32(b, at + 4)) return static_cast<int>(U32(b, at + 8) + (c - U32(b, at)));
+		}
+		return 0;
+	};
+	const auto advance = [&](char c) { const int g = std::min(glyph(static_cast<unsigned char>(c)), metrics - 1); return U16(b, hmtx + static_cast<std::size_t>(g) * 4); };
+	const auto mean    = [&](std::string_view text) {
+        double sum = 0;
+        for (const char c : text) sum += advance(c);
+        return sum / static_cast<double>(text.size()) / m.em;
+	};
+	for (int c = 32; c < 127; ++c) m.advance[c - 32] = static_cast<double>(advance(static_cast<char>(c))) / m.em;
+	m.line    = static_cast<double>(m.ascent - m.descent + m.gap) / m.em;
+	m.comment = mean("Master switch. false disables the Controls action, button, resources and deposit logic. A non-empty list narrows the candidates to these item codes.");
+	m.key     = mean("inventory_button_enabled include_item_codes show_tag position_x max_items");
+	m.ok      = m.line > 0.5 && m.line < 4 && m.comment > 0.1 && m.comment < 2 && m.key > 0.1 && m.key < 2;
+	return m;
+}
+
+// The text sizes of the two PC profiles: HD, and LV, which the game uses
+// when its Low Vision Mode option is on. A mod may change either.
+int ProfileSmall[2] { 22, 28 }, ProfileMedium[2] { 26, 32 };
+
+void ReadSizes() {
+	const char* paths[2] { "data/global/ui/layouts/_profilehd.json", "data/global/ui/layouts/_profilelv.json" };
+	for (int k = 0; k < 2; ++k) {
+		std::string       trouble;
+		const std::string text = ArchiveFile(paths[k], trouble);
+		const auto        size = [&](const char* key, int& out) {
+            const auto at = text.find(std::string("\"") + key + "\"");
+            if (at == std::string::npos) return;
+            const int value = std::atoi(text.c_str() + text.find(':', at) + 1);
+            if (value >= 8 && value <= 120) out = value;
+		};
+		size("SmallFontSize", ProfileSmall[k]);
+		size("MediumFontSize", ProfileMedium[k]);
+		Log(false, "%s: %s, Small %d, Medium %d", paths[k], text.empty() ? trouble.c_str() : "read", ProfileSmall[k], ProfileMedium[k]);
+	}
+}
+
+// The game's Low Vision Mode setting (D2R 3.3.94995): its getter, and the
+// call that reads a setting's value.
+namespace LowVision {
+constexpr std::uint64_t Get = 0xE1920, Value = 0xD2E490;
+constexpr std::uint8_t  GetBytes[] { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x50, 0x65, 0x48, 0x8B, 0x04, 0x25, 0x58 };
+constexpr std::uint8_t  ValueBytes[] { 0x40, 0x53, 0x56, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x80, 0x79, 0x08, 0x00 };
+
+bool On() {
+	const auto base = static_cast<std::uintptr_t>(Context ? Context->exeBase : 0);
+	if (!base || std::memcmp(reinterpret_cast<const void*>(base + Get), GetBytes, sizeof(GetBytes)) != 0
+	    || std::memcmp(reinterpret_cast<const void*>(base + Value), ValueBytes, sizeof(ValueBytes)) != 0)
+		return false;
+	void* setting = reinterpret_cast<void* (*)() noexcept>(base + Get)();
+	return setting && reinterpret_cast<int (*)(void*) noexcept>(base + Value)(setting) != 0;
+}
+} // namespace LowVision
+
+// Sizes text for the profile in use: an em of Small and Medium text in layout
+// units, measured with the HD profile's 22 and 26.
+void Refresh() {
+	static int shown = -1;
+	const int  lv    = LowVision::On() ? 1 : 0;
+	SmallEm          = 30.45 * ProfileSmall[lv] / 22;
+	MediumEm         = 33.9 * ProfileMedium[lv] / 26;
+	if (Measured) {
+		NoteLine  = std::max(34, static_cast<int>(std::ceil(SmallEm * LineEms)) + 1);
+		LabelLine = std::max(50, static_cast<int>(std::ceil(MediumEm * LineEms)) + 8);
+	}
+	if (shown != lv) Log(false, "text: %s profile, comment line %d, key line %d, %.1f and %.1f units an em", lv ? "Low Vision" : "HD", NoteLine, LabelLine, SmallEm, MediumEm), shown = lv;
+}
+
+// Reads the fonts the game draws with (a font mod's, when one is installed)
+// and sizes the comment and key text from the Latin one.
+void Measure() {
+	ReadSizes();
+	for (const char* path : { "data/hd/ui/fonts/ExocetBlizzardOT-Medium.otf", "data/hd/ui/fonts/BlizzardGlobal-V5_81.ttf" }) {
+		std::string       trouble;
+		const std::string file = ArchiveFile(path, trouble);
+		const Metrics     m    = file.empty() ? Metrics {} : Read(file);
+		if (!m.ok) {
+			Log(true, "font %s not measured: %s", path, file.empty() ? trouble.c_str() : "its tables could not be read");
+			continue;
+		}
+		Log(false, "font %s: %zu bytes, %d units an em, ascent %d, descent %d, gap %d: line %.3f em, comment %.3f em, key %.3f em", path, file.size(), m.em, m.ascent, m.descent, m.gap, m.line,
+		    m.comment, m.key);
+		if (std::strstr(path, "Exocet") == nullptr) continue; // the menu's text is drawn in the Latin font
+		std::copy(std::begin(m.advance), std::end(m.advance), Advance);
+		AdvanceMean = m.comment;
+		LineEms     = m.line;
+		Measured    = true;
+	}
+	Refresh();
+}
+
+} // namespace Font
+
 void __cdecl AfterAllLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
 	static bool done = false;
 	if (done) return;
 	done = true;
 	FindRunningPlugins();
+	Font::Measure();
 	Hub::Start();
 	for (int k = 0; k < ArtCount; ++k) {
 		std::string trouble;

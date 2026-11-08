@@ -21,7 +21,8 @@ view moves to the right while it is open, as the game does for its own panels.
     the gear closes the menu and calls the plugin.
   - white, *TOML file*: any other plugin with `config/<id>.toml`. The page shows the file: comments as text,
     `[tables]` as titles, each value in its editor. Characters the game's font lacks (box lines, arrows, curly
-    quotes) are shown as plain ones. Apply writes the changed values only (comments, spacing
+    quotes) are shown as plain ones. Text is laid out with the game's own font measured at load (a font mod's
+    included) and the Low Vision Mode text sizes when that option is on. Apply writes the changed values only (comments, spacing
     and order stay), after copying the file to `<id>.toml.bak`; plugins read it at the next start.
   - no gem and no gear: no config file.
 
