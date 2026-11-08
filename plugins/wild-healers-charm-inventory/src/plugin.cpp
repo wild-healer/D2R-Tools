@@ -37,7 +37,7 @@ namespace Comm   = D2RL::PluginCommunication;
 namespace Events = D2RL::SharedEvents;
 
 constexpr const char* PluginId      = "wild-healers-charm-inventory";
-constexpr const char* PluginVersion = "1.1.1-dev-1";
+constexpr const char* PluginVersion = "1.1.2";
 constexpr const char* CommandPrefix = "wild-healers-charm-inventory/Cmd-";
 
 const D2RL::PluginInfo Info {
