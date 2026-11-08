@@ -37,7 +37,7 @@ namespace Comm   = D2RL::PluginCommunication;
 namespace Events = D2RL::SharedEvents;
 
 constexpr const char* PluginId      = "wild-healers-charm-inventory";
-constexpr const char* PluginVersion = "1.1.1";
+constexpr const char* PluginVersion = "1.1.1-dev-1";
 constexpr const char* CommandPrefix = "wild-healers-charm-inventory/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -65,6 +65,7 @@ constexpr int                           Cell = 98;
 constexpr int                           MaxColumns = 10, MaxRows = 12;
 int                                     Columns = 10, Rows = 4;
 std::atomic<bool>                       Enabled { true };
+std::atomic<bool>                       InventoryCharms { false }; // charms in the normal inventory give their bonuses
 const D2RL::ThreadService*              Threads {};
 const D2RL::WidgetService*              WidgetApi {};
 
@@ -354,7 +355,7 @@ bool IsLocalPlayer(void* unit) noexcept {
 
 std::int32_t HookCharm(void* item, void* unit) noexcept {
 	const auto* data = item ? *reinterpret_cast<std::uint8_t* const*>(static_cast<const std::uint8_t*>(item) + UnitData) : nullptr;
-	if (data && data[DataPage] != CustomPage && Enabled.load(std::memory_order_relaxed) && IsLocalPlayer(unit)) return 0;
+	if (data && data[DataPage] != CustomPage && Enabled.load(std::memory_order_relaxed) && !InventoryCharms.load(std::memory_order_relaxed) && IsLocalPlayer(unit)) return 0;
 	return NextCharm(item, unit);
 }
 
@@ -393,7 +394,7 @@ CharmFn        SlotCharm {};
 
 std::int32_t HookCharmAfterThunk(void* item, void* unit) noexcept {
 	const auto* data = item ? *reinterpret_cast<std::uint8_t* const*>(static_cast<const std::uint8_t*>(item) + UnitData) : nullptr;
-	if (data && data[DataPage] != CustomPage && Enabled.load(std::memory_order_relaxed) && IsLocalPlayer(unit)) return 0;
+	if (data && data[DataPage] != CustomPage && Enabled.load(std::memory_order_relaxed) && !InventoryCharms.load(std::memory_order_relaxed) && IsLocalPlayer(unit)) return 0;
 	if (data && data[DataPage] == CustomPage && SlotCharm && !SlotCharm(item, unit)) return 0;
 	return NextCharm(item, unit);
 }
@@ -878,6 +879,11 @@ bool Apply(const std::string& key, const std::string& value, bool live, std::str
 		if (!live) return Enabled.store(value == "true"), true;
 		return SetEnabled(value == "true", error);
 	}
+	if (key == "inventory_charms") {
+		if (value != "true" && value != "false") return error = "true or false", false;
+		InventoryCharms.store(value == "true");
+		return true;
+	}
 	if (key == "columns" || key == "rows") {
 		int number = 0;
 		if (!ParseInt(value, 1, key == "columns" ? MaxColumns : MaxRows, number, error)) return false;
@@ -890,6 +896,7 @@ bool Apply(const std::string& key, const std::string& value, bool live, std::str
 
 std::string ValueOf(const std::string& key) {
 	if (key == "enabled") return Enabled.load() ? "true" : "false";
+	if (key == "inventory_charms") return InventoryCharms.load() ? "true" : "false";
 	if (key == "columns") return std::to_string(Columns);
 	if (key == "rows") return std::to_string(Rows);
 	return {};
@@ -907,6 +914,9 @@ std::string Render() {
 # false: no button or panel, and charms in the normal inventory give their
 # bonuses again. Charms left in the charm inventory stay there, without bonuses.
 enabled = )" + ValueOf("enabled") + R"(
+
+# true: charms in the normal inventory give their bonuses too.
+inventory_charms = )" + ValueOf("inventory_charms") + R"(
 
 # Size of the charm inventory in cells. columns 1 to 10, rows 1 to 12.
 # Take the charms out of the cells you remove before making it smaller.
@@ -954,6 +964,11 @@ key = "enabled"
 type = "bool"
 label = "Charm inventory"
 note = "Off: no button or panel, and charms in the normal inventory give their bonuses again. Charms left in the charm inventory stay there, without bonuses."
+[[setting]]
+key = "inventory_charms"
+type = "bool"
+label = "Inventory charms give bonuses"
+note = "Charms in the normal inventory give their bonuses too."
 [[setting]]
 key = "columns"
 type = "int"
