@@ -57,7 +57,7 @@ namespace Tables = D2RL::DataTables;
 namespace Events = D2RL::SharedEvents;
 
 constexpr const char* PluginId      = "perfect-frame";
-constexpr const char* PluginVersion = "1.0.2-dev-2";
+constexpr const char* PluginVersion = "1.0.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
