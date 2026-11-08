@@ -1,0 +1,90 @@
+# Terror Zone Selector
+#
+# Choose which terror zones are active. Nothing chosen: the game's own terror
+# zone. Works in single player and in games you host. Every setting can also be
+# changed in game with I Hate TOMLs, and applies at once.
+
+[terror-zone-selector]
+enabled = true
+
+# "together": every chosen zone is a terror zone at the same time.
+# "rotate": one chosen zone at a time, changing every 30 minutes like the game's own.
+mode = "together"
+
+# Act 1
+# Burial Grounds, Crypt, Mausoleum
+a1_burial_grounds = false
+# Cathedral, Catacombs 1, Catacombs 2, Catacombs 3, Catacombs 4, Inner Cloister
+a1_cathedral_and_catacombs = false
+# Cold Plains, Cave 1, Cave 2
+a1_cold_plains_and_cave = false
+# Dark Wood, Underground Passage 1, Underground Passage 2
+a1_dark_wood = false
+# Blood Moor, Den of Evil
+a1_blood_moor_and_den_of_evil = false
+# Barracks, Jail 1, Jail 2, Jail 3
+a1_barracks_and_jail = false
+# Secret Cow Level
+a1_secret_cow_level = false
+# Stony Field, Tristram
+a1_stony_field_and_tristram = false
+# Black Marsh, Hole 1, Hole 2, Forgotten Tower, Tower Cellar 1, Tower Cellar 2, Tower Cellar 3, Tower Cellar 4, Tower Cellar 5
+a1_black_marsh_and_tower = false
+# Tamoe Highland, Outer Cloister, Pit 1, Pit 2, Monastery Gate
+a1_tamoe_highland_and_pit = false
+
+# Act 2
+# Sewers 1, Sewers 2, Sewers 3
+a2_lut_gholein_sewers = false
+# Rocky Waste, Stony Tomb 1, Stony Tomb 2
+a2_rocky_waste = false
+# Dry Hills, Halls of the Dead 1, Halls of the Dead 2, Halls of the Dead 3
+a2_dry_hills = false
+# Far Oasis, Maggot Lair 1, Maggot Lair 2, Maggot Lair 3
+a2_far_oasis = false
+# Lost City, Valley of Snakes, Claw Viper Temple 1, Claw Viper Temple 2, Ancient Tunnels
+a2_lost_city = false
+# Tal Rasha's Tomb, Duriel's Lair, Canyon of the Magi
+a2_tal_rashas_tombs = false
+# Arcane Sanctuary, Harem 1, Harem 2, Palace Cellar 1, Palace Cellar 2, Palace Cellar 3
+a2_arcane_sanctuary = false
+
+# Act 3
+# Spider Forest, Spider Cave, Spider Cavern
+a3_spider_forest = false
+# Great Marsh
+a3_great_marsh = false
+# Flayer Jungle, Flayer Dungeon 1, Flayer Dungeon 2, Flayer Dungeon 3, Swampy Pit 1, Swampy Pit 2, Swampy Pit 3
+a3_flayer_jungle = false
+# Kurast Bazaar, Lower Kurast, Upper Kurast, Kurast Causeway, Sewers 1, Sewers 2, Ruined Temple, Disused Fane, Forgotten Reliquary, Forgotten Temple, Ruined Fane, Disused Reliquary
+a3_kurast = false
+# Travincal
+a3_travincal = false
+# Durance of Hate 1, Durance of Hate 2, Durance of Hate 3
+a3_durance_of_hate = false
+
+# Act 4
+# Outer Steppes, Plains of Despair
+a4_outer_steppes = false
+# City of the Damned, River of Flame
+a4_river_of_flame = false
+# Chaos Sanctuary
+a4_chaos_sanctuary = false
+
+# Act 5
+# Bloody Foothills, Rigid Highlands, Abaddon
+a5_bloody_foothills = false
+# Arreat Plateau, Pit of Acheron
+a5_arreat_plateau = false
+# Crystalline Passage, Frozen River
+a5_crystalline_passage = false
+# Nihlathak's Temple, Halls of Anguish, Halls of Death's Calling, Halls of Vaught
+a5_nihlathaks_temple = false
+# Glacial Trail, Drifter Cavern
+a5_glacial_trail = false
+# Ancients' Way, Icy Cellar
+a5_ancients_way = false
+# Frozen Tundra, Infernal Pit
+a5_frozen_tundra = false
+# The Worldstone Keep 1, The Worldstone Keep 2, The Worldstone Keep 3, Throne of Destruction, The Worldstone Chamber
+a5_worldstone_keep = false
