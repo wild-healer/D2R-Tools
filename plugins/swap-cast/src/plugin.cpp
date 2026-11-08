@@ -75,7 +75,7 @@
 namespace {
 
 constexpr const char* PluginId      = "swap-cast";
-constexpr const char* PluginVersion = "1.1.2";
+constexpr const char* PluginVersion = "1.1.2-dev-1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -938,6 +938,10 @@ std::array<std::uint32_t, 4> Follow(void* player, const std::array<std::uint32_t
 
 void __cdecl ServerTick(const D2RL::PluginContext*, void*) noexcept;
 
+// The game of the last client packet or loaded character. Cleared when your
+// character leaves the game: the game is freed then, and nothing may read it.
+std::atomic<void*> LastGame {};
+
 void QueueTick() noexcept {
 	if (Threads && !TickQueued.exchange(true) && Threads->runOnGameThread(Context, ServerTick, nullptr) != D2RL::Threads::Result::Success) {
 		TickQueued.store(false);
@@ -949,6 +953,11 @@ void QueueTick() noexcept {
 // skill has been in use for restore_delay_ms.
 void __cdecl ServerTick(const D2RL::PluginContext*, void*) noexcept {
 	TickQueued.store(false);
+	if (Server.player && !LastGame.load(std::memory_order_relaxed)) { // the game ended: its units are gone
+		Server = ServerState {};
+		Displaced.store(false, std::memory_order_relaxed);
+		return;
+	}
 	if (!Server.away || !Server.player) return;
 	void* const player = Server.player;
 	if (IsDead(player)) {
@@ -1129,7 +1138,6 @@ std::uint64_t HookLeaveSave(void* game, void* player) noexcept {
 	return LeaveSave(game, player);
 }
 
-std::atomic<void*> LastGame {}; // the game of the last client packet or loaded character
 
 std::uint64_t HookLoadPlayer(void* game, void* client, void* name, void** out) noexcept {
 	const std::uint64_t result = LoadPlayer(game, client, name, out);
@@ -1406,7 +1414,14 @@ void __cdecl UiTick(const D2RL::PluginContext*, void*) noexcept {
 	ClientPlayer.store(player, std::memory_order_relaxed);
 	std::uint32_t id     = NoId;
 	if (!player || !ReadField(player, UnitIdOffset, id)) {
-		if (PlayerId.exchange(NoId) != NoId) HudButtons.clear();
+		if (PlayerId.exchange(NoId) != NoId) {
+			HudButtons.clear();
+			// You left the game and it is being freed. Without this the next
+			// game's first seconds looked your character up in the old one
+			// (crash on game load) whenever the load hook 0x41DF40 was taken
+			// by another plugin (Multi Mercenary hooks it).
+			LastGame.store(nullptr, std::memory_order_relaxed);
+		}
 		return;
 	}
 	if (id != PlayerId.load()) {

@@ -13,11 +13,11 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Swap Cast D2RLoader plugin"
-      VALUE "FileVersion", "1.1.2"
+      VALUE "FileVersion", "1.1.2-dev-1"
       VALUE "InternalName", "swap-cast"
       VALUE "OriginalFilename", "d2rl-swap-cast.dll"
       VALUE "ProductName", "Swap Cast"
-      VALUE "ProductVersion", "1.1.2"
+      VALUE "ProductVersion", "1.1.2-dev-1"
     END
   END
   BLOCK "VarFileInfo"
