@@ -1,0 +1,656 @@
+{
+  "name": "Merc Names",
+  "description": "Choose one name per act's mercenary: every mercenary of that act you hire, and the one you already have, shows that name.",
+  "author": "wild-healer",
+  "version": "0.0.1",
+  "config": [
+    {
+      "id": "act1",
+      "type": "select",
+      "name": "Act 1 Rogue",
+      "description": "Name every Rogue mercenary gets. Random keeps the game's 41 names.",
+      "defaultValue": "",
+      "options": [
+        {
+          "label": "Random (vanilla)",
+          "value": ""
+        },
+        {
+          "label": "Abhaya",
+          "value": "merc04"
+        },
+        {
+          "label": "Aliza",
+          "value": "merc01"
+        },
+        {
+          "label": "Amplisa",
+          "value": "merc02"
+        },
+        {
+          "label": "Annor",
+          "value": "merc03"
+        },
+        {
+          "label": "Basanti",
+          "value": "merc07"
+        },
+        {
+          "label": "Blaise",
+          "value": "merc08"
+        },
+        {
+          "label": "Debi",
+          "value": "merc39"
+        },
+        {
+          "label": "Diane",
+          "value": "merc22"
+        },
+        {
+          "label": "Divo",
+          "value": "merc24"
+        },
+        {
+          "label": "Elexa",
+          "value": "merc14"
+        },
+        {
+          "label": "Elly",
+          "value": "merc05"
+        },
+        {
+          "label": "Fiona",
+          "value": "merc16"
+        },
+        {
+          "label": "Floria",
+          "value": "merc15"
+        },
+        {
+          "label": "Gaile",
+          "value": "merc18"
+        },
+        {
+          "label": "Gwinni",
+          "value": "merc17"
+        },
+        {
+          "label": "Hannah",
+          "value": "merc19"
+        },
+        {
+          "label": "Heather",
+          "value": "merc20"
+        },
+        {
+          "label": "Iantha",
+          "value": "merc21"
+        },
+        {
+          "label": "Isolde",
+          "value": "merc23"
+        },
+        {
+          "label": "Ithera",
+          "value": "merc25"
+        },
+        {
+          "label": "Itonya",
+          "value": "merc26"
+        },
+        {
+          "label": "Klaudia",
+          "value": "merc10"
+        },
+        {
+          "label": "Kundri",
+          "value": "merc11"
+        },
+        {
+          "label": "Kyle",
+          "value": "merc12"
+        },
+        {
+          "label": "Kyoko",
+          "value": "merc09"
+        },
+        {
+          "label": "Liaza",
+          "value": "merc30"
+        },
+        {
+          "label": "Liene",
+          "value": "merc27"
+        },
+        {
+          "label": "Maeko",
+          "value": "merc28"
+        },
+        {
+          "label": "Mahala",
+          "value": "merc29"
+        },
+        {
+          "label": "Meghan",
+          "value": "merc31"
+        },
+        {
+          "label": "Olena",
+          "value": "merc32"
+        },
+        {
+          "label": "Oriana",
+          "value": "merc33"
+        },
+        {
+          "label": "Paige",
+          "value": "merc06"
+        },
+        {
+          "label": "Raissa",
+          "value": "merc36"
+        },
+        {
+          "label": "Rozene",
+          "value": "merc35"
+        },
+        {
+          "label": "Ryann",
+          "value": "merc34"
+        },
+        {
+          "label": "Sharyn",
+          "value": "merc37"
+        },
+        {
+          "label": "Shikha",
+          "value": "merc38"
+        },
+        {
+          "label": "Tylena",
+          "value": "merc40"
+        },
+        {
+          "label": "Visala",
+          "value": "merc13"
+        },
+        {
+          "label": "Wendy",
+          "value": "merc41"
+        }
+      ]
+    },
+    {
+      "id": "act2",
+      "type": "select",
+      "name": "Act 2 Desert Mercenary",
+      "description": "Name every Desert Mercenary mercenary gets. Random keeps the game's 21 names.",
+      "defaultValue": "",
+      "options": [
+        {
+          "label": "Random (vanilla)",
+          "value": ""
+        },
+        {
+          "label": "Ahsab",
+          "value": "merca204"
+        },
+        {
+          "label": "Alhizeer",
+          "value": "merca202"
+        },
+        {
+          "label": "Azrael",
+          "value": "merca203"
+        },
+        {
+          "label": "Chalan",
+          "value": "merca205"
+        },
+        {
+          "label": "Durga",
+          "value": "merca216"
+        },
+        {
+          "label": "Emilio",
+          "value": "merca208"
+        },
+        {
+          "label": "Fazel",
+          "value": "merca210"
+        },
+        {
+          "label": "Gulzar",
+          "value": "merca213"
+        },
+        {
+          "label": "Haseen",
+          "value": "merca206"
+        },
+        {
+          "label": "Hazade",
+          "value": "merca201"
+        },
+        {
+          "label": "Ilzan",
+          "value": "merca218"
+        },
+        {
+          "label": "Jemali",
+          "value": "merca211"
+        },
+        {
+          "label": "Kasim",
+          "value": "merca212"
+        },
+        {
+          "label": "Leharas",
+          "value": "merca215"
+        },
+        {
+          "label": "Mizan",
+          "value": "merca214"
+        },
+        {
+          "label": "Neeraj",
+          "value": "merca217"
+        },
+        {
+          "label": "Pratham",
+          "value": "merca209"
+        },
+        {
+          "label": "Razan",
+          "value": "merca207"
+        },
+        {
+          "label": "Vikhyat",
+          "value": "merca221"
+        },
+        {
+          "label": "Waheed",
+          "value": "merca220"
+        },
+        {
+          "label": "Zanarhi",
+          "value": "merca219"
+        }
+      ]
+    },
+    {
+      "id": "act3",
+      "type": "select",
+      "name": "Act 3 Iron Wolf",
+      "description": "Name every Iron Wolf mercenary gets. Random keeps the game's 20 names.",
+      "defaultValue": "",
+      "options": [
+        {
+          "label": "Random (vanilla)",
+          "value": ""
+        },
+        {
+          "label": "Ajheed",
+          "value": "merca228"
+        },
+        {
+          "label": "Barani",
+          "value": "merca223"
+        },
+        {
+          "label": "Devak",
+          "value": "merca225"
+        },
+        {
+          "label": "Flux",
+          "value": "merca240"
+        },
+        {
+          "label": "Geshef",
+          "value": "merca232"
+        },
+        {
+          "label": "Haphet",
+          "value": "merca234"
+        },
+        {
+          "label": "Jabari",
+          "value": "merca224"
+        },
+        {
+          "label": "Jarulf",
+          "value": "merca239"
+        },
+        {
+          "label": "Jelani",
+          "value": "merca222"
+        },
+        {
+          "label": "Khaleel",
+          "value": "merca230"
+        },
+        {
+          "label": "Narphet",
+          "value": "merca229"
+        },
+        {
+          "label": "Phaet",
+          "value": "merca231"
+        },
+        {
+          "label": "Raldin",
+          "value": "merca226"
+        },
+        {
+          "label": "Rhadge",
+          "value": "merca237"
+        },
+        {
+          "label": "Scorch",
+          "value": "merca241"
+        },
+        {
+          "label": "Telash",
+          "value": "merca227"
+        },
+        {
+          "label": "Thadar",
+          "value": "merca235"
+        },
+        {
+          "label": "Vanji",
+          "value": "merca233"
+        },
+        {
+          "label": "Yashied",
+          "value": "merca238"
+        },
+        {
+          "label": "Yatiraj",
+          "value": "merca236"
+        }
+      ]
+    },
+    {
+      "id": "act5",
+      "type": "select",
+      "name": "Act 5 Barbarian",
+      "description": "Name every Barbarian mercenary gets. Random keeps the game's 67 names.",
+      "defaultValue": "",
+      "options": [
+        {
+          "label": "Random (vanilla)",
+          "value": ""
+        },
+        {
+          "label": "Alaric",
+          "value": "MercX151"
+        },
+        {
+          "label": "Alban",
+          "value": "MercX164"
+        },
+        {
+          "label": "Alcuin",
+          "value": "MercX156"
+        },
+        {
+          "label": "Barloc",
+          "value": "MercX165"
+        },
+        {
+          "label": "Bill",
+          "value": "MercX166"
+        },
+        {
+          "label": "Bohdan",
+          "value": "MercX114"
+        },
+        {
+          "label": "Bors",
+          "value": "MercX104"
+        },
+        {
+          "label": "Brom",
+          "value": "MercX105"
+        },
+        {
+          "label": "Bulwye",
+          "value": "MercX138"
+        },
+        {
+          "label": "Caden",
+          "value": "MercX153"
+        },
+        {
+          "label": "Damien",
+          "value": "MercX134"
+        },
+        {
+          "label": "Drus",
+          "value": "MercX142"
+        },
+        {
+          "label": "Eadgils",
+          "value": "MercX132"
+        },
+        {
+          "label": "Egtheow",
+          "value": "MercX113"
+        },
+        {
+          "label": "Elgifu",
+          "value": "MercX154"
+        },
+        {
+          "label": "Emund",
+          "value": "MercX157"
+        },
+        {
+          "label": "Ethelred",
+          "value": "MercX152"
+        },
+        {
+          "label": "Folcwald",
+          "value": "MercX124"
+        },
+        {
+          "label": "Frisian",
+          "value": "MercX125"
+        },
+        {
+          "label": "Garmund",
+          "value": "MercX130"
+        },
+        {
+          "label": "Gorm",
+          "value": "MercX159"
+        },
+        {
+          "label": "Guthlaf",
+          "value": "MercX127"
+        },
+        {
+          "label": "Halgaunt",
+          "value": "MercX111"
+        },
+        {
+          "label": "Healfdane",
+          "value": "MercX109"
+        },
+        {
+          "label": "Heatholaf",
+          "value": "MercX117"
+        },
+        {
+          "label": "Hengest",
+          "value": "MercX123"
+        },
+        {
+          "label": "Heorogar",
+          "value": "MercX110"
+        },
+        {
+          "label": "Heremod",
+          "value": "MercX122"
+        },
+        {
+          "label": "Hild",
+          "value": "MercX116"
+        },
+        {
+          "label": "Hnaef",
+          "value": "MercX126"
+        },
+        {
+          "label": "Hoku",
+          "value": "MercX143"
+        },
+        {
+          "label": "Hollis",
+          "value": "MercX160"
+        },
+        {
+          "label": "Hrothgar",
+          "value": "MercX107"
+        },
+        {
+          "label": "Hygelac",
+          "value": "MercX112"
+        },
+        {
+          "label": "Ip",
+          "value": "MercX146"
+        },
+        {
+          "label": "Kaelim",
+          "value": "MercX149"
+        },
+        {
+          "label": "Khan",
+          "value": "MercX102"
+        },
+        {
+          "label": "Klar",
+          "value": "MercX136"
+        },
+        {
+          "label": "Klatu",
+          "value": "MercX141"
+        },
+        {
+          "label": "Klisk",
+          "value": "MercX103"
+        },
+        {
+          "label": "Kord",
+          "value": "MercX144"
+        },
+        {
+          "label": "Lanth",
+          "value": "MercX131"
+        },
+        {
+          "label": "Lief",
+          "value": "MercX139"
+        },
+        {
+          "label": "Magnus",
+          "value": "MercX140"
+        },
+        {
+          "label": "Onela",
+          "value": "MercX133"
+        },
+        {
+          "label": "Oslaf",
+          "value": "MercX128"
+        },
+        {
+          "label": "Ragnar",
+          "value": "MercX161"
+        },
+        {
+          "label": "Scyld",
+          "value": "MercX108"
+        },
+        {
+          "label": "Sigemund",
+          "value": "MercX121"
+        },
+        {
+          "label": "Sigurd",
+          "value": "MercX158"
+        },
+        {
+          "label": "Tharr",
+          "value": "MercX148"
+        },
+        {
+          "label": "Theodoric",
+          "value": "MercX167"
+        },
+        {
+          "label": "Torkel",
+          "value": "MercX162"
+        },
+        {
+          "label": "Tostig",
+          "value": "MercX155"
+        },
+        {
+          "label": "Tryneus",
+          "value": "MercX135"
+        },
+        {
+          "label": "Ulf",
+          "value": "MercX147"
+        },
+        {
+          "label": "Ulric",
+          "value": "MercX150"
+        },
+        {
+          "label": "Unferth",
+          "value": "MercX120"
+        },
+        {
+          "label": "Uther",
+          "value": "MercX145"
+        },
+        {
+          "label": "Varaya",
+          "value": "MercX101"
+        },
+        {
+          "label": "Vikhyat",
+          "value": "MercX119"
+        },
+        {
+          "label": "Weder",
+          "value": "MercX118"
+        },
+        {
+          "label": "Wiglaf",
+          "value": "MercX106"
+        },
+        {
+          "label": "Wulf",
+          "value": "MercX137"
+        },
+        {
+          "label": "Wulfgar",
+          "value": "MercX115"
+        },
+        {
+          "label": "Wulfstan",
+          "value": "MercX163"
+        },
+        {
+          "label": "Yrmenlaf",
+          "value": "MercX129"
+        }
+      ]
+    }
+  ]
+}
