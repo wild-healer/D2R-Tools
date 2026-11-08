@@ -8,7 +8,7 @@ D2RLoader plugin that puts your holy grail inside the game: every unique, set it
 - **Custom objectives**: write your own goals on the settings page, each with an icon, and tick them off in the Objectives menu. They have their own stats page and count in the overview.
 - **Search**: the search bar under the window finds items by name and dims the rest; Enter or the arrows go to the next match.
 - **Middle click**: middle click a grail item anywhere to show its tile, even with the grail closed.
-- **Runeword bases**: a plain or superior base with the right socket count can wait in an empty runeword tile it can be made into.
+- **Runeword bases**: a plain or superior base with the right socket count can wait in an empty runeword tile it can be made into: drop it on that tile.
 - **Stats**: an overview and one page per kind (uniques, ethereal uniques, set items, runewords, misc, objectives) show what you have found, stored and have perfect, with ring charts and per category bars.
 - **Perfect copies**: a stored copy whose variable rolls are all the best gets a gold frame around its tile. Items with nothing that rolls count as perfect.
 - **Compare**: while the grail is open, hovering a grail item anywhere shows its stored copy as the game's comparison tooltip, always or only with Shift.
