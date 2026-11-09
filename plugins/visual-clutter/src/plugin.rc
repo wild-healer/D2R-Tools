@@ -13,11 +13,11 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Visual Clutter D2RLoader plugin"
-      VALUE "FileVersion", "1.0.2"
+      VALUE "FileVersion", "1.0.2-dev-1"
       VALUE "InternalName", "visual-clutter"
       VALUE "OriginalFilename", "d2rl-visual-clutter.dll"
       VALUE "ProductName", "Visual Clutter"
-      VALUE "ProductVersion", "1.0.2"
+      VALUE "ProductVersion", "1.0.2-dev-1"
     END
   END
   BLOCK "VarFileInfo"
