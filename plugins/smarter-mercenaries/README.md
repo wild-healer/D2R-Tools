@@ -12,7 +12,9 @@ dice roll.
 - Ranged mercenaries stay in formation and shoot from there; a place up to 3
   off their spot is good enough. When you get within `danger_range` (10) of
   enemies they position themselves: the place closest to you that keeps 5
-  from every monster, then shoot again (hit and run).
+  from every monster, then shoot again (hit and run). They only shoot at monsters they have a
+  clear line to from where they stand; when every target is behind a wall they
+  step next to you instead of looking for a shot.
 - Mercenaries run whenever you run or when more than 3 off their spot.
 - Targets: what you're attacking first, then monsters attacking you, then
   monsters attacking the mercenary, then the closest, never farther than

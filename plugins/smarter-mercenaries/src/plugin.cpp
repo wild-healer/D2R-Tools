@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.7";
+constexpr const char* PluginVersion = "0.0.8";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -114,6 +114,7 @@ constexpr Code PetInfoCode      { 0x4FF2D0, { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x55
 constexpr Code WalkToCode       { 0x4A8880, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57 }, 0 };
 constexpr Code PetMoveCode      { 0x5C1460, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x48, 0x89, 0x7C, 0x24, 0x18, 0x55 }, 0 };
 constexpr Code VelocityCode     { 0x4A7270, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57 }, 0 };
+constexpr Code BlockedCode      { 0x3502A0, { 0x40, 0x53, 0x57, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x50, 0x45, 0x8B, 0xE8, 0x48, 0x8B, 0xFA, 0x48 }, 0 };
 constexpr Code MoveCode         { 0x4A8A10, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57 }, 0 };
 constexpr Code GetPathCode      { 0x34AE80, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C }, 0 };
 constexpr Code SetStepsCode     { 0x342890, { 0x48, 0x85, 0xC9, 0x74, 0x13, 0xFE, 0xCA, 0x33, 0xC0, 0x0F, 0xB6, 0xD2, 0x80, 0xFA, 0x12, 0x0F }, 0 };
@@ -171,6 +172,7 @@ using WalkToFn       = int (*)(void* game, void* unit, int x, int y) noexcept;
 using PetMoveFn      = int (*)(void* game, void* owner, void* unit, int motion, int run, int speed, std::uint8_t steps) noexcept;
 using MoveFn         = int (*)(void* game, void* unit, void* target, int mode, int x, int y, std::uint8_t flag, std::uint16_t extra) noexcept;
 using GetPathFn      = void* (*)(void* unit) noexcept;
+using BlockedFn      = int (*)(void* a, void* b, int mask) noexcept; // nonzero: a wall between them
 using VelocityFn     = void (*)(void* unit, int mode, int speed, std::uint8_t percent) noexcept;
 using SetStepsFn     = void (*)(void* path, std::uint8_t steps) noexcept;
 using UnitRoomFn     = void* (*)(void* unit) noexcept;
@@ -207,6 +209,7 @@ WalkToFn       WalkTo {};
 PetMoveFn      PetMove {};
 MoveFn         Move {};
 GetPathFn      GetPath {};
+BlockedFn      Blocked {};
 VelocityFn     Velocity {};
 SetStepsFn     SetSteps {};
 UnitRoomFn     UnitRoom {};
@@ -398,7 +401,11 @@ void Note(void* merc, Role role, void* target, int skill, const char* why) noexc
 		Log(false, "%s %u: %s", RoleName(role), id, why);
 }
 
+// Set by ChooseTarget: a ranged mercenary saw targets, but only behind walls.
+bool OnlyBlocked = false;
+
 void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
+	OnlyBlocked = false;
 	Scan scan;
 	Gather(game, merc, scan);
 	if (!scan.count) return nullptr;
@@ -416,6 +423,13 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 		void* const itsTarget   = SkillTarget(game, unit);
 		const bool  selfDefense = itsTarget == merc && fromMerc <= 6;
 		if ((fromOwner > leash || (melee && fromMerc > engage)) && !selfDefense) continue;
+		// Ranged: only targets it can shoot from where it stands (missile line,
+		// as the game's own ranged target choice checks), so it never runs
+		// around looking for a shot.
+		if (!melee && Blocked(unit, merc, 4)) {
+			OnlyBlocked = true;
+			continue;
+		}
 		// Barbarians intercept: the monster closest to you counts most, so they
 		// meet threats before they reach you. Everyone else: closest to itself.
 		const bool tank = role == Role::BashBarb || role == Role::FrenzyBarb;
@@ -426,6 +440,7 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 		if (ImmuneToAll(unit, elements)) score += role == Role::IronWolf ? 200 : 30;
 		if (score < bestScore) bestScore = score, best = unit;
 	}
+	if (best) OnlyBlocked = false;
 	return best;
 }
 
@@ -791,6 +806,17 @@ bool Reposition(void* game, void* merc, void* owner, const Scan& scan, Role role
 	return true;
 }
 
+// Every target is behind a wall from where it stands: step right next to
+// you, where you can see what you fight, rather than look for a shot.
+bool StepToOwner(void* game, void* merc, void* owner, Role role) noexcept {
+	int ox = 0, oy = 0, mx = 0, my = 0;
+	if (!Position(owner, ox, oy) || !Position(merc, mx, my) || Cheb(mx, my, ox, oy) <= 2) return false;
+	DeleteEvent(game, merc, 2, 0);
+	if (!Go(game, merc, nullptr, ox + (mx > ox ? 1 : mx < ox ? -1 : 0), oy + (my > oy ? 1 : my < oy ? -1 : 0), true)) return false;
+	Note(merc, role, nullptr, -7, "no clear shot, steps next to you");
+	return true;
+}
+
 void Attack(void* game, void* merc, void* owner, void* target, Role role, const Scan& scan, void* tick, const std::uint16_t* params) noexcept {
 	if (!AttackRoll(merc, tick, IsMelee(role))) return Idle(game, merc, 5);
 	switch (role) {
@@ -832,7 +858,8 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	Params(tick, params);
 	Scan scan;
 	Gather(game, merc, scan);
-	void* const target = ChooseTarget(game, merc, owner, role);
+	void* const target  = ChooseTarget(game, merc, owner, role);
+	const bool  blocked = OnlyBlocked;
 	if (melee) {
 		if (target) {
 			mercState.moving = false;
@@ -867,6 +894,7 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 		}
 		if (role == Role::IronWolf && Buff(game, merc, role)) return;
 		if (target) return Attack(game, merc, owner, target, role, scan, tick, params);
+		if (blocked && StepToOwner(game, merc, owner, role)) return;
 		if (KeepFormation(game, merc, owner, mercState, sx, sy, walking)) return;
 		return Idle(game, merc, 3);
 	}
@@ -875,6 +903,7 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	if (walking) return;
 	if (role == Role::IronWolf && Buff(game, merc, role)) return;
 	if (target) return Attack(game, merc, owner, target, role, scan, tick, params);
+	if (blocked && StepToOwner(game, merc, owner, role)) return;
 	Idle(game, merc, 3);
 }
 
@@ -943,7 +972,7 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 // ---- version check ----
 
 bool Locate() noexcept {
-	const std::array<const Code*, 32> checks { &VelocityCode, &WalkToCode, &PetMoveCode, &MoveCode, &GetPathCode, &SetStepsCode, &UnitRoomCode, &InTownCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
+	const std::array<const Code*, 33> checks { &BlockedCode, &VelocityCode, &WalkToCode, &PetMoveCode, &MoveCode, &GetPathCode, &SetStepsCode, &UnitRoomCode, &InTownCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
 		                                       &EscapeCode, &WalkToOwnerCode, &DeleteEventCode, &DistanceCode, &InMeleeCode, &GetStatCode,
 		                                       &CheckStateCode, &GetSkillCode, &SkillLevelCode, &SkillsTxtCode, &MonStatsCode, &AllyForBuffCode,
 		                                       &FindTargetCode, &CanTargetCode, &OwnerCode, &UnitTypeCode, &PetInfoCode, &SkillTargetCode };
@@ -979,6 +1008,7 @@ bool Locate() noexcept {
 	PetMove         = reinterpret_cast<PetMoveFn>(at(PetMoveCode));
 	Move            = reinterpret_cast<MoveFn>(at(MoveCode));
 	GetPath         = reinterpret_cast<GetPathFn>(at(GetPathCode));
+	Blocked         = reinterpret_cast<BlockedFn>(at(BlockedCode));
 	Velocity        = reinterpret_cast<VelocityFn>(at(VelocityCode));
 	SetSteps        = reinterpret_cast<SetStepsFn>(at(SetStepsCode));
 	UnitRoom        = reinterpret_cast<UnitRoomFn>(at(UnitRoomCode));
