@@ -22,7 +22,9 @@
 //     tooltip text): both are hooked, so the compared item is known even when
 //     another plugin builds the comparison itself; its box is matched by its
 //     text, else by the order the comparisons were asked for.
-//   - The frame: TooltipsPanel::Draw (0x880550) draws its boxes, a vector of
+//   - The frame: TooltipsPanel::Draw (0x880550, reached only through the
+//     panel vtable entry 0x1D76B00, which is swapped so another plugin may
+//     inline-hook the function itself) draws its boxes, a vector of
 //     0x2E8-byte entries at +0x168 (count +0x170), then empties it. Each box's
 //     rect {x, y, w, h} is at +0x60 (the header box, when there is one, at
 //     +0x70, its text size at +0x30). After the panel draws, the frame is
@@ -55,7 +57,7 @@ namespace Tables = D2RL::DataTables;
 namespace Events = D2RL::SharedEvents;
 
 constexpr const char* PluginId      = "perfect-frame";
-constexpr const char* PluginVersion = "1.0.2";
+constexpr const char* PluginVersion = "1.0.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -120,11 +122,11 @@ Value Field(const void* row, std::ptrdiff_t offset) {
 
 namespace Game {
 constexpr std::uint64_t PanelDraw = 0x880550; // TooltipsPanel::Draw(panel)
-constexpr std::uint8_t  PanelDrawBytes[] { 0x4C, 0x8B, 0xDC, 0x55, 0x53, 0x56, 0x57, 0x41, 0x55, 0x49, 0x8D, 0xAB, 0x78, 0xFD, 0xFF, 0xFF };
 constexpr std::uint64_t FillRect  = 0x657B90; // (x1, y1, x2, y2, const float rgba[4], mode)
 constexpr std::uint8_t  FillRectBytes[] { 0x44, 0x3B, 0xC1, 0x0F, 0x8C, 0xD3, 0x02, 0x00, 0x00, 0x4C, 0x8B, 0xDC, 0x55, 0x41, 0x54, 0x41 };
 constexpr std::uint64_t GetUnit   = 0x9A5D0; // client unit (id, type)
 constexpr std::uint8_t  GetUnitBytes[] { 0x4C, 0x63, 0xCA, 0x48, 0x8D, 0x05 };
+constexpr std::uint64_t DrawSlot    = 0x1D76B00; // TooltipsPanel vtable: its Draw entry (the only way the game calls it)
 constexpr std::uint64_t CompareSlot = 0x3E2AF60; // thunk pointer: a comparison text (GameString* out, int bodyLocation)
 constexpr std::uint64_t TooltipSlot = 0x3E2AF58; // thunk pointer: an item's tooltip text (out, unit, unit, item, 0, 1, 0, 0, scratch)
 constexpr std::uint64_t Player = 0x9A480, PlayerIndex = 0x8B2D0, Option = 0xCE500, Pet = 0x13ABC0, Inventory = 0x34A360, ItemAt = 0x3886D0;
@@ -1272,7 +1274,6 @@ bool Matches(std::uint64_t rva, const std::uint8_t* bytes, std::size_t size) {
 
 bool Locate() {
 	const std::pair<std::uint64_t, std::pair<const std::uint8_t*, std::size_t>> functions[] {
-		{ Game::PanelDraw, { Game::PanelDrawBytes, sizeof(Game::PanelDrawBytes) } },
 		{ Game::FillRect, { Game::FillRectBytes, sizeof(Game::FillRectBytes) } },
 		{ Game::GetUnit, { Game::GetUnitBytes, sizeof(Game::GetUnitBytes) } },
 		{ Game::BodyLocs, { Game::BodyLocsBytes, sizeof(Game::BodyLocsBytes) } },
@@ -1288,6 +1289,13 @@ bool Locate() {
 			Say(true, "game code differs at D2R+0x%llX", static_cast<unsigned long long>(rva));
 			return false;
 		}
+	// The panel's Draw is reached through its vtable entry: that entry must
+	// name it (its code may already carry another plugin's hook).
+	const std::uint64_t draw = Base + Game::PanelDraw;
+	if (!Matches(Game::DrawSlot, reinterpret_cast<const std::uint8_t*>(&draw), sizeof(draw))) {
+		Say(true, "game data differs at D2R+0x%llX", static_cast<unsigned long long>(Game::DrawSlot));
+		return false;
+	}
 	for (const auto& check : Game::Checks)
 		if (!Matches(check.rva, check.bytes.data(), check.bytes.size())) {
 			Say(true, "game code differs at D2R+0x%llX", static_cast<unsigned long long>(check.rva));
@@ -1417,8 +1425,11 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (HMODULE core = GetModuleHandleW(L"D2RCore.dll")) ReadStat = reinterpret_cast<StatFn>(reinterpret_cast<void*>(GetProcAddress(core, "ReadWideUnitStat")));
 	if (!ReadStat) Say(true, "Perfect Frame: D2RCore's ReadWideUnitStat not found; defense is not checked");
 
-	if (!Context->InstallInlineHook(Game::PanelDraw, Game::PanelDrawBytes, sizeof(Game::PanelDrawBytes), reinterpret_cast<void*>(&HookPanelDraw), reinterpret_cast<void**>(&PanelDraw))
-	    || !PanelDraw) {
+	// The vtable entry is swapped, not the function's code: another plugin's
+	// inline hook on TooltipsPanel::Draw (Tooltip Skin) keeps working, in any
+	// load order, and runs inside this hook.
+	std::uint64_t originalDraw = 0;
+	if (!SwapSlot(Game::DrawSlot, reinterpret_cast<void*>(&HookPanelDraw), &originalDraw) || !(PanelDraw = reinterpret_cast<PanelDrawFn>(originalDraw))) {
 		Say(true, "Perfect Frame %s: inactive, the tooltip panel could not be hooked", PluginVersion);
 		return true;
 	}
@@ -1453,6 +1464,17 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	// The panel's vtable entry back to what it was, if it is still this hook.
+	if (Base && PanelDraw && Field<std::uint64_t>(reinterpret_cast<void*>(Base), Game::DrawSlot) == reinterpret_cast<std::uint64_t>(&HookPanelDraw)) {
+		std::uint64_t mine = 0;
+		auto*         slot = reinterpret_cast<std::uint64_t*>(Base + Game::DrawSlot);
+		DWORD         old  = 0;
+		if (VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &old)) {
+			mine = reinterpret_cast<std::uint64_t>(&HookPanelDraw);
+			InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(slot), static_cast<LONG64>(reinterpret_cast<std::uint64_t>(PanelDraw)), static_cast<LONG64>(mine));
+			VirtualProtect(slot, sizeof(*slot), old, &old);
+		}
+	}
 	Menu.Stop();
 	StopTicker();
 	if (Ticker) {

@@ -10,6 +10,9 @@
 # bonuses again. Charms left in the charm inventory stay there, without bonuses.
 enabled = true
 
+# true: charms in the normal inventory give their bonuses too.
+inventory_charms = false
+
 # Size of the charm inventory in cells. columns 1 to 10, rows 1 to 12.
 # Take the charms out of the cells you remove before making it smaller.
 columns = 10

@@ -1,3 +1,49 @@
+# Grail On! 1.2.1: patch notes
+
+```
+**Grail On! 1.2.1**
+
+**New**
+
+* Opening the grail while the stash is open no longer closes the stash, as with the cube. The grail closes with the stash.
+* Items with more than 500 variants are not split into variant tiles. The variant lists show them in grey with their box disabled.
+* A runeword base only goes in when it is dropped on the empty runeword tile it is meant for. Ctrl+click no longer places bases.
+
+**Fixed**
+
+* Large mods with many variant items (D2R Reimagined) no longer freeze the game while the grail loads: only items whose variants are turned on get variant tiles.
+* Runeword bases could not be dropped into their tile.
+* A runeword could be taken for a base: Death went to the Call to Arms tile on Ctrl+click and could not be stored on its own page.
+* Some stored runewords, like Kingslayer, showed their base's picture. They are repaired when the grail loads.
+* Runes in 4 and 5 socket items are shown in the game's socket order.
+* Stash Tab Dropdown's arrow showed in front of the grail.
+```
+
+# Grail On! 1.2.0: patch notes
+
+```
+**Grail On! 1.2.0**
+
+**New**
+
+* Filter unidentified stats: a setting, off by default. With Hide perfect, an item whose grail copy is not perfect only shows when it is an upgrade: every varying stat the same or better, and at least one better (single player and games you host).
+* Excluded items: lists of items the loot filter never hides, in the Loot settings. Each list can be switched on, renamed, moved, edited or deleted. Two presets come with it, Very valuable items and Most interesting items, and new lists start empty or from a preset. The editor finds items by name or base and groups set items by set. With Filter ambiguous bases off, a base shows when any of its items is excluded.
+* Variants: a new section in the Grail settings. Affix variants gives a tile to each choice of an item with a choice roll (Ormus' Robes' skill, Wraithstep's skill tab, Opalvein's element...). Graphic variants gives a tile to each picture of an item that picks its picture (rings, amulets, charms). Both are off by default, found from the game's files (mods included), and each has a list to pick which items are split. Copies already stored go to their tile on their own. An item with several choice rolls (renewed sunders) gets a tile for each mix. Turned off, extra copies stay safe in the grail file, hidden. The lists show how many variants each item has.
+* Lost items: a menu between Objectives and Config, with a red ring, shown only while some items are lost. Stored items that no tile can show anymore (the item was removed or changed by a mod, or a second copy of an item that has one tile) wait there and can be taken out like any stored item.
+* Renewed sunder charms and the Uber Ancients' colossal jewels now have tiles: uniques the game marks not spawnable are in the grail when a treasure class or a cube recipe gives them.
+* The Rainbow Facets are named by what tells them apart, like Rainbow Facet (Fire, Die), and jewel picture variants by their colour, like Rainbow Facet (Fire, Die, Red).
+* Tile labels show the item name only; what tells variants apart (and the Rainbow Facets' element) is in the label's tooltip.
+* The item lists' search boxes have a clear button.
+* RP Breaking Settings: Filter unidentified stats and Filter ambiguous bases now have their own section in the Loot settings.
+
+**Fixed**
+
+* Picture variants did not open their page on a middle click or when stored from another page, and lost their comparison after a swap.
+* A Hellfire Torch could not be stored in the game it dropped in (item level 110, saved as 99): it went back to the inventory when the grail closed, and one stored that way could not be taken out.
+* Searching in the variant lists stopped as soon as it started.
+* Stored Annihilus, Hellfire Torch and other charms, rings or amulets with their own picture showed a plain charm or jewelry picture.
+```
+
 # Grail On! 1.1.5: patch notes
 
 ```

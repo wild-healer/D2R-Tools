@@ -1,3 +1,33 @@
+# Perfect Frame 1.0.3: release texts
+
+## Patch notes
+
+```
+**Perfect Frame 1.0.3**
+
+**Fixed**
+
+* Works together with Tooltip Skin: both plugins now draw their borders, whichever loads first.
+```
+
+## GitHub release
+
+- Tag: `perfect-frame-v1.0.3`
+- Title: `Perfect Frame 1.0.3`
+- Asset: `perfect-frame.zip`
+
+Body:
+
+```markdown
+**Perfect Frame** 1.0.3
+
+### Fixed
+- Works together with Tooltip Skin: both plugins now draw their borders, whichever loads first.
+
+### Install
+Load `perfect-frame.zip` in D2RMM, or copy `d2rl-perfect-frame.dll` to `<game>/d2rloader/plugins/` over the old one. Settings are unchanged.
+```
+
 # Perfect Frame 1.0.2: release texts
 
 ## Patch notes

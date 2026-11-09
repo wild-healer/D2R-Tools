@@ -1,0 +1,28 @@
+# Merc Gear Models
+#
+# Your merc's look follows its gear: the real models of its helm and weapon,
+# and its body armor look (light, medium, heavy). Only changes what you see.
+# Every setting can also be changed in game with I Hate TOMLs.
+
+[merc-gear-models]
+enabled = true
+
+# What each merc shows (true/false): weapon (weapon and shield models), helm,
+# armor (body armor look), enchant (item colors such as Enchant's red on the
+# weapon; needs weapon).
+rogue.weapon = true
+rogue.helm = true
+rogue.armor = true
+rogue.enchant = true
+desert.weapon = true
+desert.helm = true
+desert.armor = true
+desert.enchant = true
+iron_wolf.weapon = true
+iron_wolf.helm = true
+iron_wolf.armor = true
+iron_wolf.enchant = true
+barbarian.weapon = true
+barbarian.helm = true
+barbarian.armor = true
+barbarian.enchant = true

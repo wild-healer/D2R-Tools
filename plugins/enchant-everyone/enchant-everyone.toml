@@ -1,0 +1,21 @@
+# Enchant Everyone
+#
+# Casting Enchant also enchants every friendly unit around you: yourself, your
+# party, mercenaries, summons and revives. Works in single player and in games
+# you host. Every setting can also be changed in game with I Hate TOMLs.
+
+[enchant-everyone]
+enabled = true
+
+# How far around the caster Enchant reaches, in yards (1 to 25).
+radius_yards = 20
+
+# Enchant the other players of your party.
+players = true
+
+# Enchant mercenaries, summons and revives (yours and your party's).
+minions = true
+
+# false: each extra unit costs one more cast's mana, nearest first, until your
+# mana runs out. true: one cast's mana enchants everyone.
+single_mana_cost = false

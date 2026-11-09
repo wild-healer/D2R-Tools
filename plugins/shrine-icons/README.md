@@ -13,9 +13,9 @@ Tells shrines apart before you walk up to them. One D2RLoader plugin, no mod nee
   symbol.
 - **A minimap icon per shrine type** instead of the shared gold ring: the item
   picture for the shrines above (torch, exploding potion and gas potion keep fire,
-  exploding and poison apart), and the classic floating symbol for the booster
+  exploding and poison apart), and the HD floating symbol for the booster
   shrines (armor, combat, the four resists, skill, mana recharge, stamina,
-  experience).
+  experience), or their classic symbol with `classic_boosters`.
 
 ## How
 
@@ -24,7 +24,8 @@ Tells shrines apart before you walk up to them. One D2RLoader plugin, no mod nee
   function does, as the settings say. A setting change runs it again on every
   shrine the client knows, so it shows at once.
 - The symbols are overlay rows the plugin appends to the game's overlay table
-  (copies of shrine_skill). The HD client asks 0x662A90 for an overlay's file;
+  (copies of shrine_skill). The HD client asks 0x662A90 for an overlay's file (its two
+  calls, 0x1255F8 and 0x7629DA, go through the plugin);
   the plugin answers its rows with OverlayDefinitions of its own, served as
   D2RLoader resources under `.../d2rloader/shrine-icons/`. They float the Skill
   Shrine effect with its mesh swapped for an item model; the effect, meshes and
@@ -49,12 +50,20 @@ Tells shrines apart before you walk up to them. One D2RLoader plugin, no mod nee
 ## Settings
 
 `d2rloader/config/shrine-icons.toml`, or in game with I Hate TOMLs, where every
-setting applies at once: `symbols`, `minimap`, `boosters`, `shimmer`, `size`,
+setting applies at once: `symbols`, `minimap`, `boosters`, `classic_boosters`,
+`shimmer`, `size`,
 `height`, one switch per shrine type, `enabled`.
 
 ## Build
 
 `sh build.sh` (MinGW-w64) builds the DLL and `shrine-icons.zip`. The minimap art
 is `src/minimap_cells.bin`, built into the DLL;
-`python3 tools_make_minimap.py <extracted game data folder>` regenerates it (the
+`python3 tools_make_minimap.py <extracted game data folder>` regenerates it
+(the HD booster icons are rendered from the HD symbol models by
+`tools_render.py`, which reads the Granny `.model` files with `tools_gr2.py`; the
 classic symbols are decoded by `tools_dcc.py`).
+
+The gem symbol's mesh is `src/gem_turned_lod0.model`, also built into the DLL:
+the perfect amethyst is modelled lying down and the symbol effect ignores the
+overlay's orientation, so `python3 tools_turn_model.py <game>/data/hd/items/misc/gem/perfect_amethyst/perfect_amethyst_lod0.model src/gem_turned_lod0.model`
+turns the mesh itself a quarter turn (tip down, top to the camera).

@@ -2,7 +2,11 @@
 
 Plugin id `i-hate-tomls`: `aaa-i-hate-tomls.dll` in `i-hate-tomls.zip`, downloaded from its [D2RLoader Hub page](https://d2rloader.net/hub/plugins/i-hate-tomls).
 
-One in-game window, drawn like the character screen, listing every running plugin.
+Plugin authors: see [INTEGRATION.md](INTEGRATION.md) to add a settings page to a plugin.
+
+One in-game window, drawn like the character screen, listing every running plugin (I Hate TOMLs itself first).
+It opens on the left like the game's left panels: it closes them, a left panel that opens closes it, and the
+view moves to the right while it is open, as the game does for its own panels.
 
 - Open: Controls menu, *I Hate TOMLs > Open I Hate TOMLs* (no default key), or the console command `pluginmenu`.
 - A search bar under the plugin count keeps the plugins whose name, id or author has the typed text.
@@ -16,9 +20,11 @@ One in-game window, drawn like the character screen, listing every running plugi
   - blue, *own window*: the plugin has its own settings window and declared it (`Connection::StartInterface`);
     the gear closes the menu and calls the plugin.
   - white, *TOML file*: any other plugin with `config/<id>.toml`. The page shows the file: comments as text,
-    `[tables]` as titles, each value in its editor. Apply writes the changed values only (comments, spacing
+    `[tables]` as titles, each value in its editor. Characters the game's font lacks (box lines, arrows, curly
+    quotes) are shown as plain ones. Text is laid out with the game's own font measured at load (a font mod's
+    included) and the Low Vision Mode text sizes when that option is on. Apply writes the changed values only (comments, spacing
     and order stay), after copying the file to `<id>.toml.bak`; plugins read it at the next start.
-  - no gem, *no settings*: no config file.
+  - no gem and no gear: no config file.
 
 TOML values and their editors:
 
@@ -39,6 +45,17 @@ filter list's rows and check box, the drop-down box frame for text boxes, button
 The gear is the "cog" icon of [game-icons.net](https://game-icons.net) (CC BY 3.0, by its contributors).
 
 Build: `sh build.sh` (MinGW-w64, D2RLoader PluginSDK 03a5af9).
+
+## Updates
+
+Once per launch, in the background, I Hate TOMLs reads the D2RLoader Hub's public plugin list
+(`d2rloader.net/api/v1/hub/plugins`, a few requests, no login). A plugin with a newer version there
+gets an "x.y.z out" button in the list that opens its Hub page. Each plugin is found by its Hub URL, built
+from its name the way the Hub builds it: lowercase, every run of other characters becomes one `-`.
+A joined plugin whose Hub URL differs gives it in its schema (`hub = "<slug>"`). Turn the check off with
+`check_updates = false` in `i-hate-tomls.toml`, or on I Hate TOMLs' own page.
+When updates are out, the chat says "N plugin(s) can be updated" once per launch, at the first game
+(`chat_updates = false` turns it off).
 
 ## Config copies
 

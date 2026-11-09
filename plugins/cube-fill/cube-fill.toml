@@ -14,6 +14,9 @@ enabled = true
 # "badge": the "7/12" text. "grid": a mini 3x4 map of the cube over its icon,
 # taken cells filled and each item's cells joined, so you see the layout.
 # "both": the map with the badge in its corner.
+# The pictures follow the cube's real size (a mod can make it bigger); the
+# badge and the map are made for the stock 3x4 cube, so with another size the
+# pictures show in their place.
 display = "sprites"
 
 # Darkness of the box behind the pictures: 25, 50 or 75 (percent).

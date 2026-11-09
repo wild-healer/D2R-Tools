@@ -8,7 +8,7 @@ D2RLoader plugin that puts your holy grail inside the game: every unique, set it
 - **Custom objectives**: write your own goals on the settings page, each with an icon, and tick them off in the Objectives menu. They have their own stats page and count in the overview.
 - **Search**: the search bar under the window finds items by name and dims the rest; Enter or the arrows go to the next match.
 - **Middle click**: middle click a grail item anywhere to show its tile, even with the grail closed.
-- **Runeword bases**: a plain or superior base with the right socket count can wait in an empty runeword tile it can be made into.
+- **Runeword bases**: a plain or superior base with the right socket count can wait in an empty runeword tile it can be made into: drop it on that tile.
 - **Stats**: an overview and one page per kind (uniques, ethereal uniques, set items, runewords, misc, objectives) show what you have found, stored and have perfect, with ring charts and per category bars.
 - **Perfect copies**: a stored copy whose variable rolls are all the best gets a gold frame around its tile. Items with nothing that rolls count as perfect.
 - **Compare**: while the grail is open, hovering a grail item anywhere shows its stored copy as the game's comparison tooltip, always or only with Shift.
@@ -58,10 +58,17 @@ All of them are on the grail's settings page (the gear icon), on five pages (Gen
 | `compare` | `always` | The grail copy beside a hovered grail item while the grail is open: `none`, `shift` or `always`. |
 | `perfect_frames`, `frame_animations` | `true`, `true` | The Perfect frame choice: None (`perfect_frames` off), Static (`frame_animations` off) or Animated. |
 | `scroll_animations` | `true` | The Scrolling choice: Animated, or Instant (a row at a time). |
+| `affix_variants` | `false` | Affix variants: each choice of an item with a choice roll (a skill, a class, a skill tab, an element...) gets its own tile. |
+| `graphic_variants` | `false` | Graphic variants: each picture of an item that picks its picture (rings, amulets, charms without art of their own) gets its own tile. |
+| `affix_variant_off`, `graphic_variant_off` | none | One line per item left out of affix / graphic variants (grail entry id), from the Variants lists. |
 | `compact` | `false` | The Layout choice: Compact puts the window against the screen's left edge, with its menus on its right. |
 | `swap_columns` | `false` | The Menu direction choice: Right to left puts the category icons in the left column and the menu icons in the right one. |
 | `loot_uniques`, `loot_ethereal`, `loot_sets` | `all` | `all`, `found` or `perfect`: ground items hidden once the grail has them, or has them perfect. |
 | `loot_unid_only` | `true` | Only unidentified ground items are hidden; identified ones always show. |
+| `loot_unid_stats` | `false` | With Hide perfect: an item whose grail copy is not perfect only shows when it is an upgrade (every varying stat the same or better, at least one better). Read in single player and games you host; hidden in games you join. |
+| `loot_list` | the 2 presets | One line per exclusion list, in order: preset (`none`, `valuable` or `interesting`), `1` once a preset's list was changed, then its name. |
+| `loot_exclude_active` | none | The active exclusion lists, by number from 0, comma separated. |
+| `loot_exclude` | none | One line per item the loot filter never hides, chosen in the Loot settings: list number, then grail entry id (`|eth` for the ethereal tile). |
 | `loot_ambiguous` | `false` | Unidentified ground items are hidden by what they really are. Off: only when every unique or set item of their base would be hidden. |
 
 ## Keybind

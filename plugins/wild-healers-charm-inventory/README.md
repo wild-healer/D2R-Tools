@@ -2,7 +2,7 @@
 
 D2RLoader plugin that gives you a charm inventory (10x4 by default, the size of the inventory's grid; up to 10x12) on the custom player page that [Player Page Host](../aaa-player-page-host) shares between plugins.
 
-- **Charms only**: small, large and grand charms go in, anything else is refused. The charms in it give their bonuses; charms in the normal inventory don't, Charm Dedup loaded or not (your own character only: other players in a TCP/IP game you host keep the game's rule).
+- **Charms only**: small, large and grand charms go in, anything else is refused. The charms in it give their bonuses; charms in the normal inventory don't (unless `inventory_charms` is on), Charm Dedup loaded or not (your own character only: other players in a TCP/IP game you host keep the game's rule).
 - **One of each unique charm**: a second Annihilus, Torch, Gheed's or Sunder charm of the same kind is refused, dropped or Ctrl+clicked. Dropping it onto the first one swaps them.
 - **Panel**: a game-style left panel with a "Charms" title, plain stone inside and the grid of cells, centred.
 - **Opening it**: the charm button on the inventory's left edge, under Grail On!'s grail button; the "Open/close charms" action of the game's Controls menu (no key by default); or the `charms` console command.
@@ -22,6 +22,7 @@ Download it from the [D2RLoader Hub](https://d2rloader.net/hub/plugins/wild-heal
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Off: no button or panel, and charms in the normal inventory give their bonuses again. Charms left in the charm inventory stay there, without bonuses. |
+| `inventory_charms` | `false` | On: charms in the normal inventory give their bonuses too. |
 | `columns` | `10` | Width of the charm inventory in cells, 1 to 10. |
 | `rows` | `4` | Height of the charm inventory in cells, 1 to 12. Take the charms out of the cells you remove before making it smaller (I Hate TOMLs refuses the change otherwise). |
 

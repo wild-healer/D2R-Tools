@@ -70,7 +70,7 @@
 namespace {
 
 constexpr const char* PluginId      = "visual-clutter";
-constexpr const char* PluginVersion = "1.0.1-dev-2";
+constexpr const char* PluginVersion = "1.0.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,

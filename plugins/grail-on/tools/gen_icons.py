@@ -29,6 +29,10 @@ ICONS = {
     "setgen": "scroll-unfurled", "setdisp": "eyeball", "setloot": "open-treasure-chest", "setmisc": "checklist",
     # the Objectives menu
     "objectives": "target-arrows",
+    # the exclusion lists' buttons
+    "rename": "quill-ink", "edit": "pencil", "cancel": "cancel", "save": "check-mark", "clear": "broom", "reset": "anticlockwise-rotation",
+    # the Lost items menu (drawn red)
+    "lost": "pie-chart",
 }
 # The objectives' tile icons (two cells: 196 px, ObjIconMasks), in their order.
 OBJ_ICONS = ["flag-objective", "trophy-cup", "death-skull", "horned-skull", "dragon-head", "crown", "key", "treasure-map",

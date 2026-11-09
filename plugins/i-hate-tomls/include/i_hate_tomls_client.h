@@ -15,6 +15,8 @@
 // The schema is TOML text, copied by the menu:
 //
 //   title = "Ethereal Ground Tag"      # optional, else the plugin's name
+//   hub = "ethereal-ground-tag"        # optional: its D2RLoader Hub slug, when the Hub's
+//                                      # URL is not its name in lowercase with "-" (update check)
 //   [[setting]]
 //   key = "text"                       # passed to get and set
 //   type = "string"                    # bool, int, float, enum, string, position, table, action, header, text
