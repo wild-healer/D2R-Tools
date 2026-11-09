@@ -54,7 +54,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.2";
+constexpr const char* PluginVersion = "0.0.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -128,9 +128,9 @@ enum : int {
 	SkillFireArrow = 7, SkillInnerSight = 8, SkillColdArrow = 11, SkillExplodingArrow = 16, SkillFreezingArrow = 31,
 	SkillFireBolt = 36, SkillChargedBolt = 38, SkillStatic = 42, SkillIceBlast = 45, SkillFireBall = 47, SkillLightning = 49,
 	SkillEnchant = 52, SkillGlacialSpike = 55, SkillChillingArmor = 60,
-	SkillBash = 126, SkillTaunt = 137, SkillStun = 139, SkillBattleCry = 146, SkillFrenzy = 147,
+	SkillJab = 10, SkillBash = 126, SkillTaunt = 137, SkillStun = 139, SkillBattleCry = 146, SkillFrenzy = 147,
 };
-enum : int { ModeAttack1 = 4, ModeAttack2 = 5, ModeCast = 7 };
+enum : int { ModeAttack1 = 4, ModeAttack2 = 5, ModeCast = 7, ModeJab = 14 };
 
 using HireableFn     = void (*)(void* game, void* unit, void* tick) noexcept;
 using SelectTargetFn = void* (*)(void* game, void* unit, int* distance, int* inMelee) noexcept;
@@ -388,7 +388,10 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 		void* const itsTarget   = SkillTarget(game, unit);
 		const bool  selfDefense = itsTarget == merc && fromMerc <= 6;
 		if (fromOwner > leash && !selfDefense) continue;
-		int score = fromMerc * 4;
+		// Barbarians intercept: the monster closest to you counts most, so they
+		// meet threats before they reach you. Everyone else: closest to itself.
+		const bool tank = role == Role::BashBarb || role == Role::FrenzyBarb;
+		int        score = tank ? fromOwner * 3 + fromMerc : fromMerc * 4;
 		if (unit == wanted) score -= 60;
 		if (itsTarget == owner) score -= melee ? 60 : 40;
 		if (itsTarget == merc) score -= 20;
@@ -452,7 +455,7 @@ bool AttackRoll(void* merc, void* tick, bool melee) noexcept {
 // Ranged mercenaries step back toward you when something gets close.
 bool KeepDistance(void* game, void* merc, void* owner, void* target, Role role) noexcept {
 	const int distance = Distance(merc, target);
-	if (distance > 3 || Random(100) >= 70) return false;
+	if (distance > 4 || Random(100) >= 70) return false;
 	if (Distance(owner, target) > distance + 2 && WalkToOwner(game, merc, owner, 4, 0)) {
 		Note(merc, role, target, -1, "steps back toward you");
 		return true;
@@ -514,6 +517,24 @@ void IronWolfAttack(void* game, void* merc, void* owner, void* target, const Sca
 	NormalAttack(game, merc, target, params);
 }
 
+// Desert mercenary: Jab bosses and champions, mix Jab and normal attacks otherwise.
+void DesertAttack(void* game, void* merc, void* target, const std::uint16_t* params) noexcept {
+	if ((IsBoss(target) || Random(100) < 60) && Cast(game, merc, ModeJab, SkillJab, target))
+		return Note(merc, Role::Desert, target, SkillJab, IsBoss(target) ? "Jabs a boss or champion" : "Jab");
+	Note(merc, Role::Desert, target, 0, "normal attack");
+	NormalAttack(game, merc, target, params);
+}
+
+// Desert mercenary: stays close enough for its aura to cover you. It goes back
+// to you instead of chasing, unless the monster is hitting it.
+bool StayInAura(void* game, void* merc, void* owner, void* target) noexcept {
+	const int leash = Config.auraLeash.load(std::memory_order_relaxed);
+	if (Distance(owner, merc) <= leash || SkillTarget(game, target) == merc) return false;
+	if (!WalkToOwner(game, merc, owner, 4, 0)) return false;
+	Note(merc, Role::Desert, target, -1, "goes back to you to keep its aura on you");
+	return true;
+}
+
 void BashBarbAttack(void* game, void* merc, void* target, const Scan& scan, const std::uint16_t* params) noexcept {
 	if (CountNear(scan, merc, 5) >= 2 && !CheckState(target, StateBattleCry) && Random(100) < 50 && Cast(game, merc, ModeAttack1, SkillBattleCry, target))
 		return Note(merc, Role::BashBarb, target, SkillBattleCry, "Battle Cry on a group");
@@ -572,9 +593,9 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 	if (role == Role::None || UnitType(owner) != 0 || !PetInfo(owner, Field<std::uint32_t>(unit, UnitIdOffset)))
 		return Combat(game, unit, classId, owner, target, seed, tick, params);
 	const bool melee = params[0] == 2;
-	// Melee types: the game runs to the target (and the Desert mercenary keeps
-	// the game's own Jab/attack choice); our part is the target and leash.
-	if (melee && (role == Role::Desert || Distance(unit, target) >= 3 || !InMelee(unit, target, 0, nullptr)))
+	if (role == Role::Desert && StayInAura(game, unit, owner, target)) return;
+	// Melee types out of reach: the game runs to the target as usual.
+	if (melee && (Distance(unit, target) >= 3 || !InMelee(unit, target, 0, nullptr)))
 		return Combat(game, unit, classId, owner, target, seed, tick, params);
 	Scan scan;
 	Gather(game, unit, scan);
@@ -584,6 +605,7 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 	switch (role) {
 	case Role::Rogue: return RogueAttack(game, unit, target, scan, params);
 	case Role::IronWolf: return IronWolfAttack(game, unit, owner, target, scan, params);
+	case Role::Desert: return DesertAttack(game, unit, target, params);
 	case Role::BashBarb: return BashBarbAttack(game, unit, target, scan, params);
 	case Role::FrenzyBarb: return FrenzyBarbAttack(game, unit, owner, target, params);
 	default: return Combat(game, unit, classId, owner, target, seed, tick, params);

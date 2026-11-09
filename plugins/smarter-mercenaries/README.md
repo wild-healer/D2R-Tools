@@ -9,16 +9,17 @@ dice roll.
   fights farther than `leash` from you (monsters hitting the mercenary itself
   are always fought), and avoids targets immune to all its damage
   (resistances as they are now, so Conviction or Lower Resist count).
-- Rogue: steps back toward you when a monster gets close, Exploding/Freezing
+- Rogue: steps back toward you when a monster gets within 4, Exploding/Freezing
   Arrow on groups, Fire/Cold Arrow on single monsters, normal arrows on
   immunes, Inner Sight on bosses or groups that don't have it.
 - Desert mercenary: only fights within `aura_leash` of you so its aura covers
-  you; attacks stay the game's own (Jab or normal attack).
+  you, and walks back to you instead of chasing (unless it's being hit). Jab
+  on bosses and champions, Jab or normal attacks otherwise.
 - Iron Wolf: keeps its distance, keeps Enchant (on you first) and Chilling
   Armor up, picks its spell by the target's resistances; Static Field only on
   healthy bosses or crowds near it; stays with you when everything near is
   immune to it.
-- Barbarian: goes for monsters attacking you, Battle Cry on groups, Stun on
+- Barbarian: intercepts, going for the monsters closest to you and those attacking you first, Battle Cry on groups, Stun on
   bosses and champions, Bash otherwise. Frenzy Barbarian Taunts monsters that
   attack you, Frenzy otherwise.
 - Attack rate is the game's own (same chance per think), only the choices change.
