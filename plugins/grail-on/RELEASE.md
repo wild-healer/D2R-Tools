@@ -1,3 +1,19 @@
+# Grail On! 1.2.2: patch notes
+
+```
+**Grail On! 1.2.2**
+
+**New**
+
+* Filter graphic variants: an RP Breaking setting, off by default. With Graphic variants on, a ring, amulet, jewel or charm on the ground is hidden by its own picture's tile.
+* Items reworked for the current ladder season only take copies with their new stats. Older copies cannot be stored, and stored ones go to Lost items.
+
+**Fixed**
+
+* Stored runewords' tooltips were missing their runes and the runes' stats.
+* With Graphic variants on, the loot filter only hid a ring or amulet when every one of its pictures' tiles was hidden.
+```
+
 # Grail On! 1.2.1: patch notes
 
 ```

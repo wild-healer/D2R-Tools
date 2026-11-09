@@ -78,6 +78,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bitset>
+#include <climits>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -114,7 +116,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.2.1";
+constexpr const char* PluginVersion = "1.2.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -297,6 +299,7 @@ struct Settings {
 	bool lootUnidOnly = true; // only unidentified ground items are hidden
 	bool lootUnidStats {};    // an unidentified item as good as its grail copy in every varying stat shows
 	bool lootAmbiguous {};  // unidentified items hidden by what they are, not only when every item of their base would be
+	bool lootGraphic {};    // ground items with graphic variants hidden by their own picture's tile, not only when every picture's would be
 	int  compare = CompareAlways; // the grail copy in the comparison: never, with Shift held, always
 	bool perfectFrames = true;     // perfect copies' glow around their tile
 	bool trace = false; // grailon trace 1: each view step and the cursor item logged
@@ -341,6 +344,9 @@ constexpr Toggle Toggles[] {
 	  "With Hide perfect: an item whose grail copy is not perfect only shows when it is an upgrade, every varying stat the same or better and at least one better (read from the game you play or host; in games you join it stays hidden). Off: Hide perfect alone decides.", RpGroup },
 	{ "loot_ambiguous", &Settings::lootAmbiguous, "Filter ambiguous bases",
 	  "Unidentified items are hidden by what they really are, even when other items share their base. Off: an unidentified item is only hidden when every unique or set item of its base would be.",
+	  RpGroup },
+	{ "loot_graphic", &Settings::lootGraphic, "Filter graphic variants",
+	  "With Graphic variants on, a ring, amulet, jewel or charm on the ground is hidden by its own picture's tile, which the ground does not show. Off: it is only hidden when every picture's tile would be.",
 	  RpGroup },
 	{ "frame_animations", &Settings::frameAnimations, "Frame animations", "The perfect glow moves. Off: it stays still.", DisplayGroup },
 	{ "compact", &Settings::compact, "Compact", "The window sits against the screen's left edge, with its menus on its right. Off: the menus are on its left, where the game's panels start.", DisplayGroup },
@@ -3301,7 +3307,31 @@ int GrailIndex(const Items::ItemInfo& item) {
 	return v;
 }
 
+int GrailEntryOf(const Items::ItemInfo& item);
+bool OldVersion(int u, void* unit);
+std::map<std::uint32_t, bool> OldUnits; // runtime id -> an older version of its item (checked once); guarded by Lock
+void* ClientItem(std::uint32_t runtimeId);
+// The entry, but -1 for an older version of an item the current ladder season
+// reworked: that copy is not the item the grail collects any more.
 int GrailEntry(const Items::ItemInfo& item) {
+	const int u = GrailEntryOf(item);
+	if (u < 0) return u;
+	std::lock_guard guard(Lock);
+	if (u >= UniqueCount() || Uniques[u].misc || !(item.stateFlags & Items::ItemStateIdentified)) return u;
+	auto known = OldUnits.find(item.runtimeId);
+	if (known == OldUnits.end()) {
+		void* unit = ClientItem(item.runtimeId);
+		if (!unit) return u;
+		known = OldUnits.emplace(item.runtimeId, OldVersion(u, unit)).first;
+		if (known->second) {
+			static int told = 0;
+			if (told++ < 20) Say(false, "grailon: %s is an older version than this season's: not taken", Uniques[u].name.c_str());
+		}
+	}
+	return known->second ? -1 : u;
+}
+
+int GrailEntryOf(const Items::ItemInfo& item) {
 	std::lock_guard guard(Lock);
 	// A base kept in a runeword tile (not once its runes are in).
 	if (const auto base = BaseFor.find(item.runtimeId); base != BaseFor.end()) {
@@ -7036,6 +7066,7 @@ struct Record {
 };
 // All guarded by Lock.
 std::map<std::uint32_t, Record>       Records;      // by fingerprint
+std::set<std::uint32_t>               Outdated;     // records that are an older version of an item the current season reworked (Lost items)
 std::size_t RecordCount() { return Records.size(); }
 std::set<std::uint32_t>               Tombstones;   // fingerprints taken out of the grail
 std::set<std::string>                 FoundIds;     // entries ever stored
@@ -7493,6 +7524,24 @@ void __cdecl TakeSnapshot(const D2RL::PluginContext*, void* native, void* userDa
 			}
 }
 
+void SetPicture(std::uint32_t runtimeId, int picture);
+// Where the game keeps an item's picture in its item data, learnt from the
+// player's own items (their pictures read from their save bytes): the one byte
+// that holds the picture on every one of them. The loot filter reads it on
+// ground items, which have no save bytes. It starts at the place found on the
+// current build (+0x5E) and is checked on every sample: a sample that
+// disagrees drops it until a new one is learnt. -1 when not known.
+constexpr int    KnownPictureOffset = 0x5E;
+std::atomic<int> PictureOffset { KnownPictureOffset };
+constexpr int    PictureScan = 0x80;
+struct PictureLearning {
+	std::bitset<PictureScan> out;     // offsets that did not hold the picture once
+	std::set<int>            seen;    // the pictures sampled
+	std::set<std::uint32_t>  items;   // the items sampled
+	bool                     failed {}, confirmed {};
+} Learning; // guarded by Lock
+
+
 // The fingerprint of an item (read once per item).
 std::uint32_t FingerprintOf(const Items::ItemInfo& item) {
 	{
@@ -7505,9 +7554,10 @@ std::uint32_t FingerprintOf(const Items::ItemInfo& item) {
 	std::lock_guard guard(Lock);
 	if (!snapshot.fingerprint && MiscByCode.count(CodeText(item.code))) snapshot.fingerprint = SimplePrint(item.code); // a misc base: its base is its identity
 	Fingerprints[item.runtimeId] = snapshot.fingerprint;
-	Pictures[item.runtimeId]     = PictureInBytes(snapshot.bytes, snapshot.itemLevel, snapshot.quality);
+	SetPicture(item.runtimeId, PictureInBytes(snapshot.bytes, snapshot.itemLevel, snapshot.quality));
 	return snapshot.fingerprint;
 }
+
 
 // An item's picture (-1: none), from its save bytes (read once per item).
 void NeedPicture(std::uint32_t runtimeId);
@@ -7525,7 +7575,8 @@ int PictureOfItem(const Items::ItemInfo& item) {
 		return -1;
 	}
 	std::lock_guard guard(Lock);
-	return Pictures[item.runtimeId] = PictureInBytes(snapshot.bytes, snapshot.itemLevel, snapshot.quality);
+	SetPicture(item.runtimeId, PictureInBytes(snapshot.bytes, snapshot.itemLevel, snapshot.quality));
+	return Pictures[item.runtimeId];
 }
 
 // A runeword's Runes row in an item's save bytes, -1 for none: after the
@@ -7716,10 +7767,12 @@ struct Decoding {
 
 // Socketed items follow the parent in the bytes, as in a .d2s: they go into it
 // before D2RCore places it, so the client gets the whole item at once.
-void SocketChildren(void* game, std::size_t offset) {
-	const auto& bytes  = *Decode.bytes;
-	void*       player = Decode.playerId != 0xFFFFFFFF ? UnitById(game, 0, Decode.playerId) : nullptr;
-	const auto  parent = *reinterpret_cast<std::uint32_t*>(static_cast<char*>(Decode.item) + 8);
+// Ghosts get them the same way: a runeword's tooltip lists its runes and their stats.
+// Returns the socketed items.
+std::vector<void*> SocketChildren(void* game, void* item, const std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t playerId) {
+	std::vector<void*> socketed;
+	void*       player = playerId != 0xFFFFFFFF ? UnitById(game, 0, playerId) : nullptr;
+	const auto  parent = *reinterpret_cast<std::uint32_t*>(static_cast<char*>(item) + 8);
 	while (player && offset < bytes.size()) {
 		alignas(16) std::uint8_t header[0x100] {};
 		const auto               flag = *reinterpret_cast<std::uint8_t*>(static_cast<char*>(game) + Store::GameFlag);
@@ -7730,9 +7783,11 @@ void SocketChildren(void* game, std::size_t offset) {
 		void* child = first == -1 ? nullptr : LoadItem(game, nullptr, bytes.data() + offset, static_cast<int>(bytes.size() - offset), 1, header, &read, Store::Version);
 		if (!child) break;
 		if (!SocketItem(game, player, *reinterpret_cast<std::uint32_t*>(static_cast<char*>(child) + 8), parent, 1)) FreeItem(game, child);
+		else socketed.push_back(child);
 		if (read <= 0) break;
 		offset += static_cast<std::size_t>(read);
 	}
+	return socketed;
 }
 
 std::atomic<void*> ServerGame {}; // the game createItem last ran in (this character's)
@@ -7749,7 +7804,7 @@ void* DecodeInstead(void* game, void*, int) noexcept {
 	if (first == -1) return nullptr;
 	int read    = 0;
 	Decode.item = LoadItem(game, nullptr, Decode.bytes->data(), static_cast<int>(Decode.bytes->size()), 1, header, &read, Store::Version);
-	if (Decode.item && read > 0) SocketChildren(game, static_cast<std::size_t>(read));
+	if (Decode.item && read > 0) (void)SocketChildren(game, Decode.item, *Decode.bytes, static_cast<std::size_t>(read), Decode.playerId);
 	return Decode.item;
 }
 
@@ -7781,7 +7836,7 @@ Items::Result Materialize(D2RL::PlayerHandle player, const Record& record, const
 	// Its picture is the record's: known at once (no save bytes to read).
 	if (Items::ItemInfo info { .structSize = Items::ItemInfoSize }; result == Items::Result::Success && made && *made && GetInfo(Context, *made, &info) == Items::Result::Success) {
 		std::lock_guard guard(Lock);
-		if (const int picture = RecordPicture(record); picture >= 0) Pictures[info.runtimeId] = picture;
+		if (const int picture = RecordPicture(record); picture >= 0) SetPicture(info.runtimeId, picture);
 		VariantUnits.erase(info.runtimeId);
 	}
 	return result;
@@ -7855,6 +7910,9 @@ void* LearnGame(D2RL::PlayerHandle player, std::uint32_t code) {
 	return ServerGame.load();
 }
 
+std::mutex                           GhostKidsLock;
+std::map<void*, std::vector<void*>> GhostKids; // a ghost's socketed items, freed with it
+
 // Game thread, Lock not held. A record's bytes decoded by the game's save
 // loader into a loose server item (in no inventory), or null.
 void* GhostFromBytes(void* game, const std::vector<std::uint8_t>& bytes) {
@@ -7864,8 +7922,30 @@ void* GhostFromBytes(void* game, const std::vector<std::uint8_t>& bytes) {
 	(void)ReadHeader(flag, bytes.data(), bytes.size(), 1, header, Store::Version);
 	std::int32_t first = 0;
 	std::memcpy(&first, header, 4);
-	int read = 0;
-	return first != -1 ? LoadItem(game, nullptr, bytes.data(), static_cast<int>(bytes.size()), 1, header, &read, Store::Version) : nullptr;
+	int   read = 0;
+	void* item = first != -1 ? LoadItem(game, nullptr, bytes.data(), static_cast<int>(bytes.size()), 1, header, &read, Store::Version) : nullptr;
+	// Its socketed items (they follow it in the bytes), in it as in the game.
+	if (item && read > 0 && static_cast<std::size_t>(read) < bytes.size()) {
+		const auto base = static_cast<std::uintptr_t>(Context->exeBase);
+		void*      unit = reinterpret_cast<PlayerUnitFn>(base + Sound::PlayerUnit)(reinterpret_cast<LocalIndexFn>(base + Sound::LocalIndex)());
+		if (unit)
+			if (auto socketed = SocketChildren(game, item, bytes, static_cast<std::size_t>(read), *reinterpret_cast<std::uint32_t*>(static_cast<char*>(unit) + 8)); !socketed.empty()) {
+				std::lock_guard guard(GhostKidsLock);
+				GhostKids[item] = std::move(socketed);
+			}
+	}
+	return item;
+}
+
+// Game thread. A ghost freed: its socketed items first (each leaves it), then it.
+void FreeGhost(void* game, void* unit) {
+	std::vector<void*> socketed;
+	{
+		std::lock_guard guard(GhostKidsLock);
+		if (const auto kids = GhostKids.find(unit); kids != GhostKids.end()) socketed = std::move(kids->second), GhostKids.erase(kids);
+	}
+	for (void* child : socketed) FreeItem(game, child);
+	FreeItem(game, unit);
 }
 
 void __cdecl MakeGhosts(const D2RL::PluginContext*, void*) noexcept {
@@ -7882,16 +7962,7 @@ void __cdecl MakeGhosts(const D2RL::PluginContext*, void*) noexcept {
 	static bool told = false;
 	if (!game && !todo.empty() && !told) told = true, Say(true, "grailon: the game was not found; stored items whose tile is not shown cannot be compared");
 	for (const auto& [fingerprint, bytes] : todo) {
-		void* unit = nullptr;
-		if (game) {
-			alignas(16) std::uint8_t header[0x100] {};
-			const auto               flag = *reinterpret_cast<std::uint8_t*>(static_cast<char*>(game) + Store::GameFlag);
-			(void)ReadHeader(flag, bytes.data(), bytes.size(), 1, header, Store::Version);
-			std::int32_t first = 0;
-			std::memcpy(&first, header, 4);
-			int read = 0;
-			if (first != -1) unit = LoadItem(game, nullptr, bytes.data(), static_cast<int>(bytes.size()), 1, header, &read, Store::Version);
-		}
+		void* unit = game ? GhostFromBytes(game, bytes) : nullptr;
 		std::lock_guard guard(Lock);
 		Ghosts[fingerprint] = { unit, game }; // kept even when empty: not tried again
 	}
@@ -7906,7 +7977,11 @@ void __cdecl FreeGhosts(const D2RL::PluginContext*, void*) noexcept {
 	}
 	++GhostEpoch;
 	for (const auto& [fingerprint, ghost] : gone)
-		if (ghost.unit && ghost.game && ghost.game == ServerGame.load()) FreeItem(ghost.game, ghost.unit);
+		if (ghost.unit && ghost.game && ghost.game == ServerGame.load()) FreeGhost(ghost.game, ghost.unit);
+		else if (ghost.unit) {
+			std::lock_guard kids(GhostKidsLock);
+			GhostKids.erase(ghost.unit); // freed with its game
+		}
 	{
 		std::lock_guard guard(Lock);
 		SweepGhosts.clear();
@@ -7918,7 +7993,11 @@ void __cdecl FreeGhosts(const D2RL::PluginContext*, void*) noexcept {
 void __cdecl FreeSomeGhosts(const D2RL::PluginContext*, void* userData) noexcept {
 	auto* gone = static_cast<std::vector<Ghost>*>(userData);
 	for (const auto& ghost : *gone)
-		if (ghost.unit && ghost.game && ghost.game == ServerGame.load()) FreeItem(ghost.game, ghost.unit);
+		if (ghost.unit && ghost.game && ghost.game == ServerGame.load()) FreeGhost(ghost.game, ghost.unit);
+		else if (ghost.unit) {
+			std::lock_guard kids(GhostKidsLock);
+			GhostKids.erase(ghost.unit); // freed with its game
+		}
 	delete gone;
 }
 
@@ -8289,7 +8368,7 @@ void RebuildStored() {
 			if (record.id.rfind("o:", 0) == 0) continue;
 			const auto found = EntryById.find(record.id);
 			const int  u     = found == EntryById.end() || Uniques[found->second].lost || Uniques[found->second].variant ? -1 : found->second;
-			bool       gone  = u < 0 || !RecordMatches(record, u) || (!Uniques[u].misc && (record.eth ? !Uniques[u].eth : Uniques[u].onlyEth));
+			bool       gone  = u < 0 || Outdated.count(fingerprint) || !RecordMatches(record, u) || (!Uniques[u].misc && (record.eth ? !Uniques[u].eth : Uniques[u].onlyEth));
 			if (!gone && !record.base && !Uniques[u].misc && Uniques[u].affixes.empty() && Uniques[u].pictures < 2) gone = !taken.insert({ u, record.eth }).second;
 			if (gone) lost.push_back(fingerprint);
 		}
@@ -8348,6 +8427,20 @@ bool PageMove(D2RL::Inventory::LocalPlayerPageMoveKind kind, int x, int y);
 void Unbusy(std::uint32_t id);
 bool PerfectNow(int u, std::uint32_t runtimeId, bool eth);
 std::atomic<bool> ForgetWanted {}; // grailon forget, done by the next arrange
+// Game thread: the character's pictures read once, as soon as the lists are
+// ready (the loot filter reads ground items' pictures by what it learns there).
+std::atomic<bool> PictureScanQueued {};
+void __cdecl ScanPictures(const D2RL::PluginContext*, void*) noexcept {
+	bool scan = false;
+	{
+		std::lock_guard guard(Lock);
+		scan = !PicturesScanned && Config.graphicVariants && ListsReady;
+		if (scan) PicturesScanned = true;
+	}
+	if (scan) ReadPictures(LocalPlayer.load(), true);
+	PictureScanQueued = false;
+}
+
 void __cdecl Arrange(const D2RL::PluginContext* context, void* userData) noexcept {
 	auto* job = static_cast<ArrangeJob*>(userData);
 	Trace(job->open ? "arrange for view" : "arrange", job->tries);
@@ -8964,7 +9057,7 @@ void ReadPictures(D2RL::PlayerHandle player, bool all) {
 		snapshot.code = item.code;
 		if (ItemApi->editNativeItem(Context, item.handle, TakeSnapshot, &snapshot) == Items::Result::Success && snapshot.ok) {
 			std::lock_guard guard(Lock);
-			Pictures[item.runtimeId] = PictureInBytes(snapshot.bytes, snapshot.itemLevel, snapshot.quality);
+			SetPicture(item.runtimeId, PictureInBytes(snapshot.bytes, snapshot.itemLevel, snapshot.quality));
 			VariantUnits.erase(item.runtimeId);
 		}
 	}
@@ -10111,6 +10204,8 @@ using StatFn        = int (*)(void* unit, int stat, int layer) noexcept; // D2RC
 
 std::uintptr_t Base {};
 void* ClientItem(std::uint32_t runtimeId) { return Base ? reinterpret_cast<GetUnitFn>(Base + Game::GetUnit)(runtimeId, Game::ItemUnit) : nullptr; }
+
+
 int   RunewordFlagOn(std::uint32_t runtimeId) {
     if (!RunewordFlagTrusted.load()) return -1;
     const auto* unit = static_cast<const std::uint8_t*>(ClientItem(runtimeId));
@@ -10133,6 +10228,22 @@ struct Roll {
 	int layer {}, worst {}, best {};
 };
 std::vector<std::vector<Roll>> Rolls; // by index in Uniques; guarded by Lock
+// Items the current ladder season reworked (their row's firstLadderSeason is
+// the newest season of the tables): every stat their row gives, with its
+// lowest value. A copy below one of them is an older version.
+// A stat a reworked row gives: its layer (-1: any), its range (summed over
+// the props that give it), whether the value is checked or only its presence.
+struct Need {
+	int  stat = -1, layer = 0, low = 0, high = 0;
+	bool value = true;
+};
+struct Rework {
+	std::vector<Need> needs;   // what the copy must have
+	std::vector<Need> bonuses; // a set item's own set bonuses (its lists with a state)
+	std::set<int>     allowed; // every stat its props (and their choices) can give
+};
+std::map<std::pair<int, int>, Rework> ReworkChecks; // (0 unique, 1 set, 2 runeword; row); guarded by Lock
+std::set<std::uint32_t>                          VersionChecked; // records whose ghost told whether they are older versions (this launch); guarded by Lock
 std::vector<bool>              EdRolls; // the item has a variable Enhanced Defense roll
 // The best defense stat (31) a copy can have, plain and ethereal: the base's
 // maxac (+1 with Enhanced Defense, as the game rolls it), x1.5 when ethereal,
@@ -10267,10 +10378,203 @@ void AddRolls(std::vector<Roll>& out, bool& ed, const unsigned char* row, int fi
 	}
 }
 
+// Every stat a row's props give: the ones the copy must have (with their
+// range when the prop sets a plain value), and every one it may have.
+void AddChecks(Rework& out, const unsigned char* row, int first, int count, const unsigned char* props, std::uint32_t propCount, std::uint32_t propSize, const PropLayout& layout,
+               const unsigned char* groups, std::uint32_t groupCount, std::uint32_t groupSize, bool bonus = false) {
+	const auto statsOf = [&](const unsigned char* text, std::vector<std::pair<int, int>>& out) { // (stat, func)
+		for (int s = 0; s < 7; ++s) {
+			if (layout.stat + 2 * s + 2 > static_cast<int>(propSize) || layout.func + s >= static_cast<int>(propSize)) break;
+			const int stat = Field<std::uint16_t>(text, layout.stat + 2 * s), func = text[layout.func + s];
+			if (s > 0 && !func) break;
+			if (stat != 0xFFFF) out.push_back({ stat, func });
+		}
+	};
+	const auto allow = [&](int prop) {
+		if (prop < 0 || static_cast<std::uint32_t>(prop) >= propCount) return;
+		const unsigned char* text = props + static_cast<std::size_t>(prop) * propSize;
+		std::vector<std::pair<int, int>> stats;
+		statsOf(text, stats);
+		for (const auto& [stat, func] : stats) out.allowed.insert(stat);
+		const int func = text[layout.func];
+		if (func == 5) out.allowed.insert({ 21, 23, 159 });
+		if (func == 6) out.allowed.insert({ 22, 24, 160 });
+		if (func == 7) out.allowed.insert({ 17, 18 });
+	};
+	auto&      needs = bonus ? out.bonuses : out.needs;
+	const auto need  = [&](int stat, int layer, int low, int high, bool value) {
+		for (auto& known : needs)
+			if (known.stat == stat && known.layer == layer && known.value == value) {
+				known.low += low, known.high += high;
+				return;
+			}
+		needs.push_back({ .stat = stat, .layer = layer, .low = std::min(low, high), .high = std::max(low, high), .value = value });
+	};
+	for (int p = 0; p < count; ++p) {
+		const int at = first + p * 16;
+		const int prop = Field<std::int32_t>(row, at), par = Field<std::int32_t>(row, at + 4), low = Field<std::int32_t>(row, at + 8), high = Field<std::int32_t>(row, at + 12);
+		if (prop >= 0x10000) { // a property group: any of its choices may be there
+			const int g = prop - 0x10000;
+			if (!groups || g < 0 || static_cast<std::uint32_t>(g) >= groupCount || groupSize < 8 + 24) continue;
+			const unsigned char* group = groups + static_cast<std::size_t>(g) * groupSize;
+			for (int e = 0; e < std::min<int>(8, static_cast<int>((groupSize - 8) / 24)); ++e) allow(Field<std::int32_t>(group + 8 + e * 24, 0));
+			continue;
+		}
+		if (prop < 0 || static_cast<std::uint32_t>(prop) >= propCount) continue;
+		allow(prop);
+		const unsigned char* text = props + static_cast<std::size_t>(prop) * propSize;
+		std::vector<std::pair<int, int>> stats;
+		statsOf(text, stats);
+		const int func = text[layout.func];
+		if (func == 7) need(17, 0, low, high, true), need(18, 0, low, high, true);
+		else if (func == 21 && !stats.empty()) need(stats[0].first, Field<std::uint16_t>(text, layout.value), low, high, true);
+		else if (func == 22 && !stats.empty()) need(stats[0].first, par, low, high, true);
+		else if (func == 10 && !stats.empty()) need(stats[0].first, (par / 3) * 8 + par % 3, low, high, true);
+		else if (func == 11 || func == 19) {
+			if (!stats.empty()) need(stats[0].first, -1, 0, 0, false); // there, its value not checked
+		} else
+			// Each stat by its own function: the value (1, 3), the min (15), the max (16), per level (17: there).
+			for (const auto& [stat, f] : stats) {
+				if (f == 1 || f == 3) need(stat, 0, low, high, true);
+				else if (f == 15) need(stat, 0, low, low, true);
+				else if (f == 16) need(stat, 0, high, high, true);
+				else if (f == 17) need(stat, -1, 0, 0, false);
+			}
+	}
+	// Defense, Enhanced Defense and sockets also come from the base or the smith.
+	std::erase_if(out.bonuses, [](const Need& n) { return n.stat == 31 || n.stat == 16 || n.stat == SocketsStat; });
+	std::erase_if(out.needs, [](const Need& n) { return n.stat == 31 || n.stat == 16 || n.stat == SocketsStat; });
+	out.allowed.insert({ 31, 16, SocketsStat, 21, 22, 23, 24, 159, 160 }); // the weapon damage stats come with the base's damage too
+}
+
+// Each row's firstLadderSeason in a game table (0 for none), by compiled
+// row: the "Expansion" divider lines are not rows of the compiled table.
+std::vector<int> FirstSeasons(const char* path) {
+	std::string file = ArchiveFile(path);
+	if (file.empty()) file = ResourceFile(path);
+	std::vector<int> out;
+	int              column = -1;
+	bool             head   = true;
+	for (std::size_t at = 0; at < file.size();) {
+		auto end = file.find('\n', at);
+		if (end == std::string::npos) end = file.size();
+		const std::string line = file.substr(at, end - at);
+		at                     = end + 1;
+		if (line.empty() || line == "\r") continue;
+		std::size_t from = 0;
+		if (!head && line.rfind("Expansion\t", 0) == 0) continue;
+		int         k    = 0, value = 0;
+		for (;; ++k) {
+			const auto  tab  = line.find('\t', from);
+			std::string cell = line.substr(from, tab == std::string::npos ? std::string::npos : tab - from);
+			while (!cell.empty() && (cell.back() == '\r' || cell.back() == ' ')) cell.pop_back();
+			if (head && cell == "firstLadderSeason") column = k;
+			if (!head && k == column) value = std::atoi(cell.c_str());
+			if (tab == std::string::npos) break;
+			from = tab + 1;
+		}
+		if (!head) out.push_back(value);
+		head = false;
+		if (column < 0) return {};
+	}
+	return out;
+}
+
+int Stat(void* unit, int stat, int layer);
+int Display(int stat, int value);
+template <typename T>
+T At(const void* base, std::ptrdiff_t offset);
+// An item's own magic stats: (stat, layer) -> value, from the lists RawStat
+// reads (magic properties, no state). Empty when it has none.
+// `which`: 0 its magic properties, 1 every list (runewords keep theirs apart), 2 its set bonuses (magic lists with a state).
+std::map<std::pair<int, int>, int> OwnStats(const void* unit, int which = 0) {
+	std::map<std::pair<int, int>, int> out;
+	const auto* ex = unit ? At<const std::uint8_t*>(unit, 0x88) : nullptr;
+	if (!ex || At<std::int32_t>(ex, 0x1C) >= 0) return out;
+	for (const std::ptrdiff_t chain : { 0x90, 0x98 }) {
+		int guard = 0;
+		for (const auto* list = At<const std::uint8_t*>(ex, chain); list && guard < 32; list = At<const std::uint8_t*>(list, 0x68), ++guard) {
+			const auto  flags = At<std::uint32_t>(list, 0x1C), state = At<std::uint32_t>(list, 0x20);
+			const auto* entries = At<const std::uint8_t*>(list, 0x30);
+			const auto  count   = At<std::uint64_t>(list, 0x38);
+			const bool take = which == 0 ? state == 0 && (flags & 0x40) : which == 1 ? state == 0 && ((flags & 0x40) || static_cast<std::int32_t>(flags) >= 0) : state != 0 && (flags & 0x40);
+			if (!take || !entries || count > 512) continue;
+			for (std::uint64_t i = 0; i < count; ++i) {
+				const auto* entry = entries + i * 16;
+				out[{ static_cast<int>(At<std::uint32_t>(entry, 4)), static_cast<int>(At<std::uint32_t>(entry, 0)) }] += At<std::int32_t>(entry, 8);
+			}
+		}
+	}
+	return out;
+}
+
+// Lock held. Whether `unit` (entry `u`) is not its item as the current
+// season's row makes it: a stat it must have is missing or out of its range,
+// or it has a stat the row cannot give. With socketed items in it (their
+// stats count too), only missing stats and too low values tell.
+bool OldVersion(int u, void* unit) {
+	if (u < 0 || u >= UniqueCount() || !unit) return false;
+	const auto& entry = Uniques[u];
+	const auto  found = ReworkChecks.find({ entry.runeword ? 2 : entry.set ? 1 : 0, entry.row });
+	if (found == ReworkChecks.end()) return false;
+	const auto own = OwnStats(unit, entry.runeword ? 1 : 0);
+	if (own.empty()) {
+		static int empty = 0;
+		if (empty++ < 10) Say(false, "grailon: %s: no stat list read, not judged", entry.name.c_str());
+		return false;
+	}
+	const bool socketed = entry.runeword || Stat(unit, SocketsStat, 0) > 0 || own.count({ SocketsStat, 0 });
+	static int told = 0;
+	const auto old = [&](const char* why, int stat, int layer, int value, int low, int high) {
+		if (told++ < 40) Say(false, "grailon: %s: stat %d (layer %d) %s (%d; this season's row: %d-%d)", entry.name.c_str(), stat, layer, why, value, low, high);
+		return true;
+	};
+	for (const auto& need : found->second.needs) {
+		int  value = 0;
+		bool there = false;
+		for (const auto& [key, v] : own)
+			if (key.first == need.stat && (need.layer < 0 || key.second == need.layer)) value += v, there = true;
+		if (!there) return old("missing", need.stat, need.layer, 0, need.low, need.high);
+		if (!need.value) continue;
+		value = Display(need.stat, value);
+		if (value < need.low || (!socketed && value > need.high)) return old("out of range", need.stat, need.layer, value, need.low, need.high);
+	}
+	if (!socketed)
+		for (const auto& [key, v] : own)
+			if (!found->second.allowed.count(key.first)) return old("not given by its row", key.first, key.second, v, 0, 0);
+	// A set item's own bonuses, when its bonus lists are there.
+	if (!found->second.bonuses.empty())
+		if (const auto bonus = OwnStats(unit, 2); !bonus.empty()) {
+			for (const auto& need : found->second.bonuses) {
+				int  value = 0;
+				bool there = false;
+				for (const auto& [key, v] : bonus)
+					if (key.first == need.stat && (need.layer < 0 || key.second == need.layer)) value += v, there = true;
+				if (!there) return old("missing from its set bonuses", need.stat, need.layer, 0, need.low, need.high);
+				if (need.value && (Display(need.stat, value) < need.low || Display(need.stat, value) > need.high)) return old("out of range in its set bonuses", need.stat, need.layer, Display(need.stat, value), need.low, need.high);
+			}
+			std::set<int> given;
+			for (const auto& need : found->second.bonuses) given.insert(need.stat);
+			for (const auto& [key, v] : bonus)
+				if (!given.count(key.first) && !found->second.allowed.count(key.first)) return old("not given by its set bonuses", key.first, key.second, v, 0, 0);
+		} else {
+			static int none = 0;
+			if (none++ < 5) Say(false, "grailon: %s: no set bonus list read, its set bonuses not judged", entry.name.c_str());
+		}
+	return false;
+}
+
 void BuildRolls(const D2RL::PluginContext* context) {
+	const std::vector<int> seasons[3] { FirstSeasons("data/global/excel/uniqueitems.txt"), FirstSeasons("data/global/excel/setitems.txt"), FirstSeasons("data/global/excel/runes.txt") };
+	int season = 0;
+	for (const auto& table : seasons)
+		for (const int first : table) season = std::max(season, first);
 	Tables::TableView props { .structSize = Tables::TableViewSize }, uniques { .structSize = Tables::TableViewSize }, sets { .structSize = Tables::TableViewSize },
 	    runes { .structSize = Tables::TableViewSize };
 	if (TableApi) (void)TableApi->getTable(context, Tables::Bank::Rotw, Tables::TableId::Runes, &runes);
+	Tables::TableView groupView { .structSize = Tables::TableViewSize };
+	if (TableApi && TableApi->getTable(context, Tables::Bank::Rotw, Tables::TableId::PropertyGroups, &groupView) != Tables::Result::Success) groupView.rows = nullptr;
+	const auto* groupRows = static_cast<const unsigned char*>(groupView.rows);
 	if (!TableApi || TableApi->getTable(context, Tables::Bank::Rotw, Tables::TableId::Properties, &props) != Tables::Result::Success
 	    || TableApi->getTable(context, Tables::Bank::Rotw, Tables::TableId::UniqueItems, &uniques) != Tables::Result::Success
 	    || TableApi->getTable(context, Tables::Bank::Rotw, Tables::TableId::SetItems, &sets) != Tables::Result::Success) {
@@ -10287,12 +10591,24 @@ void BuildRolls(const D2RL::PluginContext* context) {
 	Rolls.assign(Uniques.size(), {});
 	EdRolls.assign(Uniques.size(), false);
 	BestDefense.assign(Uniques.size(), {});
+	ReworkChecks.clear();
+	VersionChecked.clear(), Outdated.clear(), OldUnits.clear();
 	for (std::size_t u = 0; u < Uniques.size(); ++u) {
 		const auto& entry = Uniques[u];
 		const auto& table = entry.runeword ? runes : entry.set ? sets : uniques;
 		if (entry.row < 0 || static_cast<std::uint32_t>(entry.row) >= table.rowCount || !table.rows) continue;
 		const auto* row = static_cast<const unsigned char*>(table.rows) + static_cast<std::size_t>(entry.row) * table.rowSize;
 		bool        ed  = false;
+		// Reworked this season: its stats, to tell older copies.
+		if (const int kind = entry.runeword ? 2 : entry.set ? 1 : 0; season > 0 && !entry.misc && entry.row < static_cast<int>(seasons[kind].size()) && seasons[kind][entry.row] == season
+		    && !ReworkChecks.count({ kind, entry.row })) {
+			auto& checks = ReworkChecks[{ kind, entry.row }];
+			if (entry.runeword) {
+				if (RuneFields.props >= 0) AddChecks(checks, row, RuneFields.props, RuneLayout::PropCount, rows, props.rowCount, props.rowSize, layout, groupRows, groupView.rowCount, groupView.rowSize);
+			} else AddChecks(checks, row, 152, entry.set ? 9 : 12, rows, props.rowCount, props.rowSize, layout, groupRows, groupView.rowCount, groupView.rowSize);
+			// A set item's own set bonuses (aprop1a-5b, after its 9 props).
+			if (entry.set && sets.rowSize >= 296 + 10 * 16) AddChecks(checks, row, 296, 10, rows, props.rowCount, props.rowSize, layout, groupRows, groupView.rowCount, groupView.rowSize, true);
+		}
 		if (entry.runeword) {
 			// Its base's defense is not known: only the runeword's own rolls count.
 			if (RuneFields.props >= 0) AddRolls(Rolls[u], ed, row, RuneFields.props, RuneLayout::PropCount, rows, props.rowCount, props.rowSize, layout);
@@ -10321,6 +10637,8 @@ void BuildRolls(const D2RL::PluginContext* context) {
 			BestDefense[u] = { top + flat, top * 3 / 2 + flat };
 		}
 	}
+	if (season > 0) Say(false, "grailon: ladder season %d reworked %zu items: older copies of them are not taken (set rows of %u bytes)", season, ReworkChecks.size(), sets.rowSize);
+	else Say(false, "grailon: no firstLadderSeason column read (%zu/%zu/%zu rows)", seasons[0].size(), seasons[1].size(), seasons[2].size());
 	// "Defense: %d" from the game's strings, up to the colon; English when the
 	// key is not found.
 	for (const char* key : { "ItemStats1h", "strItemStats1h" }) {
@@ -10367,6 +10685,32 @@ T At(const void* base, std::ptrdiff_t offset) {
 	T value {};
 	if (base) std::memcpy(&value, static_cast<const unsigned char*>(base) + offset, sizeof(T));
 	return value;
+}
+
+// Lock held. One of the player's items' picture: kept, and a sample for PictureOffset.
+void SetPicture(std::uint32_t runtimeId, int picture) {
+	Pictures[runtimeId] = picture;
+	if (picture < 0 || Learning.confirmed || Learning.failed || !Learning.items.insert(runtimeId).second) return;
+	const void* unit = ClientItem(runtimeId);
+	const auto* data = unit ? At<const std::uint8_t*>(unit, Game::UnitData) : nullptr;
+	if (!data) return;
+	for (int i = 0; i < PictureScan; ++i)
+		if (data[i] != picture) Learning.out.set(i);
+	Learning.seen.insert(picture);
+	if (const int at = PictureOffset; at >= 0 && Learning.out.test(at)) {
+		PictureOffset = -1;
+		Say(true, "grailon: an item's picture is not at item data +0x%X: Filter graphic variants waits until its place is learnt", at);
+	}
+	if (Learning.out.all()) {
+		Learning.failed = true;
+		Say(true, "grailon: no byte of the item data holds the picture (%zu items): Filter graphic variants cannot read ground items' pictures", Learning.items.size());
+		return;
+	}
+	if (Learning.items.size() < 6 || Learning.seen.size() < 3 || Learning.out.count() != PictureScan - 1) return;
+	Learning.confirmed = true;
+	for (int i = 0; i < PictureScan; ++i)
+		if (!Learning.out.test(i)) PictureOffset = i;
+	Say(false, "grailon: items keep their picture at item data +0x%X (learnt from %zu items, %zu pictures)", PictureOffset.load(), Learning.items.size(), Learning.seen.size());
 }
 
 
@@ -10841,6 +11185,7 @@ struct LootRow {
 	int          item = -1; // the base's Items row: the unit's class must match
 	std::uint8_t hide {};   // 1: hidden plain, 2: hidden ethereal
 	std::uint8_t check {};  // the same bits: shown only when an upgrade of its grail copy (Filter unidentified stats, Hide perfect)
+	std::vector<std::uint8_t> pictures; // Filter graphic variants: the hide bits by the drop's picture (empty: `hide` for all)
 	bool operator==(const LootRow&) const = default;
 };
 struct LootTable {
@@ -10848,6 +11193,8 @@ struct LootTable {
 	// By Items row: hidden whatever unique (set item) of that base it is, for
 	// unidentified items when ambiguous bases are not filtered.
 	std::vector<std::uint8_t> uniqueBases, setBases;
+	// The same by picture (Filter graphic variants): [Items row][picture], empty when not filtered so.
+	std::vector<std::vector<std::uint8_t>> uniqueBasePics, setBasePics;
 	bool                      exact {};   // unidentified items by their row
 	bool                      unidOnly {}; // identified items are never hidden
 	bool                      unidStats {}; // unidentified items as good as their grail copy show
@@ -10989,7 +11336,7 @@ void __cdecl CheckUpgrades(const D2RL::PluginContext*, void*) noexcept {
 					std::lock_guard guard(Lock);
 					CopyValues[print] = RollValues(u, copy, tileEth);
 				}
-				if (copy) FreeItem(game, copy);
+				if (copy) FreeGhost(game, copy);
 			}
 			if (print) {
 				std::lock_guard guard(Lock);
@@ -11015,6 +11362,15 @@ void __cdecl CheckUpgrades(const D2RL::PluginContext*, void*) noexcept {
 	UpgradeRunning = false;
 }
 
+// The first decisions by picture, logged.
+void LootTrace(int item, int file, int picture, bool hidden) noexcept {
+	static std::atomic<int>           told {};
+	static std::atomic<std::uint64_t> last {};
+	const std::uint64_t key = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(item)) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(file)) << 8) ^ static_cast<std::uint64_t>(picture & 0xFF) ^ (hidden ? 1ULL << 63 : 0);
+	if (last.exchange(key) == key) return;
+	if (told.fetch_add(1) < 12) Say(false, "grailon: loot filter by picture: base row %d, %s %d, picture %d: %s", item, file >= 0 ? "item row" : "unidentified, any of its base", file, picture, hidden ? "hidden" : "shown");
+}
+
 bool LootDecide(const void* unit, const void* data, const LootTable& table, std::uint32_t quality, int& file) noexcept {
 	const auto* rows = quality == Game::UniqueQuality ? &table.uniques : &table.sets;
 	const auto flags = At<std::uint32_t>(data, Game::DataFlags);
@@ -11022,8 +11378,17 @@ bool LootDecide(const void* unit, const void* data, const LootTable& table, std:
 	const int  bit   = (flags & Game::Ethereal) ? 2 : 1;
 	file             = -1;
 	if ((flags & Loot::Identified) && table.unidOnly) return false;
+	// Its picture, when Filter graphic variants reads it (-1: not read).
+	const int  at      = PictureOffset.load(std::memory_order_relaxed);
+	const int  picture = at >= 0 ? At<std::uint8_t>(data, at) : -1;
 	// Unidentified, filtered as its base only: hidden when every item of that base would be.
 	if (!(flags & Loot::Identified) && !table.exact) {
+		const auto& pics = quality == Game::UniqueQuality ? table.uniqueBasePics : table.setBasePics;
+		if (picture >= 0 && item >= 0 && item < static_cast<int>(pics.size()) && !pics[item].empty()) {
+			const bool hidden = picture < static_cast<int>(pics[item].size()) && (pics[item][picture] & bit) != 0;
+			LootTrace(item, -1, picture, hidden);
+			return hidden;
+		}
 		const auto& bases = quality == Game::UniqueQuality ? table.uniqueBases : table.setBases;
 		return item >= 0 && item < static_cast<int>(bases.size()) && (bases[item] & bit) != 0;
 	}
@@ -11031,7 +11396,13 @@ bool LootDecide(const void* unit, const void* data, const LootTable& table, std:
 	if (file < 0 || file >= static_cast<int>(rows->size())) return false;
 	const LootRow& row = (*rows)[file];
 	// An unidentified item's row is only trusted when its base is the row's.
-	if (!row.hide || row.item != item) return false;
+	if (row.item != item) return false;
+	// Filter graphic variants: by its own picture's tiles.
+	if (!row.pictures.empty() && picture >= 0) {
+		const bool hidden = picture < static_cast<int>(row.pictures.size()) && (row.pictures[picture] & bit) != 0;
+		LootTrace(item, file, picture, hidden);
+		return hidden;
+	}
 	return (row.hide & bit) != 0;
 }
 
@@ -11164,6 +11535,18 @@ void PublishLootTable() {
 					all &= (!HasTile(v, false) || hides(v, false, Config.loot[0]) ? 1 : 0) | (!HasTile(v, true) || hides(v, true, Config.loot[1]) ? 2 : 0);
 			row.hide  = (BaseHasTile(u, false) ? all & 1 : 0) | (BaseHasTile(u, true) ? all & 2 : 0);
 			row.check = 0;
+			// By picture: the variants of that picture (and those of any picture).
+			if (Config.lootGraphic && Config.graphicVariants && Uniques[u].pictures > 1) {
+				row.pictures.assign(static_cast<std::size_t>(Uniques[u].pictures), 0);
+				for (int p = 0; p < Uniques[u].pictures; ++p) {
+					int  bits = 3;
+					bool any  = false;
+					for (const int v : Uniques[u].variants)
+						if ((Uniques[v].picture == p || Uniques[v].picture < 0) && (HasTile(v, false) || HasTile(v, true)))
+							any = true, bits &= (!HasTile(v, false) || hides(v, false, Config.loot[0]) ? 1 : 0) | (!HasTile(v, true) || hides(v, true, Config.loot[1]) ? 2 : 0);
+					row.pictures[p] = static_cast<std::uint8_t>(any ? (BaseHasTile(u, false) ? bits & 1 : 0) | (BaseHasTile(u, true) ? bits & 2 : 0) : 0);
+				}
+			}
 		}
 	}
 	// A set item has one tile, ethereal or not.
@@ -11181,6 +11564,15 @@ void PublishLootTable() {
 				if (HasTile(v, false)) any = true, all = all && hides(v, false, Config.loot[2]);
 			row.hide  = any && all ? 3 : 0;
 			row.check = 0;
+			if (Config.lootGraphic && Config.graphicVariants && Uniques[u].pictures > 1) {
+				row.pictures.assign(static_cast<std::size_t>(Uniques[u].pictures), 0);
+				for (int p = 0; p < Uniques[u].pictures; ++p) {
+					bool every = true, some = false;
+					for (const int v : Uniques[u].variants)
+						if ((Uniques[v].picture == p || Uniques[v].picture < 0) && HasTile(v, false)) some = true, every = every && hides(v, false, Config.loot[2]);
+					row.pictures[p] = some && every ? 3 : 0;
+				}
+			}
 		}
 	}
 	// Per base: every unique (set item) that can be it, plain and ethereal.
@@ -11199,6 +11591,31 @@ void PublishLootTable() {
 	};
 	byBase(table->uniques, UniqueByRow, table->uniqueBases);
 	byBase(table->sets, SetByRow, table->setBases);
+	// By picture: a base whose items have pictures; an item with no picture
+	// tiles counts for every picture.
+	const auto byBasePics = [&](const std::vector<LootRow>& rows, const std::vector<int>& entries, std::vector<std::vector<std::uint8_t>>& pics, bool sets) {
+		if (!Config.lootGraphic || !Config.graphicVariants) return;
+		std::vector<std::vector<std::uint8_t>> seen;
+		for (std::size_t r = 0; r < rows.size(); ++r) {
+			const int item = rows[r].item, u = entries[r];
+			if (item < 0 || u < 0 || u >= UniqueCount() || Uniques[u].secret) continue;
+			const auto base = Bases.find(Uniques[u].code);
+			const int  n    = base == Bases.end() ? 0 : std::min(base->second.pictures, 8);
+			if (n < 2) continue;
+			if (static_cast<int>(pics.size()) <= item) pics.resize(item + 1), seen.resize(item + 1);
+			if (pics[item].empty()) pics[item].assign(n, 3), seen[item].assign(n, 0);
+			const std::uint8_t can = sets ? 3 : (BaseHasTile(u, false) ? 1 : 0) | (BaseHasTile(u, true) ? 2 : 0);
+			for (int p = 0; p < static_cast<int>(pics[item].size()); ++p) {
+				const std::uint8_t hide = rows[r].pictures.empty() ? rows[r].hide : p < static_cast<int>(rows[r].pictures.size()) ? rows[r].pictures[p] : 0;
+				pics[item][p] &= static_cast<std::uint8_t>(hide | ~can);
+				seen[item][p] |= can;
+			}
+		}
+		for (std::size_t i = 0; i < pics.size(); ++i)
+			for (std::size_t p = 0; p < pics[i].size(); ++p) pics[i][p] &= seen[i][p];
+	};
+	byBasePics(table->uniques, UniqueByRow, table->uniqueBasePics, false);
+	byBasePics(table->sets, SetByRow, table->setBasePics, true);
 	table->exact    = Config.lootAmbiguous;
 	table->unidOnly  = Config.lootUnidOnly;
 	table->unidStats = Config.lootUnidStats;
@@ -11401,6 +11818,35 @@ bool RefreshPerfect() {
 				static int told = 0;
 				if (told++ < 40) Say(false, "grailon: stored %s is variant %s", record.id.c_str(), record.variant.c_str());
 			}
+		}
+		// Stored copies of items this season reworked: older versions are lost items.
+		for (auto& [fingerprint, record] : Records) {
+			if (record.base || VersionChecked.count(fingerprint)) continue;
+			const auto entry = EntryById.find(record.id);
+			if (entry == EntryById.end()) {
+				VersionChecked.insert(fingerprint);
+				continue;
+			}
+			const auto& e = Uniques[entry->second];
+			if (!ReworkChecks.count({ e.runeword ? 2 : e.set ? 1 : 0, e.row })) {
+				VersionChecked.insert(fingerprint);
+				continue;
+			}
+			void* unit = nullptr;
+			for (const auto& [runtime, print] : Materialized)
+				if (print == fingerprint) unit = reinterpret_cast<GetUnitFn>(Base + Game::GetUnit)(runtime, Game::ItemUnit);
+			const auto ghost = unit ? Ghosts.end() : Ghosts.find(fingerprint);
+			if (!unit && ghost == Ghosts.end()) {
+				if (asked < 8 && !GhostWanted.count(fingerprint)) ++asked, SweepGhosts.insert(fingerprint), (void)GhostOf(fingerprint);
+				continue;
+			}
+			if (!unit) unit = ghost->second.unit;
+			VersionChecked.insert(fingerprint);
+			if (unit && OldVersion(entry->second, unit)) {
+				Outdated.insert(fingerprint), changed = true;
+				Say(false, "grailon: stored %s is an older version than this season's: moved to Lost items", e.name.c_str());
+			}
+			if (ghost != Ghosts.end() && SweepGhosts.erase(fingerprint) && ghost->second.unit != PeekShown) done->push_back(ghost->second), Ghosts.erase(ghost);
 		}
 		for (auto& [fingerprint, record] : Records) {
 			if (record.perfect || record.base || onPage.count(fingerprint) || PerfectChecked.count(fingerprint)) continue;
@@ -12929,13 +13375,26 @@ void __cdecl UiTick(const D2RL::PluginContext* context, void*) noexcept {
 		}
 		seen = player;
 		Ghosts.clear(), GhostWanted.clear(); // that game's: freed with it
-		VariantUnits.clear(), Pictures.clear();
+		{
+			std::lock_guard kids(GhostKidsLock);
+			GhostKids.clear();
+		}
+		VariantUnits.clear(), Pictures.clear(), Learning.items.clear(), OldUnits.clear();
 		{
 			std::lock_guard upgrades(UpgradeLock);
 			UnidUpgrade.clear(), UpgradeAsked.clear(); // its items' ids
 		}
 		ServerGame = nullptr;
 		if (player) OpenStoreFor(player), StaleChecked = false;
+	}
+	// The character's pictures, read early for the loot filter.
+	if (LootOn && Threads && LocalPlayer.load() && !PictureScanQueued) {
+		bool want = false;
+		{
+			std::lock_guard guard(Lock);
+			want = !PicturesScanned && Config.graphicVariants && Config.lootGraphic && ListsReady;
+		}
+		if (want && !PictureScanQueued.exchange(true) && Threads->runOnGameThread(Context, ScanPictures, nullptr) != D2RL::Threads::Result::Success) PictureScanQueued = false;
 	}
 	// What the loot filter hides follows the grail.
 	if (LootOn) {
