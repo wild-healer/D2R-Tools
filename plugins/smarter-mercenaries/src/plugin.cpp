@@ -54,7 +54,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.3";
+constexpr const char* PluginVersion = "0.0.4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -109,11 +109,13 @@ constexpr Code CanTargetCode    { 0x597710, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48
 constexpr Code OwnerCode        { 0x4A53C0, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0xE8, 0x02, 0x66, 0xEA, 0xFF, 0x83, 0xF8 }, 0 };
 constexpr Code UnitTypeCode     { 0x34B9D0, { 0x48, 0x83, 0xEC, 0x28, 0x48, 0x85, 0xC9, 0x75, 0x1D, 0x88, 0x4C, 0x24, 0x30, 0x48, 0x8D, 0x4C }, 0 };
 constexpr Code PetInfoCode      { 0x4FF2D0, { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x55, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x20, 0x8B, 0xDA, 0x48 }, 0 };
+constexpr Code WalkToCode       { 0x4A8880, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57 }, 0 };
 constexpr Code SkillTargetCode  { 0x48FE20, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xDA, 0xE8, 0x22, 0x1D, 0x00, 0x00, 0x48, 0x8B }, 0 };
 
 constexpr std::uintptr_t UnitTypeOffset   = 0x00; // u32: 0 player, 1 monster
 constexpr std::uintptr_t UnitClassOffset  = 0x04; // u32
 constexpr std::uintptr_t UnitIdOffset     = 0x08; // u32
+constexpr std::uintptr_t UnitPathOffset   = 0x38; // Path*: +2 x, +6 y (u16)
 constexpr std::uintptr_t UnitDataOffset   = 0x10; // MonsterData*: +0x1A type flags
 constexpr std::uintptr_t MonTypeFlags     = 0x1A; // u8: 2 super unique, 4 champion, 8 unique
 constexpr std::uintptr_t GameBank         = 0x106; // u8, the data bank the game reads
@@ -156,6 +158,7 @@ using OwnerFn        = void* (*)(void* unit) noexcept;
 using UnitTypeFn     = int (*)(void* unit) noexcept;
 using PetInfoFn      = void* (*)(void* owner, std::uint32_t guid) noexcept;
 using SkillTargetFn  = void* (*)(void* game, void* unit) noexcept;
+using WalkToFn       = int (*)(void* game, void* unit, int x, int y) noexcept;
 
 const D2RL::PluginContext* Context {};
 std::uintptr_t             Base {};
@@ -184,6 +187,7 @@ OwnerFn        Owner {};
 UnitTypeFn     UnitType {};
 PetInfoFn      PetInfo {};
 SkillTargetFn  SkillTarget {};
+WalkToFn       WalkTo {};
 
 void Log(bool warn, const char* format, ...) noexcept {
 	if (!Context) return;
@@ -551,6 +555,61 @@ void FrenzyBarbAttack(void* game, void* merc, void* owner, void* target, const s
 	NormalAttack(game, merc, target, params);
 }
 
+// Diagnostics: what each mercenary's think did, one line per mercenary and
+// reason every few seconds (only with log on).
+struct TraceSlot {
+	std::uint32_t id;
+	const char*   reason;
+	DWORD         tick;
+};
+std::array<TraceSlot, 32> TraceSlots {};
+
+void Trace(void* merc, const char* reason, int value = -1) noexcept {
+	if (!Config.log.load(std::memory_order_relaxed)) return;
+	const std::uint32_t id  = Field<std::uint32_t>(merc, UnitIdOffset);
+	const DWORD         now = GetTickCount();
+	TraceSlot*          slot = nullptr;
+	for (auto& entry : TraceSlots)
+		if (entry.id == id && entry.reason == reason) slot = &entry;
+	if (slot && now - slot->tick < 5000) return;
+	if (!slot) {
+		slot = &TraceSlots[0];
+		for (auto& entry : TraceSlots)
+			if (entry.tick < slot->tick) slot = &entry;
+	}
+	*slot = { id, reason, now };
+	if (value >= 0) Log(false, "merc class %u id %u: %s %d", Field<std::uint32_t>(merc, UnitClassOffset), id, reason, value);
+	else Log(false, "merc class %u id %u: %s", Field<std::uint32_t>(merc, UnitClassOffset), id, reason);
+}
+
+bool Position(void* unit, int& x, int& y) noexcept {
+	void* const path = Field<void*>(unit, UnitPathOffset);
+	if (!path) return false;
+	x = Field<std::uint16_t>(path, 2);
+	y = Field<std::uint16_t>(path, 6);
+	return true;
+}
+
+// Barbarians body-block: a monster coming at you meets the barbarian standing
+// between the two of you, a few steps out from you.
+bool BodyBlock(void* game, void* merc, void* owner, void* target, Role role) noexcept {
+	if (SkillTarget(game, target) != owner) return false;
+	const int fromOwner = Distance(owner, target);
+	if (fromOwner < 4 || fromOwner > 14 || Distance(merc, target) <= 3) return false;
+	int ox = 0, oy = 0, tx = 0, ty = 0, mx = 0, my = 0;
+	if (!Position(owner, ox, oy) || !Position(target, tx, ty) || !Position(merc, mx, my)) return false;
+	const int dx = tx - ox, dy = ty - oy;
+	const int length = std::max(std::abs(dx), std::abs(dy));
+	if (length <= 0) return false;
+	const int step = 3; // how far out from you it stands
+	const int px = ox + dx * step / length, py = oy + dy * step / length;
+	if (std::max(std::abs(px - mx), std::abs(py - my)) <= 1) return false; // already there: let it fight
+	DeleteEvent(game, merc, 2, 0);
+	if (!WalkTo(game, merc, px, py)) return false;
+	Note(merc, role, target, -3, "steps between you and a monster coming at you");
+	return true;
+}
+
 // ---- hooks ----
 
 thread_local void* ThinkingMerc = nullptr;
@@ -578,6 +637,7 @@ void* HookSelectTarget(void* game, void* unit, int* distance, int* inMelee) noex
 	void* const owner = role == Role::None ? nullptr : PlayerOwner(unit);
 	if (!owner) return SelectTarget(game, unit, distance, inMelee);
 	void* const target = ChooseTarget(game, unit, owner, role);
+	Trace(unit, target ? "picked a target" : "no target in leash");
 	if (!target) {
 		if (distance) *distance = INT_MAX;
 		if (inMelee) *inMelee = 0;
@@ -590,10 +650,14 @@ void* HookSelectTarget(void* game, void* unit, int* distance, int* inMelee) noex
 
 void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void* target, void* seed, void* tick, std::uint16_t* params) noexcept {
 	const Role role = Enabled() && unit && owner && target && params ? RoleOf(unit) : Role::None;
-	if (role == Role::None || UnitType(owner) != 0 || !PetInfo(owner, Field<std::uint32_t>(unit, UnitIdOffset)))
+	if (role == Role::None || UnitType(owner) != 0 || !PetInfo(owner, Field<std::uint32_t>(unit, UnitIdOffset))) {
+		if (unit && Enabled()) Trace(unit, role == Role::None ? "combat: type not handled, game AI" : "combat: no pet info, game AI");
 		return Combat(game, unit, classId, owner, target, seed, tick, params);
+	}
+	Trace(unit, "combat: new AI");
 	const bool melee = params[0] == 2;
 	if (role == Role::Desert && StayInAura(game, unit, owner, target)) return;
+	if ((role == Role::BashBarb || role == Role::FrenzyBarb) && BodyBlock(game, unit, owner, target, role)) return;
 	// Melee types out of reach: the game runs to the target as usual.
 	if (melee && (Distance(unit, target) >= 3 || !InMelee(unit, target, 0, nullptr)))
 		return Combat(game, unit, classId, owner, target, seed, tick, params);
@@ -615,7 +679,7 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 // ---- version check ----
 
 bool Locate() noexcept {
-	const std::array<const Code*, 24> checks { &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
+	const std::array<const Code*, 25> checks { &WalkToCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
 		                                       &EscapeCode, &WalkToOwnerCode, &DeleteEventCode, &DistanceCode, &InMeleeCode, &GetStatCode,
 		                                       &CheckStateCode, &GetSkillCode, &SkillLevelCode, &SkillsTxtCode, &MonStatsCode, &AllyForBuffCode,
 		                                       &FindTargetCode, &CanTargetCode, &OwnerCode, &UnitTypeCode, &PetInfoCode, &SkillTargetCode };
@@ -647,6 +711,7 @@ bool Locate() noexcept {
 	UnitType        = reinterpret_cast<UnitTypeFn>(at(UnitTypeCode));
 	PetInfo         = reinterpret_cast<PetInfoFn>(at(PetInfoCode));
 	SkillTarget     = reinterpret_cast<SkillTargetFn>(at(SkillTargetCode));
+	WalkTo          = reinterpret_cast<WalkToFn>(at(WalkToCode));
 	return true;
 }
 

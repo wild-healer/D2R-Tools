@@ -19,7 +19,7 @@ dice roll.
   Armor up, picks its spell by the target's resistances; Static Field only on
   healthy bosses or crowds near it; stays with you when everything near is
   immune to it.
-- Barbarian: intercepts, going for the monsters closest to you and those attacking you first, Battle Cry on groups, Stun on
+- Barbarian: body-blocks (steps between you and a monster coming at you), goes for the monsters closest to you and those attacking you first, Battle Cry on groups, Stun on
   bosses and champions, Bash otherwise. Frenzy Barbarian Taunts monsters that
   attack you, Frenzy otherwise.
 - Attack rate is the game's own (same chance per think), only the choices change.
@@ -29,7 +29,7 @@ dice roll.
 Settings, in game with I Hate TOMLs or in `d2rloader/config/smarter-mercenaries.toml`:
 `enabled`, `rogue`, `desert_mercenary`, `iron_wolf`, `barbarian`, `leash` (14,
 4 to 24), `aura_leash` (8), `log` (decisions to
-`mods/D2RMM/d2rloader/logs/smarter-mercenaries.log`).
+`mods/D2RMM/d2rloader/logs/smarter-mercenaries.log`, plus a line every few seconds per mercenary on whether the new AI ran).
 
 How it works (Steam 3.3.94995): hooks the Hireable think function
 D2R+0x5BEAC0 (AI table 0x2396E70 entry 62), the AI target choice D2R+0x595F80
