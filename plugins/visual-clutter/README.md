@@ -11,7 +11,7 @@ It is one D2RLoader plugin (`d2rl-visual-clutter.dll`) with native hooks.
 
 ## Config
 
-`d2rloader/config/visual-clutter.toml` (written on first launch). Every setting except `versions` can also be changed in game with I Hate TOMLs, and applies at once. The kind lists show there as tables of check boxes (who is hidden on whom), which need I Hate TOMLs 1.0.1 or later.
+`d2rloader/config/visual-clutter.toml` (written on first launch). Every setting can also be changed in game with I Hate TOMLs, and applies at once. The kind lists show there as tables of check boxes (who is hidden on whom), which need I Hate TOMLs 1.0.1 or later.
 
 Each `on_<kind>` line is a kind of unit the effect is drawn on and lists the kinds of caster whose auras are hidden there. Both sides use the same five kinds:
 
@@ -44,7 +44,6 @@ Examples: your own Might on you is `on_self` + `"self"`, your Might on your merc
 | `hide_thunder_storm` | `[]` | Casters whose Thunder Storm bolts (and their flash) are not drawn |
 | `hide_charges` | `[]` | Kinds of unit whose martial arts charge orbs are not drawn |
 | `hide_terror_zone_tint` | false | No red screen tint in terror zones (the zone, its sound and its name stay) |
-| `versions` | `["3.3"]` | Game versions the plugin may hook |
 
 ## Who cast an aura
 

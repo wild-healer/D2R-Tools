@@ -70,7 +70,7 @@
 namespace {
 
 constexpr const char* PluginId      = "visual-clutter";
-constexpr const char* PluginVersion = "1.0.2";
+constexpr const char* PluginVersion = "1.0.2-dev-1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -247,7 +247,6 @@ struct Settings {
 	// Kinds of unit whose effects are hidden: missiles by owner, charge orbs by the unit wearing them.
 	Kinds             hideFirestorm {}, hideThunderStorm {}, hideCharges {};
 	std::atomic<bool> hideTerrorTint { false };
-	std::vector<std::string> versions { "3.3" }; // read at load only
 } Config;
 
 // missiles.txt rows (RotW, same in 93787 and 94995).
@@ -794,13 +793,6 @@ std::string ReadGameVersion() noexcept {
 	return version;
 }
 
-std::string MajorMinor(std::string_view version) noexcept {
-	const auto first = version.find('.');
-	if (first == std::string_view::npos) return std::string(version);
-	const auto second = version.find('.', first + 1);
-	return std::string(version.substr(0, second));
-}
-
 // ---- config ----
 
 std::string Trim(std::string_view text) {
@@ -923,12 +915,7 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 		else setting->fetch_and(static_cast<std::uint8_t>(~Bit(kind)));
 		return true;
 	}
-	if (key == "versions") {
-		if (value.empty() || value[0] != '[') return error = "a list of versions, like [\"3.3\"]", false;
-		auto versions = ParseStrings(value);
-		if (!versions.empty()) Config.versions = std::move(versions);
-		return true;
-	}
+	if (key == "versions") return true; // removed in 1.0.2-dev-1 (code bytes are checked instead), ignored in older config files
 	return error = "unknown setting", false;
 }
 
@@ -948,12 +935,6 @@ std::string ValueOf(const std::string& key) {
 	int    kind {};
 	if (SplitSwitch(key, setting, kind)) return flag(Has(*setting, kind));
 	return {};
-}
-
-std::string VersionsList() {
-	std::string text;
-	for (const auto& version : Config.versions) text += std::string(text.empty() ? "" : ", ") + "\"" + version + "\"";
-	return "[" + text + "]";
 }
 
 std::string Render() {
@@ -1011,11 +992,7 @@ hide_thunder_storm = )" + ValueOf("hide_thunder_storm") + R"(
 hide_charges = )" + ValueOf("hide_charges") + R"(
 # The red screen tint inside terror zones. The zone itself, its sound and its
 # name on screen are unchanged.
-hide_terror_zone_tint = )" + ValueOf("hide_terror_zone_tint") + R"(
-
-# Game versions (major.minor) the plugin is allowed to hook. Addresses are
-# checked against the game's code at load either way. Read at game start.
-versions = )" + VersionsList() + "\n";
+hide_terror_zone_tint = )" + ValueOf("hide_terror_zone_tint") + "\n";
 }
 
 void SaveConfig() {
@@ -1204,18 +1181,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	} catch (...) {
 	}
 	GameVersion = ReadGameVersion();
-	const std::string majorMinor = MajorMinor(GameVersion);
 	Log(false, "Visual Clutter %s: game %s, hide auras %s", PluginVersion, GameVersion.c_str(), MatrixText(Config.hide).c_str());
 	Log(false, "hide shouts %s", MatrixText(Config.hideShouts).c_str());
 	Log(false, "hide %s", EffectsText().c_str());
 	// Hooked even when turned off: it can be turned on while playing.
-	bool supported = false;
-	for (const auto& version : Config.versions) supported |= version == majorMinor;
-	if (!supported) {
-		Problem = "game version not in versions";
-		Log(true, "inactive: game version %s is not in versions (edit the config to allow it)", majorMinor.c_str());
-		return true;
-	}
 	if (!Base || !Locate() || !InstallHooks()) {
 		Log(true, "inactive: %s", Problem.c_str());
 		return true;
