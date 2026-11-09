@@ -5,19 +5,19 @@ D2RL_PLUGIN_MANIFEST_RESOURCE_ID RCDATA { D2RL_PLUGIN_RESOURCE_DWORD(D2RL_PLUGIN
 D2RL_PLUGIN_CONFIG_RESOURCE_ID RCDATA "un-anya-lyse.toml"
 
 1 VERSIONINFO
-FILEVERSION 1,0,1,0
-PRODUCTVERSION 1,0,1,0
+FILEVERSION 1,0,2,0
+PRODUCTVERSION 1,0,2,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Un-Anya-lyse D2RLoader plugin"
-      VALUE "FileVersion", "1.0.1-dev-1"
+      VALUE "FileVersion", "1.0.2"
       VALUE "InternalName", "un-anya-lyse"
       VALUE "OriginalFilename", "d2rl-un-anya-lyse.dll"
       VALUE "ProductName", "Un-Anya-lyse"
-      VALUE "ProductVersion", "1.0.1-dev-1"
+      VALUE "ProductVersion", "1.0.2"
     END
   END
   BLOCK "VarFileInfo"

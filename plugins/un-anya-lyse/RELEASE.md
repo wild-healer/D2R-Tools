@@ -1,4 +1,34 @@
-# Un-Anya-lyse 1.0.1: release texts
+# Un-Anya-lyse 1.0.2: release texts
+
+## Patch notes
+
+```
+**Un-Anya-lyse 1.0.2**
+
+**Fixed**
+
+* The plugin stayed inactive when another plugin, such as Multi Mercenary, changes how Anya's dialog adds its Cancel line. The Remove Personalization line now shows with it.
+```
+
+## GitHub release
+
+- Tag: `un-anya-lyse-v1.0.2`
+- Title: `Un-Anya-lyse 1.0.2`
+- Asset: `un-anya-lyse.zip`
+
+Body:
+
+```markdown
+**Un-Anya-lyse** 1.0.2
+
+### Fixed
+- The plugin stayed inactive when another plugin, such as Multi Mercenary, changes how Anya's dialog adds its Cancel line. The Remove Personalization line now shows with it.
+
+### Install
+Load `un-anya-lyse.zip` in D2RMM, or copy `d2rl-un-anya-lyse.dll` to `<game>/d2rloader/plugins/`. Settings are unchanged.
+```
+
+# Un-Anya-lyse 1.0.1
 
 ## Patch notes
 
@@ -75,7 +105,7 @@ Description:
 
 ### Requirements
 - D2RLoader 1.3.1 or later.
-- Steam 3.3.93787 or 3.3.94995. The plugin checks the game code when it loads; on another build it stays inactive and says so in its log.
+- Steam 3.3.93787, 3.3.94995 or 3.4.95041. The plugin checks the game code when it loads; on another build it stays inactive and says so in its log.
 - Single player or a game you host. In games you join the line is hidden, since the host would refuse the request.
 
 ### Install

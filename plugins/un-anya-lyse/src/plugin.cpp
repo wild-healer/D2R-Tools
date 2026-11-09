@@ -58,7 +58,7 @@
 namespace {
 
 constexpr const char* PluginId      = "un-anya-lyse";
-constexpr const char* PluginVersion = "1.0.1-dev-1";
+constexpr const char* PluginVersion = "1.0.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
