@@ -18,7 +18,7 @@ Each `on_<kind>` line is a kind of unit the effect is drawn on and lists the kin
 | Kind | Who |
 | --- | --- |
 | `self` | you |
-| `merc` | your mercenary |
+| `merc` | your mercenary (with several mercs, another merc's aura on one of them counts as from `allies`) |
 | `minions` | your summons (golems, druid spirits, Valkyrie, ...) |
 | `allies` | other players and every merc or summon that is not yours |
 | `monsters` | monsters (aura-enchanted bosses, monster auras) |

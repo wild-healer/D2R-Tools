@@ -70,7 +70,7 @@
 namespace {
 
 constexpr const char* PluginId      = "visual-clutter";
-constexpr const char* PluginVersion = "1.0.2-dev-2";
+constexpr const char* PluginVersion = "1.0.2-dev-3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -574,6 +574,8 @@ bool ShouldHide(void* unit, std::uint32_t type, std::uint32_t id, int state, boo
 	if (const auto found = Casters.find(Key(type, id, state)); found != Casters.end()) caster = found->second, known = true;
 	ReleaseSRWLockShared(&CasterLock);
 	if (known) from = KindOf(static_cast<std::uint32_t>(caster >> 32), static_cast<std::uint32_t>(caster), localId);
+	// With several mercs (a plugin can give you more than one), another merc's aura on a merc counts as from an ally.
+	if (known && on == Merc && from == Merc && caster != Caster(type, id)) from = Allies;
 	const bool shout = IsShoutState(state);
 	const bool hide  = Has((shout ? Config.hideShouts : Config.hide)[on], from);
 	if (log && LoggedDecisions.fetch_add(1, std::memory_order_relaxed) < MaxLoggedDecisions)
