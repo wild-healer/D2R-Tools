@@ -70,7 +70,7 @@
 namespace {
 
 constexpr const char* PluginId      = "visual-clutter";
-constexpr const char* PluginVersion = "1.0.2-dev-1";
+constexpr const char* PluginVersion = "1.0.2-dev-2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -165,6 +165,7 @@ constexpr std::array<int, 10> TerrorFlagSite { 0xC7, 0x05, -1, -1, -1, -1, 0x01,
 // Units: +0x00 uint32 type (0 player, 1 monster), +0x08 uint32 id.
 constexpr std::uintptr_t UnitType = 0x00;
 constexpr std::uintptr_t UnitId   = 0x08;
+constexpr std::uintptr_t UnitClass = 0x04; // monstats row of a monster
 // Stat lists: +0x08 uint32 owner type, +0x0C uint32 owner id.
 constexpr std::uintptr_t StatListOwnerType = 0x08;
 constexpr std::uintptr_t StatListOwnerId   = 0x0C;
@@ -174,6 +175,9 @@ constexpr std::uintptr_t PetId    = 0x08;
 constexpr std::uintptr_t PetOwner = 0x0C;
 constexpr std::uintptr_t PetNext  = 0x30;
 constexpr std::uint32_t  PetTypeHireling = 7;
+// hireling.txt classes (roguehire, act2hire, act3hire, act5hire1/2): a merc the pet
+// list doesn't list as yours (another player's, or an extra one a plugin adds) is an ally.
+constexpr std::array<int, 5> HirelingClasses { 271, 338, 359, 560, 561 };
 
 constexpr std::uint32_t TypePlayer  = 0;
 constexpr std::uint32_t TypeMonster = 1;
@@ -369,6 +373,12 @@ Kind KindOf(std::uint32_t type, std::uint32_t id, std::uint32_t localId) noexcep
 		}
 		if (!Read(node + PetNext, node)) break;
 	}
+	// Not in the pet list: still an ally when it is a merc (no monster uses those classes).
+	std::uint32_t monsterClass = NoId;
+	if (FindClientUnit)
+		if (void* const unit = FindClientUnit(id, static_cast<int>(type)); unit && Read(reinterpret_cast<std::uintptr_t>(unit) + UnitClass, monsterClass))
+			for (const int hireling : HirelingClasses)
+				if (static_cast<std::uint32_t>(hireling) == monsterClass) return Allies;
 	return Monsters;
 }
 
@@ -965,7 +975,7 @@ enabled = )" + ValueOf("enabled") + R"(
 #   "self"      you
 #   "merc"      your mercenary
 #   "minions"   your summons (golems, spirits, Valkyrie, ...)
-#   "allies"    other players, their mercenaries and their summons
+#   "allies"    other players and every merc or summon that is not yours
 #   "monsters"  monsters (aura-enchanted bosses, monster auras)
 # An empty list [] shows every aura on that kind of unit.
 #
@@ -1053,9 +1063,9 @@ std::string MatrixText(const std::array<Kinds, KindCount>& hide) {
 // ---- I Hate TOMLs ----
 
 // Who the kinds are, as the menu names them (column labels wrap to two short lines).
-constexpr std::array<const char*, KindCount> RowLabels { "You", "Your merc", "Your summons", "Other players", "Monsters" };
-constexpr std::array<const char*, KindCount> FromLabels { "From you", "From merc", "From summons", "From players", "From monsters" };
-constexpr std::array<const char*, KindCount> OnLabels { "On you", "On merc", "On summons", "On players", "On monsters" };
+constexpr std::array<const char*, KindCount> RowLabels { "You", "Your merc", "Your summons", "Allies", "Monsters" };
+constexpr std::array<const char*, KindCount> FromLabels { "From you", "From your merc", "From your summons", "From allies", "From monsters" };
+constexpr std::array<const char*, KindCount> OnLabels { "On you", "On your merc", "On your summons", "On allies", "On monsters" };
 
 std::string Schema;
 

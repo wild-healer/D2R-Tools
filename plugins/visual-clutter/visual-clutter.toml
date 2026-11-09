@@ -17,7 +17,7 @@ enabled = true
 #   "self"      you
 #   "merc"      your mercenary
 #   "minions"   your summons (golems, spirits, Valkyrie, ...)
-#   "allies"    other players, their mercenaries and their summons
+#   "allies"    other players and every merc or summon that is not yours
 #   "monsters"  monsters (aura-enchanted bosses, monster auras)
 # An empty list [] shows every aura on that kind of unit.
 #
