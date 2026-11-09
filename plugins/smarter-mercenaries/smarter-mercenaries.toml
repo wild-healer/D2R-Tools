@@ -12,12 +12,21 @@ desert_mercenary = true
 iron_wolf = true
 barbarian = true
 
-# How far from you a mercenary picks fights (4 to 24, the game's follow range
-# is 16 to 24). Monsters attacking the mercenary itself are always fought.
+# Mercenaries keep a formation around you: melee ones slightly in front,
+# ranged ones slightly behind. All distances are 4 to 24.
+
+# How far from you a mercenary picks fights. Monsters attacking the mercenary
+# itself are always fought.
 leash = 14
 
-# The same for the Desert mercenary, kept short so its aura covers you.
-aura_leash = 8
+# Melee mercenaries (Desert mercenary, Barbarians) leave the formation for an
+# enemy this close to them.
+engage_range = 10
+
+# Ranged mercenaries (Rogue, Iron Wolf) stay in formation and shoot from there
+# until you get this close to enemies; then they position themselves away from
+# monsters, hitting and running.
+danger_range = 10
 
 # Write mercenary decisions to the plugin log.
 log = true

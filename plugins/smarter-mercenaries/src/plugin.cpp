@@ -40,6 +40,7 @@
 #include <array>
 #include <atomic>
 #include <climits>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -54,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.4";
+constexpr const char* PluginVersion = "0.0.5";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -63,7 +64,7 @@ const D2RL::PluginInfo Info {
 	.name        = "Smarter Mercenaries",
 	.version     = PluginVersion,
 	.author      = "wild-healer",
-	.description = "Mercenaries fight the way their type is meant to: rogues and Iron Wolves keep their distance and pick the right skill, Desert mercenaries stay in aura range, Barbarians protect you.",
+	.description = "Mercenaries keep a formation around you and fight the way their type is meant to: melee in front, ranged behind hitting and running, skills picked by the target.",
 	.flags       = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
 };
 
@@ -74,7 +75,8 @@ struct Settings {
 	std::atomic<bool> ironWolf { true };
 	std::atomic<bool> barbarian { true };
 	std::atomic<int>  leash { 14 };     // how far from you mercenaries pick fights
-	std::atomic<int>  auraLeash { 8 };  // the same for the Desert mercenary
+	std::atomic<int>  engage { 10 };    // melee mercenaries leave the formation for enemies this close
+	std::atomic<int>  danger { 10 };    // ranged mercenaries start positioning when you are this close to enemies
 	std::atomic<bool> log { true };     // one line per decision change (test builds)
 } Config;
 
@@ -110,6 +112,12 @@ constexpr Code OwnerCode        { 0x4A53C0, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20
 constexpr Code UnitTypeCode     { 0x34B9D0, { 0x48, 0x83, 0xEC, 0x28, 0x48, 0x85, 0xC9, 0x75, 0x1D, 0x88, 0x4C, 0x24, 0x30, 0x48, 0x8D, 0x4C }, 0 };
 constexpr Code PetInfoCode      { 0x4FF2D0, { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x55, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x20, 0x8B, 0xDA, 0x48 }, 0 };
 constexpr Code WalkToCode       { 0x4A8880, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57 }, 0 };
+constexpr Code PetMoveCode      { 0x5C1460, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x48, 0x89, 0x7C, 0x24, 0x18, 0x55 }, 0 };
+constexpr Code MoveCode         { 0x4A8A10, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57 }, 0 };
+constexpr Code GetPathCode      { 0x34AE80, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C }, 0 };
+constexpr Code SetStepsCode     { 0x342890, { 0x48, 0x85, 0xC9, 0x74, 0x13, 0xFE, 0xCA, 0x33, 0xC0, 0x0F, 0xB6, 0xD2, 0x80, 0xFA, 0x12, 0x0F }, 0 };
+constexpr Code UnitRoomCode     { 0x34B440, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C }, 0 };
+constexpr Code InTownCode       { 0x2F0750, { 0x48, 0x83, 0xEC, 0x28, 0x48, 0x85, 0xC9, 0x75, 0x07, 0x33, 0xC0, 0x48, 0x83, 0xC4, 0x28, 0xC3 }, 0 };
 constexpr Code SkillTargetCode  { 0x48FE20, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xDA, 0xE8, 0x22, 0x1D, 0x00, 0x00, 0x48, 0x8B }, 0 };
 
 constexpr std::uintptr_t UnitTypeOffset   = 0x00; // u32: 0 player, 1 monster
@@ -159,6 +167,12 @@ using UnitTypeFn     = int (*)(void* unit) noexcept;
 using PetInfoFn      = void* (*)(void* owner, std::uint32_t guid) noexcept;
 using SkillTargetFn  = void* (*)(void* game, void* unit) noexcept;
 using WalkToFn       = int (*)(void* game, void* unit, int x, int y) noexcept;
+using PetMoveFn      = int (*)(void* game, void* owner, void* unit, int motion, int run, int speed, std::uint8_t steps) noexcept;
+using MoveFn         = int (*)(void* game, void* unit, void* target, int mode, int x, int y, std::uint8_t flag, std::uint16_t extra) noexcept;
+using GetPathFn      = void* (*)(void* unit) noexcept;
+using SetStepsFn     = void (*)(void* path, std::uint8_t steps) noexcept;
+using UnitRoomFn     = void* (*)(void* unit) noexcept;
+using InTownFn       = int (*)(void* room) noexcept;
 
 const D2RL::PluginContext* Context {};
 std::uintptr_t             Base {};
@@ -188,6 +202,12 @@ UnitTypeFn     UnitType {};
 PetInfoFn      PetInfo {};
 SkillTargetFn  SkillTarget {};
 WalkToFn       WalkTo {};
+PetMoveFn      PetMove {};
+MoveFn         Move {};
+GetPathFn      GetPath {};
+SetStepsFn     SetSteps {};
+UnitRoomFn     UnitRoom {};
+InTownFn       InTown {};
 
 void Log(bool warn, const char* format, ...) noexcept {
 	if (!Context) return;
@@ -380,7 +400,8 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 	Gather(game, merc, scan);
 	if (!scan.count) return nullptr;
 	const bool     melee    = role == Role::Desert || role == Role::BashBarb || role == Role::FrenzyBarb;
-	const int      leash    = role == Role::Desert ? Config.auraLeash.load() : Config.leash.load();
+	const int      leash    = Config.leash.load();
+	const int      engage   = Config.engage.load();
 	const unsigned elements = ElementsOf(merc, role);
 	void* const    wanted   = SkillTarget(game, owner); // what you're attacking
 	void*          best     = nullptr;
@@ -391,7 +412,7 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 		const int   fromOwner   = Distance(owner, unit);
 		void* const itsTarget   = SkillTarget(game, unit);
 		const bool  selfDefense = itsTarget == merc && fromMerc <= 6;
-		if (fromOwner > leash && !selfDefense) continue;
+		if ((fromOwner > leash || (melee && fromMerc > engage)) && !selfDefense) continue;
 		// Barbarians intercept: the monster closest to you counts most, so they
 		// meet threats before they reach you. Everyone else: closest to itself.
 		const bool tank = role == Role::BashBarb || role == Role::FrenzyBarb;
@@ -529,16 +550,6 @@ void DesertAttack(void* game, void* merc, void* target, const std::uint16_t* par
 	NormalAttack(game, merc, target, params);
 }
 
-// Desert mercenary: stays close enough for its aura to cover you. It goes back
-// to you instead of chasing, unless the monster is hitting it.
-bool StayInAura(void* game, void* merc, void* owner, void* target) noexcept {
-	const int leash = Config.auraLeash.load(std::memory_order_relaxed);
-	if (Distance(owner, merc) <= leash || SkillTarget(game, target) == merc) return false;
-	if (!WalkToOwner(game, merc, owner, 4, 0)) return false;
-	Note(merc, Role::Desert, target, -1, "goes back to you to keep its aura on you");
-	return true;
-}
-
 void BashBarbAttack(void* game, void* merc, void* target, const Scan& scan, const std::uint16_t* params) noexcept {
 	if (CountNear(scan, merc, 5) >= 2 && !CheckState(target, StateBattleCry) && Random(100) < 50 && Cast(game, merc, ModeAttack1, SkillBattleCry, target))
 		return Note(merc, Role::BashBarb, target, SkillBattleCry, "Battle Cry on a group");
@@ -624,7 +635,206 @@ void* PlayerOwner(void* merc) noexcept {
 	return owner && UnitType(owner) == 0 ? owner : nullptr;
 }
 
+// ---- formation think ----
+//
+// Replaces the game's Hireable think for a player's mercenary outside town:
+// no idle wandering, a formation around you (melee slightly in front, ranged
+// slightly behind, spread sideways), re-planned every few frames.
+
+constexpr std::uintptr_t UnitModeOffset = 0x0C; // u32: monster mode 2 walk, 15 run
+constexpr int            ModeWalk = 2, ModeRun = 15;
+constexpr std::uintptr_t TickMonStats2 = 0x30; // monstats2 record: +0x0E melee range
+
+struct OwnerState {
+	std::uint32_t id;
+	int           lastX, lastY;
+	double        fx, fy; // facing (where you last moved)
+};
+struct MercState {
+	std::uint32_t id, owner;
+	int           slot;
+	bool          front;
+	int           spotX, spotY;
+	bool          moving;
+	DWORD         seen;
+};
+std::array<OwnerState, 8> Owners {};
+std::array<MercState, 24> Mercs {};
+
+bool IsMelee(Role role) noexcept {
+	return role == Role::Desert || role == Role::BashBarb || role == Role::FrenzyBarb;
+}
+
+OwnerState& OwnerOf(void* owner) noexcept {
+	const std::uint32_t id = Field<std::uint32_t>(owner, UnitIdOffset);
+	for (auto& entry : Owners)
+		if (entry.id == id && (entry.fx != 0 || entry.fy != 0)) return entry;
+	OwnerState& entry = Owners[id % Owners.size()];
+	entry = { id, -1, -1, 0.0, 1.0 };
+	return entry;
+}
+
+MercState& MercOf(void* merc, void* owner, bool front) noexcept {
+	const std::uint32_t id = Field<std::uint32_t>(merc, UnitIdOffset), ownerId = Field<std::uint32_t>(owner, UnitIdOffset);
+	const DWORD         now = GetTickCount();
+	for (auto& entry : Mercs)
+		if (entry.id == id && entry.owner == ownerId && entry.front == front) return entry.seen = now, entry;
+	MercState* slot = &Mercs[0];
+	for (auto& entry : Mercs)
+		if (now - entry.seen > now - slot->seen) slot = &entry;
+	// Next free place in this line of the formation.
+	int place = 0;
+	for (bool taken = true; taken && place < 8; ) {
+		taken = false;
+		for (const auto& entry : Mercs)
+			if (&entry != slot && entry.owner == ownerId && entry.front == front && entry.slot == place && now - entry.seen < 10000) taken = true, ++place;
+	}
+	*slot = { id, ownerId, place, front, 0, 0, false, now };
+	return *slot;
+}
+
+// Formation spot: `depth` toward where you're heading (negative: behind you),
+// spread sideways by place in the line.
+void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y) noexcept {
+	int ox = 0, oy = 0;
+	Position(owner, ox, oy);
+	if (state.lastX < 0) state.lastX = ox, state.lastY = oy;
+	const int mx = ox - state.lastX, my = oy - state.lastY;
+	if (std::max(std::abs(mx), std::abs(my)) >= 2) {
+		const double length = std::sqrt(double(mx) * mx + double(my) * my);
+		state.fx = mx / length, state.fy = my / length;
+		state.lastX = ox, state.lastY = oy;
+	}
+	static constexpr int Side[] = { 0, -3, 3, -6, 6, -9, 9, 0 };
+	const double depth = merc.front ? 3.0 : -4.0;
+	const double side  = Side[merc.slot & 7];
+	x = ox + static_cast<int>(std::lround(state.fx * depth - state.fy * side));
+	y = oy + static_cast<int>(std::lround(state.fy * depth + state.fx * side));
+}
+
+int Cheb(int ax, int ay, int bx, int by) noexcept {
+	return std::max(std::abs(ax - bx), std::abs(ay - by));
+}
+
+// Goes to (or keeps going to) its formation spot. Returns false when already there.
+bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x, int y, bool walking) noexcept {
+	int mx = 0, my = 0;
+	Position(merc, mx, my);
+	const int away = Cheb(mx, my, x, y);
+	if (away <= 1) {
+		state.moving = false;
+		return false;
+	}
+	if (walking && state.moving && Cheb(state.spotX, state.spotY, x, y) <= 2) return true; // already on its way
+	DeleteEvent(game, merc, 2, 0);
+	const bool run = away > 6;
+	if (Move(game, merc, nullptr, run ? ModeRun : ModeWalk, x, y, 1, 0)) {
+		state.spotX = x, state.spotY = y, state.moving = true;
+		return true;
+	}
+	// Spot blocked (wall, cliff): the game's own follow move near you.
+	state.moving = false;
+	PetMove(game, owner, merc, 0, run ? 1 : 0, 0, 0);
+	return true;
+}
+
+void Attack(void* game, void* merc, void* owner, void* target, Role role, const Scan& scan, void* tick, const std::uint16_t* params) noexcept {
+	if (!AttackRoll(merc, tick, IsMelee(role))) return Idle(game, merc, 5);
+	switch (role) {
+	case Role::Rogue: return RogueAttack(game, merc, target, scan, params);
+	case Role::IronWolf: return IronWolfAttack(game, merc, owner, target, scan, params);
+	case Role::Desert: return DesertAttack(game, merc, target, params);
+	case Role::BashBarb: return BashBarbAttack(game, merc, target, scan, params);
+	case Role::FrenzyBarb: return FrenzyBarbAttack(game, merc, owner, target, params);
+	default: return Idle(game, merc, 5);
+	}
+}
+
+// The hireling's ai params for this difficulty, as the game's Hireable builds them.
+void Params(void* tick, std::uint16_t (&params)[4]) noexcept {
+	void* const record = Field<void*>(tick, 0x28);
+	const int   level  = Field<std::uint8_t>(tick, 0x38);
+	for (int index = 0; index < 4; ++index) params[index] = record ? Field<std::uint16_t>(record, 0x90 + index * 6 + level * 2) : 0;
+}
+
+void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept {
+	const std::uint32_t mode    = Field<std::uint32_t>(merc, UnitModeOffset);
+	const bool          walking = mode == ModeWalk || mode == ModeRun;
+	const int           fromOwner = Distance(merc, owner);
+	if (fromOwner > 100) {
+		PetMove(game, owner, merc, 3, 0, 0, 0); // teleport next to you, as the game does
+		return;
+	}
+	const bool  melee = IsMelee(role);
+	OwnerState& ownerState = OwnerOf(owner);
+	MercState&  mercState  = MercOf(merc, owner, melee);
+	int         sx = 0, sy = 0;
+	Spot(ownerState, owner, mercState, sx, sy);
+	if (fromOwner > 40) {
+		if (!walking) PetMove(game, owner, merc, 1, 1, 60, 0); // catch up along your trail
+		mercState.moving = false;
+		return;
+	}
+	std::uint16_t params[4] {};
+	Params(tick, params);
+	Scan scan;
+	Gather(game, merc, scan);
+	void* const target = ChooseTarget(game, merc, owner, role);
+	if (melee) {
+		if (target) {
+			mercState.moving = false;
+			if (Distance(merc, target) >= 3 || !InMelee(merc, target, 0, nullptr)) {
+				void* const stats2 = Field<void*>(tick, TickMonStats2);
+				if (void* const path = GetPath(merc); path && stats2) SetSteps(path, Field<std::uint8_t>(stats2, 0x0E));
+				DeleteEvent(game, merc, 2, 0);
+				if (Move(game, merc, target, ModeRun, 0, 0, 1, 0)) return Note(merc, role, target, -4, "leaves the formation for an enemy in range");
+			}
+			if (walking) return;
+			return Attack(game, merc, owner, target, role, scan, tick, params);
+		}
+		if (KeepFormation(game, merc, owner, mercState, sx, sy, walking)) return;
+		return Idle(game, merc, 3);
+	}
+	// Ranged: positioning mode once you're close to enemies.
+	int   nearOwner = INT_MAX, nearMerc = INT_MAX;
+	void* closest   = nullptr;
+	for (std::size_t index = 0; index < scan.count; ++index) {
+		nearOwner = std::min(nearOwner, Distance(owner, scan.units[index]));
+		if (scan.distance[index] < nearMerc) nearMerc = scan.distance[index], closest = scan.units[index];
+	}
+	const bool danger = nearOwner <= Config.danger.load(std::memory_order_relaxed);
+	if (danger) {
+		mercState.moving = false;
+		if (closest && nearMerc <= 5) {
+			DeleteEvent(game, merc, 2, 0);
+			if (Escape(game, merc, closest, 5, 1)) return Note(merc, role, closest, -5, "runs from a monster (hit and run)");
+		}
+		if (walking) return;
+		if (role == Role::IronWolf && Buff(game, merc, role)) return;
+		if (target) return Attack(game, merc, owner, target, role, scan, tick, params);
+		if (KeepFormation(game, merc, owner, mercState, sx, sy, walking)) return;
+		return Idle(game, merc, 3);
+	}
+	// Formation first; it shoots from its spot.
+	if (KeepFormation(game, merc, owner, mercState, sx, sy, walking)) return;
+	if (walking) return;
+	if (role == Role::IronWolf && Buff(game, merc, role)) return;
+	if (target) return Attack(game, merc, owner, target, role, scan, tick, params);
+	Idle(game, merc, 3);
+}
+
 void HookHireable(void* game, void* unit, void* tick) noexcept {
+	if (unit && tick && Enabled()) {
+		const Role role = RoleOf(unit);
+		if (role != Role::None) {
+			void* const owner = PlayerOwner(unit);
+			void* const room  = owner ? UnitRoom(unit) : nullptr;
+			if (owner && room && !InTown(room)) {
+				Trace(unit, "formation think");
+				return Think(game, unit, owner, tick, role);
+			}
+		}
+	}
 	void* const previous = ThinkingMerc;
 	ThinkingMerc         = unit;
 	Hireable(game, unit, tick);
@@ -656,7 +866,6 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 	}
 	Trace(unit, "combat: new AI");
 	const bool melee = params[0] == 2;
-	if (role == Role::Desert && StayInAura(game, unit, owner, target)) return;
 	if ((role == Role::BashBarb || role == Role::FrenzyBarb) && BodyBlock(game, unit, owner, target, role)) return;
 	// Melee types out of reach: the game runs to the target as usual.
 	if (melee && (Distance(unit, target) >= 3 || !InMelee(unit, target, 0, nullptr)))
@@ -679,7 +888,7 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 // ---- version check ----
 
 bool Locate() noexcept {
-	const std::array<const Code*, 25> checks { &WalkToCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
+	const std::array<const Code*, 31> checks { &WalkToCode, &PetMoveCode, &MoveCode, &GetPathCode, &SetStepsCode, &UnitRoomCode, &InTownCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
 		                                       &EscapeCode, &WalkToOwnerCode, &DeleteEventCode, &DistanceCode, &InMeleeCode, &GetStatCode,
 		                                       &CheckStateCode, &GetSkillCode, &SkillLevelCode, &SkillsTxtCode, &MonStatsCode, &AllyForBuffCode,
 		                                       &FindTargetCode, &CanTargetCode, &OwnerCode, &UnitTypeCode, &PetInfoCode, &SkillTargetCode };
@@ -712,6 +921,12 @@ bool Locate() noexcept {
 	PetInfo         = reinterpret_cast<PetInfoFn>(at(PetInfoCode));
 	SkillTarget     = reinterpret_cast<SkillTargetFn>(at(SkillTargetCode));
 	WalkTo          = reinterpret_cast<WalkToFn>(at(WalkToCode));
+	PetMove         = reinterpret_cast<PetMoveFn>(at(PetMoveCode));
+	Move            = reinterpret_cast<MoveFn>(at(MoveCode));
+	GetPath         = reinterpret_cast<GetPathFn>(at(GetPathCode));
+	SetSteps        = reinterpret_cast<SetStepsFn>(at(SetStepsCode));
+	UnitRoom        = reinterpret_cast<UnitRoomFn>(at(UnitRoomCode));
+	InTown          = reinterpret_cast<InTownFn>(at(InTownCode));
 	return true;
 }
 
@@ -751,7 +966,9 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 	if (key == "iron_wolf") return flag(Config.ironWolf);
 	if (key == "barbarian") return flag(Config.barbarian);
 	if (key == "leash") return range(Config.leash);
-	if (key == "aura_leash") return range(Config.auraLeash);
+	if (key == "engage_range") return range(Config.engage);
+	if (key == "danger_range") return range(Config.danger);
+	if (key == "aura_leash") return true; // 0.0.1-0.0.4 setting, no longer used
 	if (key == "log") return flag(Config.log);
 	return error = "unknown setting", false;
 }
@@ -764,7 +981,8 @@ std::string ValueOf(const std::string& key) {
 	if (key == "iron_wolf") return flag(Config.ironWolf);
 	if (key == "barbarian") return flag(Config.barbarian);
 	if (key == "leash") return std::to_string(Config.leash.load());
-	if (key == "aura_leash") return std::to_string(Config.auraLeash.load());
+	if (key == "engage_range") return std::to_string(Config.engage.load());
+	if (key == "danger_range") return std::to_string(Config.danger.load());
 	if (key == "log") return flag(Config.log);
 	return {};
 }
@@ -784,12 +1002,21 @@ desert_mercenary = )" + ValueOf("desert_mercenary") + R"(
 iron_wolf = )" + ValueOf("iron_wolf") + R"(
 barbarian = )" + ValueOf("barbarian") + R"(
 
-# How far from you a mercenary picks fights (4 to 24, the game's follow range
-# is 16 to 24). Monsters attacking the mercenary itself are always fought.
+# Mercenaries keep a formation around you: melee ones slightly in front,
+# ranged ones slightly behind. All distances are 4 to 24.
+
+# How far from you a mercenary picks fights. Monsters attacking the mercenary
+# itself are always fought.
 leash = )" + ValueOf("leash") + R"(
 
-# The same for the Desert mercenary, kept short so its aura covers you.
-aura_leash = )" + ValueOf("aura_leash") + R"(
+# Melee mercenaries (Desert mercenary, Barbarians) leave the formation for an
+# enemy this close to them.
+engage_range = )" + ValueOf("engage_range") + R"(
+
+# Ranged mercenaries (Rogue, Iron Wolf) stay in formation and shoot from there
+# until you get this close to enemies; then they position themselves away from
+# monsters, hitting and running.
+danger_range = )" + ValueOf("danger_range") + R"(
 
 # Write mercenary decisions to the plugin log.
 log = )" + ValueOf("log") + "\n";
@@ -843,12 +1070,12 @@ note = "Mercenaries fight the way their type is meant to."
 key = "rogue"
 type = "bool"
 label = "Rogue"
-note = "Keeps its distance, area arrows on groups, normal arrows on immunes."
+note = "Behind you, hit and run, area arrows on groups, normal arrows on immunes."
 [[setting]]
 key = "desert_mercenary"
 type = "bool"
 label = "Desert mercenary"
-note = "Stays close so its aura covers you, fights only near you."
+note = "In front of you like the Barbarians; Jab on bosses."
 [[setting]]
 key = "iron_wolf"
 type = "bool"
@@ -870,10 +1097,20 @@ step = 1
 shift_step = 2
 ctrl_step = 4
 [[setting]]
-key = "aura_leash"
+key = "engage_range"
 type = "int"
-label = "Desert mercenary leash"
-note = "The same for the Desert mercenary, short so its aura covers you."
+label = "Melee engage range"
+note = "Melee mercenaries leave the formation for an enemy this close. 4 to 24."
+min = 4
+max = 24
+step = 1
+shift_step = 2
+ctrl_step = 4
+[[setting]]
+key = "danger_range"
+type = "int"
+label = "Ranged danger range"
+note = "Ranged mercenaries start keeping away from monsters when you get this close to them. 4 to 24."
 min = 4
 max = 24
 step = 1
@@ -936,8 +1173,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!Hook(CombatCode, &HookCombat, Combat)) return true;
 	if (!Hook(SelectTargetCode, &HookSelectTarget, SelectTarget)) return true;
 	if (!Hook(HireableCode, &HookHireable, Hireable)) return true;
-	Log(false, "Smarter Mercenaries %s: %s, leash %d, Desert mercenary leash %d", PluginVersion, Config.enabled ? "active" : "loaded but turned off",
-	    Config.leash.load(), Config.auraLeash.load());
+	Log(false, "Smarter Mercenaries %s: %s, leash %d, engage %d, danger %d", PluginVersion, Config.enabled ? "active" : "loaded but turned off",
+	    Config.leash.load(), Config.engage.load(), Config.danger.load());
 	return true;
 }
 

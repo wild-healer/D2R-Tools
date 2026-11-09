@@ -4,31 +4,33 @@ D2RLoader plugin: mercenaries fight the way their type is meant to, instead of
 the game's single AI that attacks whatever is closest and picks skills by a
 dice roll.
 
-- Every type: fights what you're attacking first, then monsters attacking you,
-  then monsters attacking the mercenary, then the closest. It doesn't pick
-  fights farther than `leash` from you (monsters hitting the mercenary itself
-  are always fought), and avoids targets immune to all its damage
-  (resistances as they are now, so Conviction or Lower Resist count).
-- Rogue: steps back toward you when a monster gets within 4, Exploding/Freezing
-  Arrow on groups, Fire/Cold Arrow on single monsters, normal arrows on
-  immunes, Inner Sight on bosses or groups that don't have it.
-- Desert mercenary: only fights within `aura_leash` of you so its aura covers
-  you, and walks back to you instead of chasing (unless it's being hit). Jab
-  on bosses and champions, Jab or normal attacks otherwise.
-- Iron Wolf: keeps its distance, keeps Enchant (on you first) and Chilling
-  Armor up, picks its spell by the target's resistances; Static Field only on
-  healthy bosses or crowds near it; stays with you when everything near is
-  immune to it.
-- Barbarian: body-blocks (steps between you and a monster coming at you), goes for the monsters closest to you and those attacking you first, Battle Cry on groups, Stun on
-  bosses and champions, Bash otherwise. Frenzy Barbarian Taunts monsters that
-  attack you, Frenzy otherwise.
+- Formation: no more wandering around. Melee mercenaries (Desert mercenary,
+  Barbarians) stand slightly in front of you, ranged ones (Rogue, Iron Wolf)
+  slightly behind, spread sideways, and follow your moves every few frames.
+- Melee mercenaries leave the formation when an enemy comes within
+  `engage_range` (10) of them, and go back once it's dead.
+- Ranged mercenaries stay in formation and shoot from there. When you get
+  within `danger_range` (10) of enemies they position themselves: they run
+  from any monster that gets within 5 of them, then shoot again (hit and run).
+- Targets: what you're attacking first, then monsters attacking you, then
+  monsters attacking the mercenary, then the closest, never farther than
+  `leash` (14) from you; targets immune to all its damage come last.
+- Rogue: Exploding/Freezing Arrow on groups, Fire/Cold Arrow on single
+  monsters, normal arrows on immunes, Inner Sight on bosses or groups.
+- Desert mercenary: Jab on bosses and champions, Jab or normal attacks otherwise.
+- Iron Wolf: keeps Enchant (on you first) and Chilling Armor up, picks its
+  spell by the target's resistances, Static Field only on healthy bosses or
+  crowds near it.
+- Barbarian: Battle Cry on groups, Stun on bosses and champions, Bash
+  otherwise. Frenzy Barbarian Taunts monsters attacking you, Frenzy otherwise.
+- In town the game's own AI runs.
 - Attack rate is the game's own (same chance per think), only the choices change.
 - Works with every mercenary Multi Mercenary adds (each one runs the same AI).
 - Single player and games you host (it is server side); nothing changes in games you join.
 
 Settings, in game with I Hate TOMLs or in `d2rloader/config/smarter-mercenaries.toml`:
-`enabled`, `rogue`, `desert_mercenary`, `iron_wolf`, `barbarian`, `leash` (14,
-4 to 24), `aura_leash` (8), `log` (decisions to
+`enabled`, `rogue`, `desert_mercenary`, `iron_wolf`, `barbarian`, `leash` (14),
+`engage_range` (10), `danger_range` (10), all 4 to 24, `log` (decisions to
 `mods/D2RMM/d2rloader/logs/smarter-mercenaries.log`, plus a line every few seconds per mercenary on whether the new AI ran).
 
 How it works (Steam 3.3.94995): hooks the Hireable think function
