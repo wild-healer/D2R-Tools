@@ -70,7 +70,7 @@
 namespace {
 
 constexpr const char* PluginId      = "visual-clutter";
-constexpr const char* PluginVersion = "1.0.2-dev-3";
+constexpr const char* PluginVersion = "1.0.2-dev-4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -400,12 +400,18 @@ void HookToggleState(void* unit, int state, int on) noexcept {
 	const std::uint64_t key = Key(type, id, state);
 	if (!on) {
 		if (InStateOverlays) return; // the overlay code's off/on toggle, the state stays
-		AcquireSRWLockExclusive(&CasterLock);
-		Casters.erase(key);
-		ReleaseSRWLockExclusive(&CasterLock);
-		AcquireSRWLockExclusive(&TrackLock);
-		Tracked.erase(key);
-		ReleaseSRWLockExclusive(&TrackLock);
+		// The client turns states off and on again on its own (overlays redrawn, units
+		// coming back in sight) while the aura goes on: only the server's off ends the caster.
+		const bool client = FindClientUnit && FindClientUnit(id, static_cast<int>(type)) == unit;
+		if (client) {
+			AcquireSRWLockExclusive(&TrackLock);
+			Tracked.erase(key);
+			ReleaseSRWLockExclusive(&TrackLock);
+		} else {
+			AcquireSRWLockExclusive(&CasterLock);
+			Casters.erase(key);
+			ReleaseSRWLockExclusive(&CasterLock);
+		}
 		return;
 	}
 	std::uint32_t ownerType = NoId, ownerId = NoId;
