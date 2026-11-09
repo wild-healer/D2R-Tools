@@ -75,7 +75,7 @@
 namespace {
 
 constexpr const char* PluginId      = "swap-cast";
-constexpr const char* PluginVersion = "1.1.2";
+constexpr const char* PluginVersion = "1.1.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -199,6 +199,13 @@ constexpr std::uint64_t LoadPlayerRva = 0x41DF40; // (game, client, name, Unit**
 constexpr Code LoadPlayerBytes { 0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08, 0x48, 0x89, 0x68, 0x10, 0x56, 0x57, 0x41, 0x56, 0x48 };
 constexpr std::uint64_t LeaveSaveRva = 0x41E0D0; // (game, player): saves a player (leaving the game, and the autosave every 30 s)
 constexpr Code LeaveSaveBytes { 0x48, 0x8B, 0xC4, 0x53, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x68, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9 };
+// The game's calls to them, used when another plugin already hooks them.
+constexpr std::array<std::pair<std::uint64_t, std::array<std::uint8_t, 5>>, 1> LoadPlayerCalls { { { 0x483B92, { 0xE8, 0xA9, 0xA3, 0xF9, 0xFF } } } };
+constexpr std::array<std::pair<std::uint64_t, std::array<std::uint8_t, 5>>, 3> LeaveSaveCalls { {
+	{ 0x405F5D, { 0xE8, 0x6E, 0x81, 0x01, 0x00 } },
+	{ 0x406E1B, { 0xE8, 0xB0, 0x72, 0x01, 0x00 } },
+	{ 0x408F1B, { 0xE8, 0xB0, 0x51, 0x01, 0x00 } },
+} };
 // "Impossible", the way Cube Empty says it: PlaySound(sounds.txt row, unit, 0,
 // 0, false) with the row from the player sound table (0x30 per character in
 // sounds.txt order, "impossible" at +0x08; amazon_impossible_1 = 2953).
@@ -938,6 +945,10 @@ std::array<std::uint32_t, 4> Follow(void* player, const std::array<std::uint32_t
 
 void __cdecl ServerTick(const D2RL::PluginContext*, void*) noexcept;
 
+// The game of the last client packet or loaded character. Cleared when your
+// character leaves the game: the game is freed then, and nothing may read it.
+std::atomic<void*> LastGame {};
+
 void QueueTick() noexcept {
 	if (Threads && !TickQueued.exchange(true) && Threads->runOnGameThread(Context, ServerTick, nullptr) != D2RL::Threads::Result::Success) {
 		TickQueued.store(false);
@@ -949,6 +960,11 @@ void QueueTick() noexcept {
 // skill has been in use for restore_delay_ms.
 void __cdecl ServerTick(const D2RL::PluginContext*, void*) noexcept {
 	TickQueued.store(false);
+	if (Server.player && !LastGame.load(std::memory_order_relaxed)) { // the game ended: its units are gone
+		Server = ServerState {};
+		Displaced.store(false, std::memory_order_relaxed);
+		return;
+	}
 	if (!Server.away || !Server.player) return;
 	void* const player = Server.player;
 	if (IsDead(player)) {
@@ -1129,7 +1145,6 @@ std::uint64_t HookLeaveSave(void* game, void* player) noexcept {
 	return LeaveSave(game, player);
 }
 
-std::atomic<void*> LastGame {}; // the game of the last client packet or loaded character
 
 std::uint64_t HookLoadPlayer(void* game, void* client, void* name, void** out) noexcept {
 	const std::uint64_t result = LoadPlayer(game, client, name, out);
@@ -1406,7 +1421,14 @@ void __cdecl UiTick(const D2RL::PluginContext*, void*) noexcept {
 	ClientPlayer.store(player, std::memory_order_relaxed);
 	std::uint32_t id     = NoId;
 	if (!player || !ReadField(player, UnitIdOffset, id)) {
-		if (PlayerId.exchange(NoId) != NoId) HudButtons.clear();
+		if (PlayerId.exchange(NoId) != NoId) {
+			HudButtons.clear();
+			// You left the game and it is being freed. Without this the next
+			// game's first seconds looked your character up in the old one
+			// (crash on game load) whenever the load hook 0x41DF40 was taken
+			// by another plugin (Multi Mercenary hooks it).
+			LastGame.store(nullptr, std::memory_order_relaxed);
+		}
 		return;
 	}
 	if (id != PlayerId.load()) {
@@ -1873,9 +1895,11 @@ const Service* Query(const char* name) {
 
 // The skill button's level check goes to HookButtonLevel through a jump put in
 // int3 padding inside D2R.exe (a relative call can only reach the exe).
-bool RedirectButtonLevel() noexcept {
+// A jump to `detour` put in free padding (int3) of the game code, for rel32
+// calls to reach this DLL. Returns the jump's RVA, 0 if no padding was free.
+std::uint64_t JumpCave(const void* detour) noexcept {
 	std::array<std::uint8_t, 14> jump { 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 };
-	const auto                   target = reinterpret_cast<std::uint64_t>(&HookButtonLevel);
+	const auto                   target = reinterpret_cast<std::uint64_t>(detour);
 	std::memcpy(jump.data() + 6, &target, sizeof(target));
 	std::array<std::uint8_t, 16> padding {};
 	padding.fill(0xCC);
@@ -1887,14 +1911,40 @@ bool RedirectButtonLevel() noexcept {
 			if (std::memcmp(chunk.data() + at, padding.data(), padding.size()) != 0) continue;
 			++tries;
 			const std::uint64_t cave = start + at;
-			if (!Context->PatchBytes(cave + 1, padding.data(), 14, jump.data(), 14)) continue; // another plugin took it
-			if (D2RL::PatchCallRel32(Context, ButtonLevelCallRva, ButtonLevelCallBytes.data(), 5, cave + 1)) return true;
-			Log(true, "could not redirect the skill button's level check at D2R+0x%llX", static_cast<unsigned long long>(ButtonLevelCallRva));
-			return false;
+			if (Context->PatchBytes(cave + 1, padding.data(), 14, jump.data(), 14)) return cave + 1; // else another plugin took it
 		}
 	}
-	Log(true, "no free padding found for the skill button's level check");
+	return 0;
+}
+
+// The skill button's level check goes to HookButtonLevel through a jump put in
+// free padding.
+bool RedirectButtonLevel() noexcept {
+	const std::uint64_t cave = JumpCave(reinterpret_cast<const void*>(&HookButtonLevel));
+	if (!cave) {
+		Log(true, "no free padding found for the skill button's level check");
+		return false;
+	}
+	if (D2RL::PatchCallRel32(Context, ButtonLevelCallRva, ButtonLevelCallBytes.data(), 5, cave)) return true;
+	Log(true, "could not redirect the skill button's level check at D2R+0x%llX", static_cast<unsigned long long>(ButtonLevelCallRva));
 	return false;
+}
+
+// When another plugin already hooks a function (Multi Mercenary hooks the
+// character load and save), the game's calls to it are sent to the detour
+// instead; the detour then calls the function, and so the other plugin's hook.
+template <typename Fn, std::size_t Count>
+bool HookCalls(std::uint64_t rva, const std::array<std::pair<std::uint64_t, std::array<std::uint8_t, 5>>, Count>& sites, Fn detour, Fn* original) noexcept {
+	const std::uint64_t cave = JumpCave(reinterpret_cast<const void*>(detour));
+	if (!cave) return false;
+	*original    = reinterpret_cast<Fn>(Base + rva);
+	std::size_t done = 0;
+	for (const auto& site : sites) {
+		if (D2RL::PatchCallRel32(Context, site.first, site.second.data(), 5, cave)) ++done;
+		else Log(true, "could not redirect the call at D2R+0x%llX", static_cast<unsigned long long>(site.first));
+	}
+	if (done == sites.size()) Log(false, "D2R+0x%llX is hooked by another plugin: its %zu call%s go through Swap Cast instead", static_cast<unsigned long long>(rva), done, done == 1 ? "" : "s");
+	return done == sites.size();
 }
 
 template <typename Fn, std::size_t Size>
@@ -1946,9 +1996,11 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "Swap Cast %s: inactive, the cast hooks failed", PluginVersion);
 		return true;
 	}
-	if (!Hook(LoadPlayerRva, LoadPlayerBytes, &HookLoadPlayer, &LoadPlayer))
+	if (!Context->InstallInlineHook(LoadPlayerRva, LoadPlayerBytes.data(), static_cast<std::uint32_t>(LoadPlayerBytes.size()), &HookLoadPlayer, &LoadPlayer) &&
+	    !HookCalls(LoadPlayerRva, LoadPlayerCalls, &HookLoadPlayer, &LoadPlayer))
 		Log(true, "on the first game after starting D2R, set II skills may stay red until you move (hook failed)");
-	if (!Hook(LeaveSaveRva, LeaveSaveBytes, &HookLeaveSave, &LeaveSave))
+	if (!Context->InstallInlineHook(LeaveSaveRva, LeaveSaveBytes.data(), static_cast<std::uint32_t>(LeaveSaveBytes.size()), &HookLeaveSave, &LeaveSave) &&
+	    !HookCalls(LeaveSaveRva, LeaveSaveCalls, &HookLeaveSave, &LeaveSave))
 		Log(true, "quitting right after a swap cast may save your weapons moved (hook failed)");
 	if (!Hook(SkillTipRva, SkillTipBytes, &HookSkillTip, &SkillTip)) Log(true, "skill tooltips show no weapon line");
 	if (!Hook(SetSkillRva, SetSkillBytes, &HookSetSkill, &SetSkill) | !Hook(SetSkillObjectRva, SetSkillObjectBytes, &HookSetSkillObject, &SetSkillObject))

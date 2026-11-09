@@ -1,4 +1,38 @@
-# Swap Cast 1.1.2: release texts
+# Swap Cast 1.1.3: release texts
+
+## Patch notes
+
+```
+**Swap Cast 1.1.3**
+
+**Fixed**
+
+* No more crash on game load when another plugin (Multi Mercenary) also hooks the character load.
+* With such a plugin installed, quitting right after a swap cast puts your weapons back before the save again.
+* With such a plugin installed, set II skills no longer stay red in the first game after starting D2R.
+```
+
+## GitHub release
+
+- Tag: `swap-cast-v1.1.3`
+- Title: `Swap Cast 1.1.3`
+- Asset: `swap-cast.zip`
+
+Body:
+
+```markdown
+**Swap Cast** 1.1.3
+
+### Fixed
+- No more crash on game load when another plugin (Multi Mercenary) also hooks the character load.
+- With such a plugin installed, quitting right after a swap cast puts your weapons back before the save again.
+- With such a plugin installed, set II skills no longer stay red in the first game after starting D2R.
+
+### Install
+Load `swap-cast.zip` in D2RMM, or copy `d2rl-swap-cast.dll` to `<game>/d2rloader/plugins/`. Settings and modes.txt are unchanged.
+```
+
+# Swap Cast 1.1.2
 
 ## Patch notes
 
