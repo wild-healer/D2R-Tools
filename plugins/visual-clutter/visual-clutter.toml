@@ -17,7 +17,7 @@ enabled = true
 #   "self"      you
 #   "merc"      your mercenary
 #   "minions"   your summons (golems, spirits, Valkyrie, ...)
-#   "allies"    other players, their mercenaries and their summons
+#   "allies"    other players and every merc or summon that is not yours
 #   "monsters"  monsters (aura-enchanted bosses, monster auras)
 # An empty list [] shows every aura on that kind of unit.
 #
@@ -55,7 +55,3 @@ hide_charges = []
 # The red screen tint inside terror zones. The zone itself, its sound and its
 # name on screen are unchanged.
 hide_terror_zone_tint = false
-
-# Game versions (major.minor) the plugin is allowed to hook. Addresses are
-# checked against the game's code at load either way. Read at game start.
-versions = ["3.3"]

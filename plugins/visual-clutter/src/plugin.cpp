@@ -70,7 +70,7 @@
 namespace {
 
 constexpr const char* PluginId      = "visual-clutter";
-constexpr const char* PluginVersion = "1.0.2";
+constexpr const char* PluginVersion = "1.0.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -165,6 +165,7 @@ constexpr std::array<int, 10> TerrorFlagSite { 0xC7, 0x05, -1, -1, -1, -1, 0x01,
 // Units: +0x00 uint32 type (0 player, 1 monster), +0x08 uint32 id.
 constexpr std::uintptr_t UnitType = 0x00;
 constexpr std::uintptr_t UnitId   = 0x08;
+constexpr std::uintptr_t UnitClass = 0x04; // monstats row of a monster
 // Stat lists: +0x08 uint32 owner type, +0x0C uint32 owner id.
 constexpr std::uintptr_t StatListOwnerType = 0x08;
 constexpr std::uintptr_t StatListOwnerId   = 0x0C;
@@ -174,6 +175,9 @@ constexpr std::uintptr_t PetId    = 0x08;
 constexpr std::uintptr_t PetOwner = 0x0C;
 constexpr std::uintptr_t PetNext  = 0x30;
 constexpr std::uint32_t  PetTypeHireling = 7;
+// hireling.txt classes (roguehire, act2hire, act3hire, act5hire1/2): a merc the pet
+// list doesn't list as yours (another player's, or an extra one a plugin adds) is an ally.
+constexpr std::array<int, 5> HirelingClasses { 271, 338, 359, 560, 561 };
 
 constexpr std::uint32_t TypePlayer  = 0;
 constexpr std::uint32_t TypeMonster = 1;
@@ -247,7 +251,6 @@ struct Settings {
 	// Kinds of unit whose effects are hidden: missiles by owner, charge orbs by the unit wearing them.
 	Kinds             hideFirestorm {}, hideThunderStorm {}, hideCharges {};
 	std::atomic<bool> hideTerrorTint { false };
-	std::vector<std::string> versions { "3.3" }; // read at load only
 } Config;
 
 // missiles.txt rows (RotW, same in 93787 and 94995).
@@ -370,6 +373,12 @@ Kind KindOf(std::uint32_t type, std::uint32_t id, std::uint32_t localId) noexcep
 		}
 		if (!Read(node + PetNext, node)) break;
 	}
+	// Not in the pet list: still an ally when it is a merc (no monster uses those classes).
+	std::uint32_t monsterClass = NoId;
+	if (FindClientUnit)
+		if (void* const unit = FindClientUnit(id, static_cast<int>(type)); unit && Read(reinterpret_cast<std::uintptr_t>(unit) + UnitClass, monsterClass))
+			for (const int hireling : HirelingClasses)
+				if (static_cast<std::uint32_t>(hireling) == monsterClass) return Allies;
 	return Monsters;
 }
 
@@ -391,12 +400,18 @@ void HookToggleState(void* unit, int state, int on) noexcept {
 	const std::uint64_t key = Key(type, id, state);
 	if (!on) {
 		if (InStateOverlays) return; // the overlay code's off/on toggle, the state stays
-		AcquireSRWLockExclusive(&CasterLock);
-		Casters.erase(key);
-		ReleaseSRWLockExclusive(&CasterLock);
-		AcquireSRWLockExclusive(&TrackLock);
-		Tracked.erase(key);
-		ReleaseSRWLockExclusive(&TrackLock);
+		// The client turns states off and on again on its own (overlays redrawn, units
+		// coming back in sight) while the aura goes on: only the server's off ends the caster.
+		const bool client = FindClientUnit && FindClientUnit(id, static_cast<int>(type)) == unit;
+		if (client) {
+			AcquireSRWLockExclusive(&TrackLock);
+			Tracked.erase(key);
+			ReleaseSRWLockExclusive(&TrackLock);
+		} else {
+			AcquireSRWLockExclusive(&CasterLock);
+			Casters.erase(key);
+			ReleaseSRWLockExclusive(&CasterLock);
+		}
 		return;
 	}
 	std::uint32_t ownerType = NoId, ownerId = NoId;
@@ -565,6 +580,8 @@ bool ShouldHide(void* unit, std::uint32_t type, std::uint32_t id, int state, boo
 	if (const auto found = Casters.find(Key(type, id, state)); found != Casters.end()) caster = found->second, known = true;
 	ReleaseSRWLockShared(&CasterLock);
 	if (known) from = KindOf(static_cast<std::uint32_t>(caster >> 32), static_cast<std::uint32_t>(caster), localId);
+	// With several mercs (a plugin can give you more than one), another merc's aura on a merc counts as from an ally.
+	if (known && on == Merc && from == Merc && caster != Caster(type, id)) from = Allies;
 	const bool shout = IsShoutState(state);
 	const bool hide  = Has((shout ? Config.hideShouts : Config.hide)[on], from);
 	if (log && LoggedDecisions.fetch_add(1, std::memory_order_relaxed) < MaxLoggedDecisions)
@@ -794,13 +811,6 @@ std::string ReadGameVersion() noexcept {
 	return version;
 }
 
-std::string MajorMinor(std::string_view version) noexcept {
-	const auto first = version.find('.');
-	if (first == std::string_view::npos) return std::string(version);
-	const auto second = version.find('.', first + 1);
-	return std::string(version.substr(0, second));
-}
-
 // ---- config ----
 
 std::string Trim(std::string_view text) {
@@ -923,12 +933,7 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 		else setting->fetch_and(static_cast<std::uint8_t>(~Bit(kind)));
 		return true;
 	}
-	if (key == "versions") {
-		if (value.empty() || value[0] != '[') return error = "a list of versions, like [\"3.3\"]", false;
-		auto versions = ParseStrings(value);
-		if (!versions.empty()) Config.versions = std::move(versions);
-		return true;
-	}
+	if (key == "versions") return true; // removed in 1.0.3 (code bytes are checked instead), ignored in older config files
 	return error = "unknown setting", false;
 }
 
@@ -948,12 +953,6 @@ std::string ValueOf(const std::string& key) {
 	int    kind {};
 	if (SplitSwitch(key, setting, kind)) return flag(Has(*setting, kind));
 	return {};
-}
-
-std::string VersionsList() {
-	std::string text;
-	for (const auto& version : Config.versions) text += std::string(text.empty() ? "" : ", ") + "\"" + version + "\"";
-	return "[" + text + "]";
 }
 
 std::string Render() {
@@ -984,7 +983,7 @@ enabled = )" + ValueOf("enabled") + R"(
 #   "self"      you
 #   "merc"      your mercenary
 #   "minions"   your summons (golems, spirits, Valkyrie, ...)
-#   "allies"    other players, their mercenaries and their summons
+#   "allies"    other players and every merc or summon that is not yours
 #   "monsters"  monsters (aura-enchanted bosses, monster auras)
 # An empty list [] shows every aura on that kind of unit.
 #
@@ -1011,11 +1010,7 @@ hide_thunder_storm = )" + ValueOf("hide_thunder_storm") + R"(
 hide_charges = )" + ValueOf("hide_charges") + R"(
 # The red screen tint inside terror zones. The zone itself, its sound and its
 # name on screen are unchanged.
-hide_terror_zone_tint = )" + ValueOf("hide_terror_zone_tint") + R"(
-
-# Game versions (major.minor) the plugin is allowed to hook. Addresses are
-# checked against the game's code at load either way. Read at game start.
-versions = )" + VersionsList() + "\n";
+hide_terror_zone_tint = )" + ValueOf("hide_terror_zone_tint") + "\n";
 }
 
 void SaveConfig() {
@@ -1076,9 +1071,9 @@ std::string MatrixText(const std::array<Kinds, KindCount>& hide) {
 // ---- I Hate TOMLs ----
 
 // Who the kinds are, as the menu names them (column labels wrap to two short lines).
-constexpr std::array<const char*, KindCount> RowLabels { "You", "Your merc", "Your summons", "Other players", "Monsters" };
-constexpr std::array<const char*, KindCount> FromLabels { "From you", "From merc", "From summons", "From players", "From monsters" };
-constexpr std::array<const char*, KindCount> OnLabels { "On you", "On merc", "On summons", "On players", "On monsters" };
+constexpr std::array<const char*, KindCount> RowLabels { "You", "Your merc", "Your summons", "Allies", "Monsters" };
+constexpr std::array<const char*, KindCount> FromLabels { "From you", "From your merc", "From your summons", "From allies", "From monsters" };
+constexpr std::array<const char*, KindCount> OnLabels { "On you", "On your merc", "On your summons", "On allies", "On monsters" };
 
 std::string Schema;
 
@@ -1204,18 +1199,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	} catch (...) {
 	}
 	GameVersion = ReadGameVersion();
-	const std::string majorMinor = MajorMinor(GameVersion);
 	Log(false, "Visual Clutter %s: game %s, hide auras %s", PluginVersion, GameVersion.c_str(), MatrixText(Config.hide).c_str());
 	Log(false, "hide shouts %s", MatrixText(Config.hideShouts).c_str());
 	Log(false, "hide %s", EffectsText().c_str());
 	// Hooked even when turned off: it can be turned on while playing.
-	bool supported = false;
-	for (const auto& version : Config.versions) supported |= version == majorMinor;
-	if (!supported) {
-		Problem = "game version not in versions";
-		Log(true, "inactive: game version %s is not in versions (edit the config to allow it)", majorMinor.c_str());
-		return true;
-	}
 	if (!Base || !Locate() || !InstallHooks()) {
 		Log(true, "inactive: %s", Problem.c_str());
 		return true;

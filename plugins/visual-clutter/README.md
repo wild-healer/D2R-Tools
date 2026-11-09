@@ -11,16 +11,16 @@ It is one D2RLoader plugin (`d2rl-visual-clutter.dll`) with native hooks.
 
 ## Config
 
-`d2rloader/config/visual-clutter.toml` (written on first launch). Every setting except `versions` can also be changed in game with I Hate TOMLs, and applies at once. The kind lists show there as tables of check boxes (who is hidden on whom), which need I Hate TOMLs 1.0.1 or later.
+`d2rloader/config/visual-clutter.toml` (written on first launch). Every setting can also be changed in game with I Hate TOMLs, and applies at once. The kind lists show there as tables of check boxes (who is hidden on whom), which need I Hate TOMLs 1.0.1 or later.
 
 Each `on_<kind>` line is a kind of unit the effect is drawn on and lists the kinds of caster whose auras are hidden there. Both sides use the same five kinds:
 
 | Kind | Who |
 | --- | --- |
 | `self` | you |
-| `merc` | your mercenary |
+| `merc` | your mercenary (with several mercs, another merc's aura on one of them counts as from `allies`) |
 | `minions` | your summons (golems, druid spirits, Valkyrie, ...) |
-| `allies` | other players, their mercenaries and summons |
+| `allies` | other players and every merc or summon that is not yours |
 | `monsters` | monsters (aura-enchanted bosses, monster auras) |
 
 Default:
@@ -44,7 +44,6 @@ Examples: your own Might on you is `on_self` + `"self"`, your Might on your merc
 | `hide_thunder_storm` | `[]` | Casters whose Thunder Storm bolts (and their flash) are not drawn |
 | `hide_charges` | `[]` | Kinds of unit whose martial arts charge orbs are not drawn |
 | `hide_terror_zone_tint` | false | No red screen tint in terror zones (the zone, its sound and its name stay) |
-| `versions` | `["3.3"]` | Game versions the plugin may hook |
 
 ## Who cast an aura
 
@@ -54,7 +53,7 @@ Your merc and summons are told apart from monsters with the game's own pet list,
 
 ## How it works
 
-The client turns a state's look on by adding the overlays listed in `states.txt` to the unit; the HD renderer draws those overlays. For a hidden aura the plugin skips that step, so the unit never gets the overlay: nothing is drawn and the state itself (stats, buff icons) is untouched. Addresses are those of Steam 3.3.93787 (unchanged in 3.3.94995) and are checked against the game's code at load; on a build where they don't match, the plugin loads but does nothing and says why in its log and in the `visual-clutter` console command.
+The client turns a state's look on by adding the overlays listed in `states.txt` to the unit; the HD renderer draws those overlays. For a hidden aura the plugin skips that step, so the unit never gets the overlay: nothing is drawn and the state itself (stats, buff icons) is untouched. Addresses are those of Steam 3.3.93787 (unchanged in 3.3.94995 and 3.4.95041) and are checked against the game's code at load; on a build where they don't match, the plugin loads but does nothing and says why in its log and in the `visual-clutter` console command.
 
 A decision is made when the aura reaches the unit, and the plugin remembers it. When a setting changes, auras and shouts already on units follow at once: the plugin removes the overlays of the ones now hidden, as the client does when a state ends, and adds those of the ones now shown.
 

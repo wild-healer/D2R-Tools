@@ -1,3 +1,48 @@
+# Visual Clutter 1.0.3: release texts
+
+## Patch notes
+
+```
+**Visual Clutter 1.0.3**
+
+**Fixed**
+
+* Visual Clutter works on game 3.4.95041. The versions setting is removed; an old config that still has it loads fine.
+* In I Hate TOMLs, "Other players" is now "Allies", and the other rows and columns say "your merc" and "your summons".
+* Any merc that is not yours counts as an ally, including extra mercs a plugin gives other players.
+* With several mercs, another merc's aura on one of your mercs counts as from an ally, so From allies on Your merc hides it.
+* Auras no longer go back to counting as a unit's own after the game redraws them, for example when you change a setting or move to another area.
+
+**Removed**
+
+* versions setting: the plugin checks the game's code at load instead.
+```
+
+## GitHub release
+
+- Tag: `visual-clutter-v1.0.3`
+- Title: `Visual Clutter 1.0.3`
+- Asset: `visual-clutter.zip`
+
+Body:
+
+```markdown
+**Visual Clutter** 1.0.3
+
+### Fixed
+- Visual Clutter works on game 3.4.95041. The versions setting is removed; an old config that still has it loads fine.
+- In I Hate TOMLs, "Other players" is now "Allies", and the other rows and columns say "your merc" and "your summons".
+- Any merc that is not yours counts as an ally, including extra mercs a plugin gives other players.
+- With several mercs, another merc's aura on one of your mercs counts as from an ally, so From allies on Your merc hides it.
+- Auras no longer go back to counting as a unit's own after the game redraws them, for example when you change a setting or move to another area.
+
+### Removed
+- `versions` setting: the plugin checks the game's code at load instead.
+
+### Install
+Load `visual-clutter.zip` in D2RMM, or copy `d2rl-visual-clutter.dll` to `<game>/d2rloader/plugins/`. Settings are unchanged.
+```
+
 # Visual Clutter 1.0.2: release texts
 
 ## Patch notes
@@ -102,7 +147,7 @@ Description:
 
 ### Requirements
 - D2RLoader 1.3.1 or later.
-- Steam 3.3.93787 or 3.3.94995. The plugin checks the game code when it loads; on another build it stays inactive and says why in its log and in the `visual-clutter` console command.
+- Steam 3.3.93787, 3.3.94995 or 3.4.95041. The plugin checks the game code when it loads; on another build it stays inactive and says why in its log and in the `visual-clutter` console command.
 - Single player or a game you host: who cast an aura is read from the game server running on your PC. In a game hosted by someone else, every aura counts as cast by the unit it is on.
 
 ### Install
