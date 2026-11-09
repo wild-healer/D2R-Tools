@@ -21,7 +21,7 @@
 //   WalkToOwner   0x4A8090 (Game*, Unit*, owner, u8 steps, u16 0)
 //   DeleteEvent   0x48B890 (Game*, Unit*, 2 = AI think, 0)
 //   Distance      0x596720 (Unit*, Unit*)  full unit size distance the AI uses
-//   InMelee       0x348650 (Unit*, Unit*, 0)
+//   InMelee       0x348650 (Unit*, Unit*, 0, int* out or null)
 //   GetStat       0x2F5020 (Unit*, stat, layer)
 //   CheckState    0x3351B0 (Unit*, state)
 //   GetSkill      0x33DCD0 (Unit*, skill, -1); SkillLevel 0x33D1E0 (Unit*, Skill*, 1, 0)
@@ -54,7 +54,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.1";
+constexpr const char* PluginVersion = "0.0.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -142,7 +142,7 @@ using EscapeFn       = int (*)(void* game, void* unit, void* from, std::uint8_t 
 using WalkToOwnerFn  = int (*)(void* game, void* unit, void* owner, std::uint8_t steps, std::uint16_t flag) noexcept;
 using DeleteEventFn  = void (*)(void* game, void* unit, int type, int arg) noexcept;
 using DistanceFn     = int (*)(void* a, void* b) noexcept;
-using InMeleeFn      = int (*)(void* a, void* b, int flag) noexcept;
+using InMeleeFn      = int (*)(void* a, void* b, int flag, int* out) noexcept; // out (may be null) gets the result too
 using GetStatFn      = int (*)(void* unit, int stat, int layer) noexcept;
 using CheckStateFn   = int (*)(void* unit, int state) noexcept;
 using GetSkillFn     = void* (*)(void* unit, int skill, int owner) noexcept;
@@ -563,7 +563,7 @@ void* HookSelectTarget(void* game, void* unit, int* distance, int* inMelee) noex
 		return nullptr;
 	}
 	if (distance) *distance = Distance(unit, target);
-	if (inMelee) *inMelee = InMelee(unit, target, 0);
+	if (inMelee) *inMelee = InMelee(unit, target, 0, nullptr);
 	return target;
 }
 
@@ -574,7 +574,7 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 	const bool melee = params[0] == 2;
 	// Melee types: the game runs to the target (and the Desert mercenary keeps
 	// the game's own Jab/attack choice); our part is the target and leash.
-	if (melee && (role == Role::Desert || Distance(unit, target) >= 3 || !InMelee(unit, target, 0)))
+	if (melee && (role == Role::Desert || Distance(unit, target) >= 3 || !InMelee(unit, target, 0, nullptr)))
 		return Combat(game, unit, classId, owner, target, seed, tick, params);
 	Scan scan;
 	Gather(game, unit, scan);
