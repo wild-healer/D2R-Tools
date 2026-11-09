@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.5";
+constexpr const char* PluginVersion = "0.0.6";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -643,6 +643,7 @@ void* PlayerOwner(void* merc) noexcept {
 
 constexpr std::uintptr_t UnitModeOffset = 0x0C; // u32: monster mode 2 walk, 15 run
 constexpr int            ModeWalk = 2, ModeRun = 15;
+constexpr std::uint32_t  PlayerRun = 3; // player mode
 constexpr std::uintptr_t TickMonStats2 = 0x30; // monstats2 record: +0x0E melee range
 
 struct OwnerState {
@@ -727,7 +728,8 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	}
 	if (walking && state.moving && Cheb(state.spotX, state.spotY, x, y) <= 2) return true; // already on its way
 	DeleteEvent(game, merc, 2, 0);
-	const bool run = away > 6;
+	// Runs like you: whenever you run, or when it is more than a couple of steps off.
+	const bool run = Field<std::uint32_t>(owner, UnitModeOffset) == PlayerRun || away > 3;
 	if (Move(game, merc, nullptr, run ? ModeRun : ModeWalk, x, y, 1, 0)) {
 		state.spotX = x, state.spotY = y, state.moving = true;
 		return true;
