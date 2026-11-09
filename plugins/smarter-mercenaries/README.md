@@ -9,9 +9,11 @@ dice roll.
   slightly behind, spread sideways, and follow your moves every few frames.
 - Melee mercenaries leave the formation when an enemy comes within
   `engage_range` (10) of them, and go back once it's dead.
-- Ranged mercenaries stay in formation and shoot from there. When you get
-  within `danger_range` (10) of enemies they position themselves: they run
-  from any monster that gets within 5 of them, then shoot again (hit and run).
+- Ranged mercenaries stay in formation and shoot from there; a place up to 3
+  off their spot is good enough. When you get within `danger_range` (10) of
+  enemies they position themselves: the place closest to you that keeps 5
+  from every monster, then shoot again (hit and run).
+- Mercenaries run whenever you run or when more than 3 off their spot.
 - Targets: what you're attacking first, then monsters attacking you, then
   monsters attacking the mercenary, then the closest, never farther than
   `leash` (14) from you; targets immune to all its damage come last.
