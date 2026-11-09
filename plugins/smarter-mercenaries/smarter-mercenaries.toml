@@ -1,0 +1,23 @@
+# Smarter Mercenaries
+#
+# Mercenaries fight the way their type is meant to. Works in single player and
+# in games you host. Every setting can also be changed in game with I Hate TOMLs.
+
+[smarter-mercenaries]
+enabled = true
+
+# Which mercenary types use the new AI (false: the game's own AI).
+rogue = true
+desert_mercenary = true
+iron_wolf = true
+barbarian = true
+
+# How far from you a mercenary picks fights (4 to 24, the game's follow range
+# is 16 to 24). Monsters attacking the mercenary itself are always fought.
+leash = 14
+
+# The same for the Desert mercenary, kept short so its aura covers you.
+aura_leash = 8
+
+# Write mercenary decisions to the plugin log.
+log = true
