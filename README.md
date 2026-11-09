@@ -24,6 +24,7 @@ Every plugin, mod and patch is downloaded from its page on the D2RLoader Hub, li
 | [I Hate TOMLs](https://d2rloader.net/hub/plugins/i-hate-tomls) | One in-game window for every plugin's settings: joined plugins get a settings page, the others' TOML files are edited in place, and configs survive D2RMM installs. |
 | [Inventory Fill](https://d2rloader.net/hub/plugins/inventory-fill) | Your inventory as a small grid on the skill bar, over the mana demon, while the inventory is closed. |
 | [Inventory Slots](https://d2rloader.net/hub/plugins/invetory-slots) | Dedicated slots for the Horadric Cube, the two tomes and keys next to the inventory, outside its grid. |
+| [Merc Gear Models](https://d2rloader.net/hub/plugins/merc-gear-models) | Your mercenary wears what you give it: real HD helm and weapon models, armor looks (with class heavy armor) and weapon colors such as Enchant's red. |
 | [Orb Values](https://d2rloader.net/hub/plugins/orb-values) | Life and mana numbers always shown in the middle of the orbs, without the "Life:" and "Mana:" prefixes. |
 | [Perfect Frame](https://d2rloader.net/hub/plugins/perfect-frame) | A golden frame around the tooltip of perfect uniques, set items and runewords, a red one when every roll is at its worst. |
 | [Player Page Host](https://d2rloader.net/hub/plugins/aaa-player-page-host) | Shares the custom player page between plugins: each one reserves an area of it, and the host packs them. Used by other plugins, nothing visible on its own. |
