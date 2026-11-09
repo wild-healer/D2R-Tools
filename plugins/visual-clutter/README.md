@@ -53,7 +53,7 @@ Your merc and summons are told apart from monsters with the game's own pet list,
 
 ## How it works
 
-The client turns a state's look on by adding the overlays listed in `states.txt` to the unit; the HD renderer draws those overlays. For a hidden aura the plugin skips that step, so the unit never gets the overlay: nothing is drawn and the state itself (stats, buff icons) is untouched. Addresses are those of Steam 3.3.93787 (unchanged in 3.3.94995) and are checked against the game's code at load; on a build where they don't match, the plugin loads but does nothing and says why in its log and in the `visual-clutter` console command.
+The client turns a state's look on by adding the overlays listed in `states.txt` to the unit; the HD renderer draws those overlays. For a hidden aura the plugin skips that step, so the unit never gets the overlay: nothing is drawn and the state itself (stats, buff icons) is untouched. Addresses are those of Steam 3.3.93787 (unchanged in 3.3.94995 and 3.4.95041) and are checked against the game's code at load; on a build where they don't match, the plugin loads but does nothing and says why in its log and in the `visual-clutter` console command.
 
 A decision is made when the aura reaches the unit, and the plugin remembers it. When a setting changes, auras and shouts already on units follow at once: the plugin removes the overlays of the ones now hidden, as the client does when a state ends, and adds those of the ones now shown.
 

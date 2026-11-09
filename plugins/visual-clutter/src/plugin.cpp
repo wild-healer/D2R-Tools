@@ -70,7 +70,7 @@
 namespace {
 
 constexpr const char* PluginId      = "visual-clutter";
-constexpr const char* PluginVersion = "1.0.2-dev-4";
+constexpr const char* PluginVersion = "1.0.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -933,7 +933,7 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 		else setting->fetch_and(static_cast<std::uint8_t>(~Bit(kind)));
 		return true;
 	}
-	if (key == "versions") return true; // removed in 1.0.2-dev-1 (code bytes are checked instead), ignored in older config files
+	if (key == "versions") return true; // removed in 1.0.3 (code bytes are checked instead), ignored in older config files
 	return error = "unknown setting", false;
 }
 

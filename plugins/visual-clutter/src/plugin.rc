@@ -5,19 +5,19 @@ D2RL_PLUGIN_MANIFEST_RESOURCE_ID RCDATA { D2RL_PLUGIN_RESOURCE_DWORD(D2RL_PLUGIN
 D2RL_PLUGIN_CONFIG_RESOURCE_ID RCDATA "visual-clutter.toml"
 
 1 VERSIONINFO
-FILEVERSION 1,0,2,0
-PRODUCTVERSION 1,0,2,0
+FILEVERSION 1,0,3,0
+PRODUCTVERSION 1,0,3,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Visual Clutter D2RLoader plugin"
-      VALUE "FileVersion", "1.0.2-dev-4"
+      VALUE "FileVersion", "1.0.3"
       VALUE "InternalName", "visual-clutter"
       VALUE "OriginalFilename", "d2rl-visual-clutter.dll"
       VALUE "ProductName", "Visual Clutter"
-      VALUE "ProductVersion", "1.0.2-dev-4"
+      VALUE "ProductVersion", "1.0.3"
     END
   END
   BLOCK "VarFileInfo"
