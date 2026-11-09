@@ -13,11 +13,11 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Un-Anya-lyse D2RLoader plugin"
-      VALUE "FileVersion", "1.0.1"
+      VALUE "FileVersion", "1.0.1-dev-1"
       VALUE "InternalName", "un-anya-lyse"
       VALUE "OriginalFilename", "d2rl-un-anya-lyse.dll"
       VALUE "ProductName", "Un-Anya-lyse"
-      VALUE "ProductVersion", "1.0.1"
+      VALUE "ProductVersion", "1.0.1-dev-1"
     END
   END
   BLOCK "VarFileInfo"

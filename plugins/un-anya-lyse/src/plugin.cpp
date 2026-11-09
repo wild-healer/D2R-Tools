@@ -58,7 +58,7 @@
 namespace {
 
 constexpr const char* PluginId      = "un-anya-lyse";
-constexpr const char* PluginVersion = "1.0.1";
+constexpr const char* PluginVersion = "1.0.1-dev-1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -115,6 +115,11 @@ constexpr Code CompleteQuestBytes { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x
 // Call sites (a 5-byte call to the function above); the hooks act on calls
 // returning there.
 constexpr std::uint64_t CancelSiteRva       = 0x114D8B; // AddLine: Cancel
+// The Cancel line's callback, loaded by lea rcx, [rip-0x2142] at 0x114D6B.
+// Other plugins (Multi Mercenary) redirect the Cancel call to their own code,
+// which then calls AddLine from elsewhere, so the line is also found by it.
+constexpr std::uint64_t CancelCallbackRva   = 0x112C30;
+constexpr std::uint64_t CancelLeaRva        = 0x114D6B;
 constexpr std::uint64_t TopTextSiteRva      = 0x1E4BC4; // SetText: instruction line
 constexpr std::uint64_t ButtonSiteRva       = 0x1E51A1; // SetText: confirm button
 constexpr std::uint64_t AcceptSiteRva       = 0x1E38B6; // CanPersonalize: window
@@ -219,6 +224,19 @@ bool CallsTo(std::uint64_t site, std::uint64_t target) noexcept {
 	std::int32_t offset = 0;
 	std::memcpy(&offset, call + 1, sizeof(offset));
 	return site + CallSize + static_cast<std::int64_t>(offset) == target;
+}
+
+// The Cancel site: our call to AddLine, or a 5-byte call another plugin
+// pointed elsewhere, after the lea of the Cancel callback.
+bool CancelSiteFound() noexcept {
+	std::uint8_t lea[7] {};
+	if (!Read(Base + CancelLeaRva, lea, sizeof(lea)) || lea[0] != 0x48 || lea[1] != 0x8D || lea[2] != 0x0D) return false;
+	std::int32_t offset = 0;
+	std::memcpy(&offset, lea + 3, sizeof(offset));
+	if (CancelLeaRva + sizeof(lea) + static_cast<std::int64_t>(offset) != CancelCallbackRva) return false;
+	if (CallsTo(CancelSiteRva, AddLineRva)) return true;
+	std::uint8_t call = 0;
+	return Read(Base + CancelSiteRva, &call, 1) && call == 0xE8;
 }
 
 bool CalledFrom(void* returnAddress, std::uint64_t site) noexcept {
@@ -336,7 +354,7 @@ bool RemoveLine() noexcept {
 }
 
 std::uint64_t HookAddLine(void* menu, const char* text, int a3, int a4, void* callback, int enabled) noexcept {
-	if (CalledFrom(__builtin_return_address(0), CancelSiteRva)) {
+	if (CalledFrom(__builtin_return_address(0), CancelSiteRva) || callback == reinterpret_cast<void*>(Base + CancelCallbackRva)) {
 		// A new dialog: whatever window comes next opens in its normal mode.
 		RemoveMode = false;
 		if (Config.enabled && NpcClass() == NpcAnya && LocalGame()) {
@@ -442,8 +460,11 @@ bool Locate() noexcept {
 			return false;
 		}
 	}
-	const std::array<std::pair<std::uint64_t, std::uint64_t>, 10> sites { {
-		{ CancelSiteRva, AddLineRva },
+	if (!CancelSiteFound()) {
+		Log(true, "game code differs at D2R+0x%llX", static_cast<unsigned long long>(CancelSiteRva));
+		return false;
+	}
+	const std::array<std::pair<std::uint64_t, std::uint64_t>, 9> sites { {
 		{ TopTextSiteRva, SetTextRva },
 		{ ButtonSiteRva, SetTextRva },
 		{ AcceptSiteRva, CanPersonalizeRva },
