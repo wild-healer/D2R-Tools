@@ -35,10 +35,11 @@ apply at once):
 ## How it works
 
 - Hook: GetComponentCode D2R+0x195200 picks each merc slot's look from its gear.
-- The plugin serves its own copies of the four merc definitions (built by
-  `tools/gen_defs.py` from the game's HD data into `src/merc_defs.inc`), with
-  one entity per helm and weapon the merc can use, attaching that item's HD
-  model, and the class heavy armor bodies.
+- The plugin serves its own copies of the four merc definitions: at load it
+  rebuilds the game's own `<merc>.json` (kept as tables, not as a file) and adds one entity per helm and weapon the
+  merc can use, attaching that item's HD model, and the class heavy armor
+  bodies (`src/merc_build.h`, from the tables `tools/gen_defs.py` writes into
+  `src/merc_adds.inc` from the game's HD data).
 - Borrowed class armor is re-posed and its bones mapped onto the merc skeleton
   at load; meshes the merc shouldn't wear are collapsed in the skinning pass.
 - Item colors: applied to the merc's item models after the game's unit visual

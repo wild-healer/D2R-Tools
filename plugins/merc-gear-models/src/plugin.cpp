@@ -23,7 +23,8 @@
 //     and rebuilds the model when it changes (0x76e110, monsters included).
 //   - Real item models: the merc HD definitions (data/hd/character/enemy/
 //     <merc>.json) only have a few looks. The plugin registers its own copies
-//     (built by tools/gen_defs.py into merc_defs.inc) with one extra entity per
+//     (the game's file and the tables tools/gen_defs.py writes
+//     into merc_adds.inc; see merc_build.h) with one extra entity per
 //     helm and per weapon the merc can use, each attaching that item's HD json
 //     (items.json, uniques.json, sets.json), keyed by variant = item code,
 //     "u<id>" for a unique or "s<id>" for a set item. 0x6631a0 builds a unit's
@@ -56,7 +57,8 @@
 
 namespace {
 
-#include "merc_defs.inc"
+#include "merc_adds.inc"
+#include "merc_build.h"
 
 constexpr const char* PluginId      = "merc-gear-models";
 constexpr const char* PluginVersion = "1.0.0";
@@ -141,8 +143,8 @@ UnitBankFn                 UnitBank {};
 ItemRecordFn               ItemRecord {};
 DefNameFn                  DefName {};
 bool                       DefsActive = false;
-std::array<std::string, std::size(Defs)> DefNames;
-std::array<std::string, std::size(Defs)> DefTexts;
+std::array<std::string, std::size(MercNames)> DefNames;
+std::array<std::string, std::size(MercNames)> DefTexts;
 
 void Log(bool warn, const char* format, ...) noexcept {
 	if (!Context) return;
@@ -154,9 +156,34 @@ void Log(bool warn, const char* format, ...) noexcept {
 	warn ? Context->LogWarn(line) : Context->LogInfo(line);
 }
 
+// Reads the game's memory after checking it is committed and readable (ReadProcessMemory made one antivirus
+// heuristic call the DLL an injector). VirtualQuery is slow on the game's big heap regions and the draw hooks
+// read every frame, so each thread remembers the last readable regions it checked for a quarter second.
+struct ReadableRegion {
+	std::uintptr_t begin = 0, end = 0;
+	std::uint64_t  until = 0;
+};
+thread_local std::array<ReadableRegion, 16> ReadableRegions {};
+thread_local std::size_t                    NextRegion = 0;
+
 bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept {
-	SIZE_T copied = 0;
-	return address != 0 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), output, size, &copied) && copied == size;
+	if (address == 0 || address + size < address) return false;
+	const std::uint64_t now = GetTickCount64();
+	for (const auto& region : ReadableRegions)
+		if (address >= region.begin && address + size <= region.end && now < region.until) {
+			std::memcpy(output, reinterpret_cast<const void*>(address), size);
+			return true;
+		}
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+	constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if (!(info.Protect & readable) || (info.Protect & PAGE_GUARD)) return false;
+	const std::uintptr_t begin = reinterpret_cast<std::uintptr_t>(info.BaseAddress), end = begin + info.RegionSize;
+	if (address + size > end) return false;
+	ReadableRegions[NextRegion] = { begin, end, now + 250 };
+	NextRegion                  = (NextRegion + 1) % ReadableRegions.size();
+	std::memcpy(output, reinterpret_cast<const void*>(address), size);
+	return true;
 }
 
 template <typename T>
@@ -1258,7 +1285,11 @@ void UnitVisualUpdate(void* visuals, std::uint32_t entity, std::uint8_t* compone
 	}
 }
 
-void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept { LoadClassSkeletons(); }
+int RegisterDefs() noexcept;
+
+void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
+	LoadClassSkeletons();
+}
 
 // ---- the hook ----
 
@@ -1279,28 +1310,37 @@ std::uint32_t ComponentCode(void* unit, int unitType, int classId, int mode, uns
 const char* MercDefName(void* mapper, void* unit, int unitType, int classId) noexcept {
 	const char* name = DefName(mapper, unit, unitType, classId);
 	if (!DefsActive || unitType != 1 || !name) return name;
-	for (std::size_t i = 0; i < std::size(Defs); ++i)
-		if (std::strcmp(name, Defs[i].name) == 0) return DefNames[i].c_str();
+	for (std::size_t i = 0; i < std::size(MercNames); ++i)
+		if (std::strcmp(name, MercNames[i]) == 0) return DefNames[i].c_str();
 	return name;
 }
 
 // ---- setup ----
 
-bool RegisterDefs() noexcept {
+// Each merc's definition: the game's own <merc>.json with the plugin's entities and dependencies added (all
+// put together from the tables in merc_adds.inc), registered as data/hd/character/enemy/d2rloader/merc-gear-models/<merc>.json.
+// Registered at load: a resource registered once the game runs is never seen by it. 0 = done, 2 = failed.
+int RegisterDefs() noexcept {
 	const D2RL::ResourceService* resources = nullptr;
 	if (Context->QueryService(&resources) != D2RL::ServiceQueryResult::Success || !D2RL::HasResourceServiceField(resources, D2RL::ResourceServiceRequiredSize)) {
 		Log(true, "item models off: the D2RLoader resource service is missing");
-		return false;
+		return 2;
 	}
-	for (std::size_t i = 0; i < std::size(Defs); ++i) {
-		DefNames[i]            = std::string("d2rloader/") + PluginId + "/" + Defs[i].name;
+	for (std::size_t i = 0; i < std::size(MercNames); ++i) {
+		std::string       trouble, base;
+		const std::string source = std::string("data/hd/character/enemy/") + MercNames[i] + ".json";
+		try {
+			base        = MercBuild::BaseText(i);
+			DefTexts[i] = MercBuild::Build(i, base, PolearmGrip, trouble);
+		} catch (...) {
+			DefTexts[i].clear(), trouble = "out of memory";
+		}
+		if (DefTexts[i].empty()) {
+			Log(true, "item models off: %s could not be extended (%s)", source.c_str(), trouble.c_str());
+			return 2;
+		}
+		DefNames[i]            = std::string("d2rloader/") + PluginId + "/" + MercNames[i];
 		const std::string path = "data/hd/character/enemy/" + DefNames[i] + ".json";
-		// Polearm grip: the generator leaves 7777.0 as the attachment's offset along the shaft.
-		DefTexts[i].assign(Defs[i].json, Defs[i].size);
-		char grip[32] {};
-		std::snprintf(grip, sizeof(grip), "%.3f", PolearmGrip);
-		for (std::size_t at = 0; (at = DefTexts[i].find("7777.0", at)) != std::string::npos; at += std::strlen(grip))
-			DefTexts[i].replace(at, 6, grip);
 		const D2RL::Resources::ResourceRegistration resource {
 			.structSize = D2RL::Resources::ResourceRegistrationSize,
 			.path       = path.c_str(),
@@ -1310,10 +1350,11 @@ bool RegisterDefs() noexcept {
 		D2RL::Resources::RegistrationHandle handle = D2RL::Resources::InvalidHandle;
 		if (const auto result = resources->registerResource(Context, &resource, &handle); result != D2RL::Resources::Result::Success) {
 			Log(true, "item models off: could not register %s (result %u)", path.c_str(), static_cast<unsigned>(result));
-			return false;
+			return 2;
 		}
+		Log(false, "merc definitions: %s built (%zu -> %zu bytes)", MercNames[i], base.size(), DefTexts[i].size());
 	}
-	return true;
+	return 0;
 }
 
 // A rel32 call has to land in the game image: a jmp [rip] to MercDefName goes
@@ -1553,13 +1594,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		    lifecycle->registerDataTablesLoadedListener(context, &listener, &TablesListener) != D2RL::Lifecycle::Result::Success)
 			Log(true, "borrowed bodies keep their own pose: no data tables listener");
 	}
-	{
-		DefsActive = RegisterDefs();
-		if (DefsActive && !RedirectDefNameCall()) {
-			DefsActive = false;
-			Log(true, "item models off: could not redirect the definition name call at D2R+0x%llX", static_cast<unsigned long long>(DefNameCallRva));
-		}
-	}
+	if (!RedirectDefNameCall())
+		Log(true, "item models off: could not redirect the definition name call at D2R+0x%llX", static_cast<unsigned long long>(DefNameCallRva));
+	else
+		DefsActive = RegisterDefs() == 0;
 	Log(false, "Merc Gear Models %s: active (item models %s)", PluginVersion, DefsActive ? "on" : "off");
 	return true;
 }
