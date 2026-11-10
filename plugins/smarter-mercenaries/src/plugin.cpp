@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.21";
+constexpr const char* PluginVersion = "0.0.22";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -787,24 +787,6 @@ int Cheb(int ax, int ay, int bx, int by) noexcept {
 void* GoingOwner = nullptr; // the owner of the mercenary thinking now
 
 bool Go(void* game, void* merc, void* target, int x, int y, bool run) noexcept {
-	// Never through you: you block mercenaries, and a run that bumps into you
-	// ends there (then a new run, a new direction: the zig-zag). When the
-	// straight line passes within 2 of you, it goes to a point 3 beside you,
-	// on the far side of the line, first; its next think goes on from there.
-	if (int mx = 0, my = 0, ox = 0, oy = 0; !target && GoingOwner && Position(merc, mx, my) && Position(GoingOwner, ox, oy)) {
-		const double dx = x - mx, dy = y - my, length = std::sqrt(dx * dx + dy * dy);
-		if (length >= 1.0 && Cheb(x, y, ox, oy) > 2) {
-			const double ux = dx / length, uy = dy / length;
-			const double along = (ox - mx) * ux + (oy - my) * uy;
-			const double cross = ux * (oy - my) - uy * (ox - mx); // > 0: you are left of the line
-			if (along > 0.0 && along < length && std::abs(cross) < 2.0) {
-				const double side = cross > 0 ? -3.0 : 3.0; // left normal is (-uy, ux)
-				const int    wx = ox + static_cast<int>(std::lround(-uy * side + ux)), wy = oy + static_cast<int>(std::lround(ux * side + uy));
-				Mv(merc, "  goes around you: (%d,%d) first, on the way to (%d,%d)", wx, wy, x, y);
-				x = wx, y = wy;
-			}
-		}
-	}
 	Velocity(merc, run ? ModeRun : 0, run ? 60 : 0, 100);
 	// Steps 8: the whole path, corners included. With 1 (the game's usual
 	// value) a run ended at the first corner, so going around you or another
@@ -1085,18 +1067,6 @@ void PassAllies(void* merc) noexcept {
 	void* const path = GetPath(merc);
 	if (!path) return;
 	auto& mask = *reinterpret_cast<std::uint32_t*>(static_cast<char*>(path) + 0x64);
-	// Its own footprint: the game's pet pattern (3/4: PET centre) instead of
-	// the monster one (1/2: NO_PATH centre, which blocks every monster,
-	// your other mercenaries included). Same switch as Walk Through Allies
-	// makes; done here too so it never depends on that plugin (or on it
-	// recognising Multi Mercenary's mercenaries). The game writes the new
-	// footprint on its next step.
-	auto& pattern = *reinterpret_cast<std::int32_t*>(static_cast<char*>(path) + 0x5C);
-	if ((pattern == 1 || pattern == 2) && Field<std::uint32_t>(path, 0x60) == 0x100) {
-		Mv(merc, "footprint pattern %d -> %d (pet footprint, other mercenaries walk through it)", pattern, pattern + 2);
-		RemoveFoot(merc, 1);
-		pattern += 2;
-	}
 	if (mask & 0x2000) {
 		Mv(merc, "collision mask 0x%X -> 0x%X (walks through your other pets), footprint 0x%X", mask, mask & ~0x2000u, Field<std::uint32_t>(path, 0x60));
 		mask &= ~0x2000u;
