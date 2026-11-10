@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.18";
+constexpr const char* PluginVersion = "0.0.19";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -781,7 +781,27 @@ int Cheb(int ax, int ay, int bx, int by) noexcept {
 
 // Moves to a point or a unit. Running needs the run velocity set first, as the
 // game's own follow move does (mode 15, speed 60, 100%).
+void* GoingOwner = nullptr; // the owner of the mercenary thinking now
+
 bool Go(void* game, void* merc, void* target, int x, int y, bool run) noexcept {
+	// Never through you: you block mercenaries, and a run that bumps into you
+	// ends there (then a new run, a new direction: the zig-zag). When the
+	// straight line passes within 2 of you, it goes to a point 3 beside you,
+	// on the far side of the line, first; its next think goes on from there.
+	if (int mx = 0, my = 0, ox = 0, oy = 0; !target && GoingOwner && Position(merc, mx, my) && Position(GoingOwner, ox, oy)) {
+		const double dx = x - mx, dy = y - my, length = std::sqrt(dx * dx + dy * dy);
+		if (length >= 1.0 && Cheb(x, y, ox, oy) > 2) {
+			const double ux = dx / length, uy = dy / length;
+			const double along = (ox - mx) * ux + (oy - my) * uy;
+			const double cross = ux * (oy - my) - uy * (ox - mx); // > 0: you are left of the line
+			if (along > 0.0 && along < length && std::abs(cross) < 2.0) {
+				const double side = cross > 0 ? -3.0 : 3.0; // left normal is (-uy, ux)
+				const int    wx = ox + static_cast<int>(std::lround(-uy * side + ux)), wy = oy + static_cast<int>(std::lround(ux * side + uy));
+				Mv(merc, "  goes around you: (%d,%d) first, on the way to (%d,%d)", wx, wy, x, y);
+				x = wx, y = wy;
+			}
+		}
+	}
 	Velocity(merc, run ? ModeRun : 0, run ? 60 : 0, 100);
 	// Steps 8: the whole path, corners included. With 1 (the game's usual
 	// value) a run ended at the first corner, so going around you or another
@@ -1089,6 +1109,8 @@ void HookHireable(void* game, void* unit, void* tick) noexcept {
 			void* const room  = owner ? UnitRoom(unit) : nullptr;
 			if (owner && room) {
 				PassAllies(unit);
+				GoingOwner = owner;
+				struct Clear { ~Clear() { GoingOwner = nullptr; } } clear;
 				if (InTown(room)) {
 					Trace(unit, "town think");
 					return TownThink(game, unit, owner, role);
