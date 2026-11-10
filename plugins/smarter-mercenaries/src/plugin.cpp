@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.20";
+constexpr const char* PluginVersion = "0.0.21";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -116,6 +116,7 @@ constexpr Code PetMoveCode      { 0x5C1460, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48
 constexpr Code VelocityCode     { 0x4A7270, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57 }, 0 };
 constexpr Code BlockedCode      { 0x3502A0, { 0x40, 0x53, 0x57, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x50, 0x45, 0x8B, 0xE8, 0x48, 0x8B, 0xFA, 0x48 }, 0 };
 constexpr Code MoveCode         { 0x4A8A10, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57 }, 0 };
+constexpr Code RemoveFootCode   { 0x342240, { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x20, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83 }, 0 };
 constexpr Code GetPathCode      { 0x34AE80, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C }, 0 };
 constexpr Code SetStepsCode     { 0x342890, { 0x48, 0x85, 0xC9, 0x74, 0x13, 0xFE, 0xCA, 0x33, 0xC0, 0x0F, 0xB6, 0xD2, 0x80, 0xFA, 0x12, 0x0F }, 0 };
 constexpr Code UnitRoomCode     { 0x34B440, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C }, 0 };
@@ -172,6 +173,7 @@ using WalkToFn       = int (*)(void* game, void* unit, int x, int y) noexcept;
 using PetMoveFn      = int (*)(void* game, void* owner, void* unit, int motion, int run, int speed, std::uint8_t steps) noexcept;
 using MoveFn         = int (*)(void* game, void* unit, void* target, int mode, int x, int y, std::uint8_t flag, std::uint16_t extra) noexcept;
 using GetPathFn      = void* (*)(void* unit) noexcept;
+using RemoveFootFn   = int (*)(void* unit, int force) noexcept;
 using BlockedFn      = int (*)(void* a, void* b, int mask) noexcept; // nonzero: a wall between them
 using VelocityFn     = void (*)(void* unit, int mode, int speed, std::uint8_t percent) noexcept;
 using SetStepsFn     = void (*)(void* path, std::uint8_t steps) noexcept;
@@ -209,6 +211,7 @@ WalkToFn       WalkTo {};
 PetMoveFn      PetMove {};
 MoveFn         Move {};
 GetPathFn      GetPath {};
+RemoveFootFn   RemoveFoot {};
 BlockedFn      Blocked {};
 VelocityFn     Velocity {};
 SetStepsFn     SetSteps {};
@@ -807,22 +810,16 @@ bool Go(void* game, void* merc, void* target, int x, int y, bool run) noexcept {
 	// value) a run ended at the first corner, so going around you or another
 	// mercenary became a stop, a new think and a new direction each time.
 	const bool ok = Move(game, merc, target, run ? ModeRun : ModeWalk, x, y, 8, 0) != 0;
-	// The planned path (points at path +0x204, count at +0x200) and where the
-	// other mercenaries stand, to see detours around them mid-run.
-	if (void* const path = ok ? GetPath(merc) : nullptr) {
-		char         text[300] {};
-		int          used  = 0;
-		const auto   count = std::min<std::uint32_t>(Field<std::uint32_t>(path, 0x200), 12);
-		for (std::uint32_t index = 0; index < count && used < 250; ++index)
-			used += std::snprintf(text + used, sizeof(text) - used, " (%u,%u)", Field<std::uint16_t>(path, 0x204 + index * 4), Field<std::uint16_t>(path, 0x206 + index * 4));
-		char       others[200] {};
-		int        written = 0;
-		const auto mercId  = Field<std::uint32_t>(merc, UnitIdOffset);
-		const DWORD now    = GetTickCount();
+	// Where the other mercenaries stand and their footprints, to see what it meets.
+	if (void* const path = GetPath(merc)) {
+		char        others[300] {};
+		int         written = 0;
+		const auto  mercId  = Field<std::uint32_t>(merc, UnitIdOffset);
+		const DWORD now     = GetTickCount();
 		for (const auto& other : Mercs)
-			if (other.id != mercId && other.id && now - other.seen < 1000 && written < 170)
+			if (other.id != mercId && other.id && now - other.seen < 1000 && written < 260)
 				written += std::snprintf(others + written, sizeof(others) - written, " id%u(%d,%d)", other.id, other.x, other.y);
-		Mv(merc, "  path %u points:%s | mask 0x%X | others:%s", Field<std::uint32_t>(path, 0x200), text, Field<std::uint32_t>(path, 0x64), others);
+		Mv(merc, "  own pattern %d mask 0x%X | others:%s", Field<std::int32_t>(path, 0x5C), Field<std::uint32_t>(path, 0x64), others);
 	}
 	if (target) Mv(merc, "  Move to unit %u (%d,%d) run %d -> %s, mode now %u", Field<std::uint32_t>(target, UnitIdOffset), x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C));
 	else Mv(merc, "  Move to (%d,%d) run %d -> %s, mode now %u", x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C));
@@ -1088,6 +1085,18 @@ void PassAllies(void* merc) noexcept {
 	void* const path = GetPath(merc);
 	if (!path) return;
 	auto& mask = *reinterpret_cast<std::uint32_t*>(static_cast<char*>(path) + 0x64);
+	// Its own footprint: the game's pet pattern (3/4: PET centre) instead of
+	// the monster one (1/2: NO_PATH centre, which blocks every monster,
+	// your other mercenaries included). Same switch as Walk Through Allies
+	// makes; done here too so it never depends on that plugin (or on it
+	// recognising Multi Mercenary's mercenaries). The game writes the new
+	// footprint on its next step.
+	auto& pattern = *reinterpret_cast<std::int32_t*>(static_cast<char*>(path) + 0x5C);
+	if ((pattern == 1 || pattern == 2) && Field<std::uint32_t>(path, 0x60) == 0x100) {
+		Mv(merc, "footprint pattern %d -> %d (pet footprint, other mercenaries walk through it)", pattern, pattern + 2);
+		RemoveFoot(merc, 1);
+		pattern += 2;
+	}
 	if (mask & 0x2000) {
 		Mv(merc, "collision mask 0x%X -> 0x%X (walks through your other pets), footprint 0x%X", mask, mask & ~0x2000u, Field<std::uint32_t>(path, 0x60));
 		mask &= ~0x2000u;
@@ -1191,7 +1200,7 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 // ---- version check ----
 
 bool Locate() noexcept {
-	const std::array<const Code*, 33> checks { &BlockedCode, &VelocityCode, &WalkToCode, &PetMoveCode, &MoveCode, &GetPathCode, &SetStepsCode, &UnitRoomCode, &InTownCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
+	const std::array<const Code*, 34> checks { &RemoveFootCode, &BlockedCode, &VelocityCode, &WalkToCode, &PetMoveCode, &MoveCode, &GetPathCode, &SetStepsCode, &UnitRoomCode, &InTownCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
 		                                       &EscapeCode, &WalkToOwnerCode, &DeleteEventCode, &DistanceCode, &InMeleeCode, &GetStatCode,
 		                                       &CheckStateCode, &GetSkillCode, &SkillLevelCode, &SkillsTxtCode, &MonStatsCode, &AllyForBuffCode,
 		                                       &FindTargetCode, &CanTargetCode, &OwnerCode, &UnitTypeCode, &PetInfoCode, &SkillTargetCode };
@@ -1227,6 +1236,7 @@ bool Locate() noexcept {
 	PetMove         = reinterpret_cast<PetMoveFn>(at(PetMoveCode));
 	Move            = reinterpret_cast<MoveFn>(at(MoveCode));
 	GetPath         = reinterpret_cast<GetPathFn>(at(GetPathCode));
+	RemoveFoot      = reinterpret_cast<RemoveFootFn>(at(RemoveFootCode));
 	Blocked         = reinterpret_cast<BlockedFn>(at(BlockedCode));
 	Velocity        = reinterpret_cast<VelocityFn>(at(VelocityCode));
 	SetSteps        = reinterpret_cast<SetStepsFn>(at(SetStepsCode));
