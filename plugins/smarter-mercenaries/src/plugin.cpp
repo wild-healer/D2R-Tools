@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.28";
+constexpr const char* PluginVersion = "0.0.29";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -708,6 +708,8 @@ struct OwnerState {
 	DWORD         movedAt; // last time you were seen moving
 	bool          moving;  // moving, or stopped for less than a moment
 	int           mirror;  // 1 or -1: which side of you each lane is on
+	DWORD         stillSince; // first moment seen standing (0: moving)
+	bool          stopped;    // standing for more than the frame between two moves
 };
 struct MercState {
 	std::uint32_t id, owner;
@@ -732,7 +734,7 @@ OwnerState& OwnerOf(void* owner) noexcept {
 	for (auto& entry : Owners)
 		if (entry.id == id && (entry.fx != 0 || entry.fy != 0)) return entry;
 	OwnerState& entry = Owners[id % Owners.size()];
-	entry = { id, -1, -1, 0.0, 1.0, -1, -1, 0.0, 0.0, -1, -1, 0, false, 1 };
+	entry = { id, -1, -1, 0.0, 1.0, -1, -1, 0.0, 0.0, -1, -1, 0, false, 1, 0, true };
 	return entry;
 }
 
@@ -803,7 +805,12 @@ void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y)
 	// later), a change of direction each time in a straight run.
 	const std::uint32_t ownerMode = Field<std::uint32_t>(owner, UnitModeOffset);
 	const DWORD         now       = GetTickCount();
-	if (ownerMode == PlayerRun || ownerMode == 2 || ownerMode == 6 || ox != state.sx || oy != state.sy) state.movedAt = now;
+	const bool going = ownerMode == PlayerRun || ownerMode == 2 || ownerMode == 6;
+	if (going || ox != state.sx || oy != state.sy) state.movedAt = now, state.stillSince = 0;
+	else if (!state.stillSince) state.stillSince = now;
+	// Holding the mouse you stand for one frame (40 ms) between two moves;
+	// standing longer than that is a stop.
+	state.stopped = state.stillSince && now - state.stillSince >= 60;
 	state.sx = ox, state.sy = oy;
 	const bool moving = now - state.movedAt < 500;
 	state.moving      = moving;
@@ -831,7 +838,9 @@ void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y)
 	if (state.hx != 0 || state.hy != 0) state.fx = state.hx, state.fy = state.hy;
 	// While you move the spot is ahead of you, so each run is long and
 	// straight (it only thinks again once a run is over).
-	const double lead  = moving && (state.hx != 0 || state.hy != 0) ? 3.0 : 0.0;
+	// Only while you really move this frame: in the half second after you
+	// stop the spot no longer leads, or every mercenary ran 3 past it and back.
+	const double lead  = moving && !state.stopped && (state.hx != 0 || state.hy != 0) ? 3.0 : 0.0;
 	const double depth = (merc.front ? 2.0 : -3.0) + lead;
 	const double side  = LaneSide(merc) * state.mirror;
 	x = ox + static_cast<int>(std::lround(state.fx * depth - state.fy * side));
@@ -875,6 +884,17 @@ bool Steer(void* merc, int x, int y, std::uint32_t mode) noexcept {
 // Moves to a point or a unit. Running needs the run speed set first, as the
 // game's own follow move does (speed 60 percent, path up to 100 steps).
 void* GoingOwner = nullptr; // the owner of the mercenary thinking now
+
+// Ends a run where the mercenary is: a path to where it stands has no points,
+// so the game ends the run at its next step (no new mode, no turn).
+void Halt(void* merc) noexcept {
+	void* const path = GetPath(merc);
+	int         x = 0, y = 0;
+	if (!path || !Position(merc, x, y)) return;
+	PathTarget(path, x, y);
+	FindPath(path, merc, 0, 1);
+	Mv(merc, "  Halt: run ends here");
+}
 
 bool Go(void* game, void* merc, void* target, int x, int y, bool run) noexcept {
 	const int mode = run ? ModeRun : ModeWalk;
@@ -925,9 +945,18 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	if (loose <= 0 && running) {
 		const OwnerState& heading = OwnerOf(owner);
 		if (heading.hx == 0 && heading.hy == 0) return Mv(merc, " follow: you just started moving, waits for your heading"), false;
+		// You stopped (or stand for a frame between two moves): a mercenary
+		// close to its spot stops where it is, instead of finishing a run
+		// aimed ahead of you and coming back.
+		const bool going = !heading.stopped;
+		if (!going && away <= 3 && Cheb(mx, my, ox, oy) <= closeEnough && !Crowded(state, ox, oy)) {
+			if (walking) Halt(merc);
+			state.moving = false;
+			return Mv(merc, " follow: you stopped, it stops close to its spot (away %d)", away), false;
+		}
 		// Already on its spot (it runs as fast as you): aim a little further
 		// along your way, so it keeps running instead of stopping for a frame.
-		if (away <= 1) {
+		if (away <= 1 && going) {
 			x += static_cast<int>(std::lround(heading.hx * 3.0)), y += static_cast<int>(std::lround(heading.hy * 3.0));
 			Mv(merc, " follow: on its lane spot, aims 3 further");
 		}
@@ -966,7 +995,10 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	if (loose <= 0 && (away == 0 || (away <= tolerance && (state.front || Cheb(mx, my, ox, oy) <= closeEnough) && !Crowded(state, ox, oy)))) {
 		if (running && walking) return Mv(merc, " form: at spot (away %d), keeps running with you", away), true; // keep the run going, the spot moves on
 		state.moving = false;
-		if (!running) return Mv(merc, " form: in place (away %d, crowded %d)", away, Crowded(state, ox, oy)), false;
+		if (!running) {
+			if (walking) Halt(merc); // in place: no run on past it
+			return Mv(merc, " form: in place (away %d, crowded %d)", away, Crowded(state, ox, oy)), false;
+		}
 		Mv(merc, " form: in place but you run, moves on");
 	}
 	// On its way: keep the run going in a straight line instead of
