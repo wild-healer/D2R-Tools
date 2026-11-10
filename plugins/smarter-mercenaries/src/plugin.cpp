@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.11";
+constexpr const char* PluginVersion = "0.0.12";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -659,7 +659,22 @@ void* PlayerOwner(void* merc) noexcept {
 // no idle wandering, a formation around you (melee slightly in front, ranged
 // slightly behind, spread sideways), re-planned every few frames.
 
-constexpr std::uintptr_t UnitModeOffset = 0x0C; // u32: monster mode 2 walk, 15 run
+constexpr std::uintptr_t UnitModeOffset = 0x0C;
+
+// Movement log (debug build): one line per step of every think, with where
+// the mercenary stands and what it does, so its path can be followed.
+void Mv(void* merc, const char* format, ...) noexcept {
+	if (!Config.log.load(std::memory_order_relaxed) || !merc) return;
+	char    text[400] {};
+	va_list args;
+	va_start(args, format);
+	std::vsnprintf(text, sizeof(text), format, args);
+	va_end(args);
+	int x = 0, y = 0;
+	Position(merc, x, y);
+	Log(false, "mv %lu c%u id%u (%d,%d) m%u: %s", static_cast<unsigned long>(GetTickCount() % 1000000), Field<std::uint32_t>(merc, UnitClassOffset),
+	    Field<std::uint32_t>(merc, UnitIdOffset), x, y, Field<std::uint32_t>(merc, 0x0C), text);
+} // u32: monster mode 2 walk, 15 run
 constexpr int            ModeWalk = 2, ModeRun = 15;
 constexpr std::uint32_t  PlayerRun = 3; // player mode
 constexpr std::uintptr_t TickMonStats2 = 0x30; // monstats2 record: +0x0E melee range
@@ -755,7 +770,10 @@ int Cheb(int ax, int ay, int bx, int by) noexcept {
 // game's own follow move does (mode 15, speed 60, 100%).
 bool Go(void* game, void* merc, void* target, int x, int y, bool run) noexcept {
 	Velocity(merc, run ? ModeRun : 0, run ? 60 : 0, 100);
-	return Move(game, merc, target, run ? ModeRun : ModeWalk, x, y, 1, 0) != 0;
+	const bool ok = Move(game, merc, target, run ? ModeRun : ModeWalk, x, y, 1, 0) != 0;
+	if (target) Mv(merc, "  Move to unit %u (%d,%d) run %d -> %s, mode now %u", Field<std::uint32_t>(target, UnitIdOffset), x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C));
+	else Mv(merc, "  Move to (%d,%d) run %d -> %s, mode now %u", x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C));
+	return ok;
 }
 
 // Goes to (or keeps going to) its formation spot. Returns false when already there.
@@ -779,23 +797,27 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	if (loose > 0) {
 		// Loose: no need for the spot, only to stay close to you.
 		if (Cheb(mx, my, ox, oy) <= loose && !Crowded(state, ox, oy)) {
+			Mv(merc, " town: within %d of you, stays", loose);
 			state.moving = false;
 			return false;
 		}
-		if (walking && state.moving) return true; // let it finish the run back
-		if (Cheb(mx, my, x, y) <= 1) return false; // it is on its spot already
+		if (walking && state.moving) return Mv(merc, " town: still running back"), true; // let it finish the run back
+		if (Cheb(mx, my, x, y) <= 1) return Mv(merc, " town: on its spot"), false; // it is on its spot already
 	}
 	// Ranged mercenaries accept a place slightly off their spot, as long as
 	// it is still close to you, instead of hunting for the exact spot.
 	const int tolerance = state.front ? 1 : 3;
 	if (loose <= 0 && away <= tolerance && (state.front || Cheb(mx, my, ox, oy) <= 7) && (away == 0 || !Crowded(state, ox, oy))) {
-		if (running && walking) return true; // keep the run going, the spot moves on
+		if (running && walking) return Mv(merc, " form: at spot (away %d), keeps running with you", away), true; // keep the run going, the spot moves on
 		state.moving = false;
-		if (!running) return false;
+		if (!running) return Mv(merc, " form: in place (away %d, crowded %d)", away, Crowded(state, ox, oy)), false;
+		Mv(merc, " form: in place but you run, moves on");
 	}
 	// On its way: keep the run going in a straight line instead of
 	// re-planning every time the spot shifts a little.
-	if (walking && state.moving && Cheb(state.spotX, state.spotY, x, y) <= (running ? 5 : 3)) return true;
+	if (walking && state.moving && Cheb(state.spotX, state.spotY, x, y) <= (running ? 5 : 3))
+		return Mv(merc, " form: on its way to (%d,%d), spot now (%d,%d), away %d", state.spotX, state.spotY, x, y, away), true;
+	Mv(merc, " form: new order, spot (%d,%d) away %d, walking %d moving %d old (%d,%d) you run %d crowded %d", x, y, away, walking, state.moving, state.spotX, state.spotY, running, Crowded(state, ox, oy));
 	DeleteEvent(game, merc, 2, 0);
 	// Runs like you: whenever you run, or when it is more than a couple of steps off.
 	const bool run = running || away > 3;
@@ -805,7 +827,8 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	}
 	// Spot blocked (wall, cliff). Ranged: stay put if already near you.
 	state.moving = false;
-	if (!state.front && Cheb(mx, my, ox, oy) <= 7) return false;
+	if (!state.front && Cheb(mx, my, ox, oy) <= 7) return Mv(merc, " form: spot blocked, stays"), false;
+	Mv(merc, " form: spot blocked, game follow move");
 	PetMove(game, owner, merc, 0, run ? 1 : 0, run ? 60 : 0, 0);
 	return true;
 }
@@ -833,7 +856,7 @@ bool Reposition(void* game, void* merc, void* owner, const Scan& scan, Role role
 			if ((ex[index] - x) * (ex[index] - x) + (ey[index] - y) * (ey[index] - y) < (exclusion - 1) * (exclusion - 1)) return false;
 		return true;
 	};
-	if (loose(mx, my) && fromOwner(mx, my) <= 9.0) return false;
+	if (loose(mx, my) && fromOwner(mx, my) <= 9.0) return Mv(merc, " safe: current place ok (%d monsters)", count), false;
 	double bestScore = 1e9;
 	int    bx = 0, by = 0;
 	for (const double radius : { 2.0, 3.5, 5.0, 6.5, 8.0, 10.0 }) {
@@ -845,8 +868,9 @@ bool Reposition(void* game, void* merc, void* owner, const Scan& scan, Role role
 			if (score < bestScore) bestScore = score, bx = static_cast<int>(std::lround(x)), by = static_cast<int>(std::lround(y));
 		}
 	}
-	if (bestScore >= 1e9) return false;
-	if (Cheb(bx, by, mx, my) <= 1) return false;
+	if (bestScore >= 1e9) return Mv(merc, " safe: no safe place found (%d monsters)", count), false;
+	if (Cheb(bx, by, mx, my) <= 1) return Mv(merc, " safe: best place is here"), false;
+	Mv(merc, " safe: goes to (%d,%d) score %.1f, you at (%d,%d), %d monsters", bx, by, bestScore, ox, oy, count);
 	DeleteEvent(game, merc, 2, 0);
 	if (!Go(game, merc, nullptr, bx, by, true)) return false;
 	Note(merc, role, nullptr, -6, "moves to a safe place close to you");
@@ -864,7 +888,7 @@ bool StepToOwner(void* game, void* merc, void* owner, Role role) noexcept {
 	return true;
 }
 
-void Attack(void* game, void* merc, void* owner, void* target, Role role, const Scan& scan, void* tick, const std::uint16_t* params) noexcept {
+void AttackInner(void* game, void* merc, void* owner, void* target, Role role, const Scan& scan, void* tick, const std::uint16_t* params) noexcept {
 	if (!AttackRoll(merc, tick, IsMelee(role))) return Idle(game, merc, 5);
 	switch (role) {
 	case Role::Rogue: return RogueAttack(game, merc, target, scan, params);
@@ -874,6 +898,13 @@ void Attack(void* game, void* merc, void* owner, void* target, Role role, const 
 	case Role::FrenzyBarb: return FrenzyBarbAttack(game, merc, owner, target, params);
 	default: return Idle(game, merc, 5);
 	}
+}
+
+// Logs what an attack order did to the mercenary (a skill can make it walk).
+void Attack(void* game, void* merc, void* owner, void* target, Role role, const Scan& scan, void* tick, const std::uint16_t* params) noexcept {
+	const int distance = Distance(merc, target);
+	AttackInner(game, merc, owner, target, role, scan, tick, params);
+	Mv(merc, "  attack order on %u at dist %d, mode now %u", Field<std::uint32_t>(target, UnitIdOffset), distance, Field<std::uint32_t>(merc, UnitModeOffset));
 }
 
 // The hireling's ai params for this difficulty, as the game's Hireable builds them.
@@ -896,7 +927,14 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	MercState&  mercState  = MercOf(merc, owner, melee);
 	int         sx = 0, sy = 0;
 	Spot(ownerState, owner, mercState, sx, sy);
+	{
+		int ox = 0, oy = 0;
+		Position(owner, ox, oy);
+		Mv(merc, "THINK you (%d,%d) m%u dist %d face (%.2f,%.2f) slot %d%s spot (%d,%d)", ox, oy, Field<std::uint32_t>(owner, UnitModeOffset), fromOwner,
+		   ownerState.fx, ownerState.fy, mercState.slot, melee ? " front" : " back", sx, sy);
+	}
 	if (fromOwner > 40) {
+		Mv(merc, " far (>40): game trail run %s", walking ? "(already moving)" : "");
 		if (!walking) PetMove(game, owner, merc, 1, 1, 60, 0); // catch up along your trail
 		mercState.moving = false;
 		return;
@@ -914,18 +952,21 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 				// Already running to it: let the run go on instead of starting
 				// it over every few frames (that made them stutter).
 				const std::uint32_t targetId = Field<std::uint32_t>(target, UnitIdOffset);
-				if (walking && mercState.chase == targetId && GetTickCount() - mercState.chaseAt < 500) return;
+				if (walking && mercState.chase == targetId && GetTickCount() - mercState.chaseAt < 500) return Mv(merc, " melee: still running to %u (dist %d)", targetId, Distance(merc, target));
+				Mv(merc, " melee: run to %u (dist %d, walking %d, previous %u)", targetId, Distance(merc, target), walking, mercState.chase);
 				mercState.chase = targetId, mercState.chaseAt = GetTickCount();
 				void* const stats2 = Field<void*>(tick, TickMonStats2);
 				if (void* const path = GetPath(merc); path && stats2) SetSteps(path, Field<std::uint8_t>(stats2, 0x0E));
 				DeleteEvent(game, merc, 2, 0);
 				if (Go(game, merc, target, 0, 0, true)) return Note(merc, role, target, -4, "leaves the formation for an enemy in range");
 			}
-			if (walking) return;
+			if (walking) return Mv(merc, " melee: in reach but still moving");
+			Mv(merc, " melee: attacks %u", Field<std::uint32_t>(target, UnitIdOffset));
 			return Attack(game, merc, owner, target, role, scan, tick, params);
 		}
+		Mv(merc, " melee: no target");
 		if (KeepFormation(game, merc, owner, mercState, sx, sy, walking)) return;
-		return Idle(game, merc, 3);
+		return Mv(merc, " idle 3"), Idle(game, merc, 3);
 	}
 	// Ranged: positioning mode once you're close to enemies.
 	int   nearOwner = INT_MAX, nearMerc = INT_MAX;
@@ -935,9 +976,11 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 		if (scan.distance[index] < nearMerc) nearMerc = scan.distance[index], closest = scan.units[index];
 	}
 	const bool danger = nearOwner <= Config.danger.load(std::memory_order_relaxed);
+	Mv(merc, " ranged: %zu monsters, nearest to you %d, to it %d, danger %d, target %u%s", scan.count, nearOwner == INT_MAX ? -1 : nearOwner,
+	   nearMerc == INT_MAX ? -1 : nearMerc, danger, target ? Field<std::uint32_t>(target, UnitIdOffset) : 0, blocked ? " (all blocked)" : "");
 	if (danger) {
 		mercState.moving = false;
-		if (walking) return;
+		if (walking) return Mv(merc, " ranged: still moving");
 		if (Reposition(game, merc, owner, scan, role)) return;
 		if (closest && nearMerc <= 4) {
 			// Nowhere safe near you: the game's own step away from the monster.
@@ -945,17 +988,18 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 			if (Escape(game, merc, closest, 5, 1)) return Note(merc, role, closest, -5, "runs from a monster (hit and run)");
 		}
 		if (role == Role::IronWolf && Buff(game, merc, role)) return;
-		if (target) return Attack(game, merc, owner, target, role, scan, tick, params);
+		if (target) return Mv(merc, " ranged: shoots"), Attack(game, merc, owner, target, role, scan, tick, params);
 		if (blocked && StepToOwner(game, merc, owner, role)) return;
 		if (KeepFormation(game, merc, owner, mercState, sx, sy, walking)) return;
-		return Idle(game, merc, 3);
+		return Mv(merc, " idle 3"), Idle(game, merc, 3);
 	}
 	// Formation first; it shoots from its spot.
 	if (KeepFormation(game, merc, owner, mercState, sx, sy, walking)) return;
-	if (walking) return;
+	if (walking) return Mv(merc, " ranged: in place but still moving");
 	if (role == Role::IronWolf && Buff(game, merc, role)) return;
-	if (target) return Attack(game, merc, owner, target, role, scan, tick, params);
+	if (target) return Mv(merc, " ranged: shoots from formation"), Attack(game, merc, owner, target, role, scan, tick, params);
 	if (blocked && StepToOwner(game, merc, owner, role)) return;
+	Mv(merc, " idle 3");
 	Idle(game, merc, 3);
 }
 
@@ -977,6 +1021,7 @@ void TownThink(void* game, void* merc, void* owner, Role role) noexcept {
 	int ox = 0, oy = 0;
 	Position(owner, ox, oy);
 	sx = ox + (sx - ox) * 2 / 3, sy = oy + (sy - oy) * 2 / 3;
+	Mv(merc, "TOWN you (%d,%d) m%u spot (%d,%d)", ox, oy, Field<std::uint32_t>(owner, UnitModeOffset), sx, sy);
 	if (KeepFormation(game, merc, owner, mercState, sx, sy, walking, TownRange)) return;
 	if (walking) return;
 	Idle(game, merc, 5);
@@ -1028,6 +1073,7 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 		return Combat(game, unit, classId, owner, target, seed, tick, params);
 	}
 	Trace(unit, "combat: new AI");
+	Mv(unit, "COMBAT hook (game's AI asked for an attack) target %u dist %d", Field<std::uint32_t>(target, UnitIdOffset), Distance(unit, target));
 	const bool melee = params[0] == 2;
 	if ((role == Role::BashBarb || role == Role::FrenzyBarb) && BodyBlock(game, unit, owner, target, role)) return;
 	// Melee types out of reach: the game runs to the target as usual.
