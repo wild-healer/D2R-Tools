@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.25";
+constexpr const char* PluginVersion = "0.0.26";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -93,6 +93,7 @@ constexpr Code SelectTargetCode { 0x595F80, { 0x4C, 0x8B, 0xDC, 0x53, 0x41, 0x54
 constexpr Code CombatCode       { 0x5BF6E0, { 0x4C, 0x89, 0x4C, 0x24, 0x20, 0x66, 0x44, 0x89, 0x44, 0x24, 0x18, 0x53, 0x55, 0x56, 0x57, 0x41 }, 0 };
 constexpr Code UseSkillCode     { 0x4A7BC0, { 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57, 0x48, 0x83, 0xEC, 0x50, 0x41 }, 0 };
 constexpr Code DefaultAtkCode   { 0x4A78E0, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x50, 0x41, 0x8B, 0xC0, 0x4C, 0x8B, 0xD2 }, 0 };
+constexpr Code SetEventCode     { 0x48B720, { 0x48, 0x83, 0xEC, 0x48, 0x8B, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00, 0x89, 0x44, 0x24, 0x38, 0x8B }, 0 };
 constexpr Code IdleCode         { 0x4A6D10, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x70, 0x45 }, 0 };
 constexpr Code EscapeCode       { 0x4A7DF0, { 0x48, 0x89, 0x5C, 0x24, 0x20, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x45, 0x0F }, 0 };
 constexpr Code WalkToOwnerCode  { 0x4A8090, { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x41 }, 0 };
@@ -151,6 +152,7 @@ using CombatFn       = void (*)(void* game, void* unit, std::uint16_t classId, v
 using UseSkillFn     = int (*)(void* game, void* unit, int mode, int skill, void* target, int x, int y, std::uint8_t flag) noexcept;
 using DefaultAtkFn   = int (*)(void* game, void* unit, int mode, void* target) noexcept;
 using IdleFn         = void (*)(void* game, void* unit, int frames) noexcept;
+using SetEventFn     = void* (*)(void* game, void* unit, int type, int frame, int a, int b, int c) noexcept;
 using EscapeFn       = int (*)(void* game, void* unit, void* from, std::uint8_t steps, int flag) noexcept;
 using WalkToOwnerFn  = int (*)(void* game, void* unit, void* owner, std::uint8_t steps, std::uint16_t flag) noexcept;
 using DeleteEventFn  = void (*)(void* game, void* unit, int type, int arg) noexcept;
@@ -189,6 +191,7 @@ CombatFn       Combat {};
 UseSkillFn     UseSkill {};
 DefaultAtkFn   DefaultAttackFn {};
 IdleFn         Idle {};
+SetEventFn     SetEvent {};
 EscapeFn       Escape {};
 WalkToOwnerFn  WalkToOwner {};
 DeleteEventFn  DeleteEvent {};
@@ -853,10 +856,16 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	if (loose <= 0 && running) {
 		const OwnerState& heading = OwnerOf(owner);
 		if (heading.hx == 0 && heading.hy == 0) return Mv(merc, " follow: you just started moving, waits for your heading"), false;
+		if (away <= 1) return Mv(merc, " follow: already on its lane spot"), false; // no run to where it stands
 		Mv(merc, " follow: you head (%.2f,%.2f), runs to its lane spot (%d,%d)", heading.hx, heading.hy, x, y);
 		DeleteEvent(game, merc, 2, 0);
 		if (Go(game, merc, nullptr, x, y, true)) {
 			state.spotX = x, state.spotY = y, state.moving = true;
+			// The game only lets it think again once a run is over, so a long
+			// run went on to where you were heading when it started, even after
+			// you turned. Its next think comes 6 frames into the run instead:
+			// it re-aims mid-run, without stopping.
+			SetEvent(game, merc, 2, Field<std::int32_t>(game, 0x170) + 6, 0, 0, 0);
 			return true;
 		}
 	}
@@ -1191,7 +1200,7 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 // ---- version check ----
 
 bool Locate() noexcept {
-	const std::array<const Code*, 34> checks { &RemoveFootCode, &BlockedCode, &VelocityCode, &WalkToCode, &PetMoveCode, &MoveCode, &GetPathCode, &SetStepsCode, &UnitRoomCode, &InTownCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
+	const std::array<const Code*, 35> checks { &SetEventCode, &RemoveFootCode, &BlockedCode, &VelocityCode, &WalkToCode, &PetMoveCode, &MoveCode, &GetPathCode, &SetStepsCode, &UnitRoomCode, &InTownCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
 		                                       &EscapeCode, &WalkToOwnerCode, &DeleteEventCode, &DistanceCode, &InMeleeCode, &GetStatCode,
 		                                       &CheckStateCode, &GetSkillCode, &SkillLevelCode, &SkillsTxtCode, &MonStatsCode, &AllyForBuffCode,
 		                                       &FindTargetCode, &CanTargetCode, &OwnerCode, &UnitTypeCode, &PetInfoCode, &SkillTargetCode };
@@ -1205,6 +1214,7 @@ bool Locate() noexcept {
 	UseSkill        = reinterpret_cast<UseSkillFn>(at(UseSkillCode));
 	DefaultAttackFn = reinterpret_cast<DefaultAtkFn>(at(DefaultAtkCode));
 	Idle            = reinterpret_cast<IdleFn>(at(IdleCode));
+	SetEvent        = reinterpret_cast<SetEventFn>(at(SetEventCode));
 	Escape          = reinterpret_cast<EscapeFn>(at(EscapeCode));
 	WalkToOwner     = reinterpret_cast<WalkToOwnerFn>(at(WalkToOwnerCode));
 	DeleteEvent     = reinterpret_cast<DeleteEventFn>(at(DeleteEventCode));
