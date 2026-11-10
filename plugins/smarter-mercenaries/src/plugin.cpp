@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.27";
+constexpr const char* PluginVersion = "0.0.28";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -118,6 +118,11 @@ constexpr Code VelocityCode     { 0x4A7270, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48
 constexpr Code BlockedCode      { 0x3502A0, { 0x40, 0x53, 0x57, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x50, 0x45, 0x8B, 0xE8, 0x48, 0x8B, 0xFA, 0x48 }, 0 };
 constexpr Code MoveCode         { 0x4A8A10, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57 }, 0 };
 constexpr Code RemoveFootCode   { 0x342240, { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x20, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83 }, 0 };
+// Path code (D2Common in 1.10): re-aim a run without a new mode.
+constexpr Code FindPathCode     { 0x340E70, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x48, 0x89, 0x7C, 0x24, 0x18, 0x55 }, 5 }; // Edge Clicks hooks its entry
+constexpr Code PathTargetCode   { 0x342A50, { 0x48, 0x85, 0xC9, 0x74, 0x11, 0x66, 0x89, 0x51, 0x10, 0x66, 0x44, 0x89, 0x41, 0x12, 0x48, 0xC7 }, 0 };
+constexpr Code PathTypeCode     { 0x342A70, { 0x48, 0x63, 0xC2, 0x4C, 0x8D, 0x15, 0x86, 0xD5, 0xCB, 0xFF, 0x4C, 0x8D, 0x0C, 0x85, 0x00, 0x00 }, 0 };
+constexpr Code RefreshCode      { 0x34DC80, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x8B, 0xFA, 0x48, 0x8B, 0xD9, 0x85 }, 0 };
 constexpr Code GetPathCode      { 0x34AE80, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C }, 0 };
 constexpr Code SetStepsCode     { 0x342890, { 0x48, 0x85, 0xC9, 0x74, 0x13, 0xFE, 0xCA, 0x33, 0xC0, 0x0F, 0xB6, 0xD2, 0x80, 0xFA, 0x12, 0x0F }, 0 };
 constexpr Code UnitRoomCode     { 0x34B440, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C }, 0 };
@@ -175,6 +180,10 @@ using WalkToFn       = int (*)(void* game, void* unit, int x, int y) noexcept;
 using PetMoveFn      = int (*)(void* game, void* owner, void* unit, int motion, int run, int speed, std::uint8_t steps) noexcept;
 using MoveFn         = int (*)(void* game, void* unit, void* target, int mode, int x, int y, std::uint8_t flag, std::uint16_t extra) noexcept;
 using GetPathFn      = void* (*)(void* unit) noexcept;
+using FindPathFn     = int (*)(void* path, void* unit, int allowTown, int server) noexcept; // number of points
+using PathTargetFn   = void (*)(void* path, int x, int y) noexcept;
+using PathTypeFn     = void (*)(void* path, int type) noexcept;
+using RefreshFn      = void (*)(void* unit, int update) noexcept;
 using RemoveFootFn   = int (*)(void* unit, int force) noexcept;
 using BlockedFn      = int (*)(void* a, void* b, int mask) noexcept; // nonzero: a wall between them
 using VelocityFn     = void (*)(void* unit, int mode, int speed, std::uint8_t percent) noexcept;
@@ -214,6 +223,10 @@ WalkToFn       WalkTo {};
 PetMoveFn      PetMove {};
 MoveFn         Move {};
 GetPathFn      GetPath {};
+FindPathFn     FindPath {};
+PathTargetFn   PathTarget {};
+PathTypeFn     PathType {};
+RefreshFn      Refresh {};
 RemoveFootFn   RemoveFoot {};
 BlockedFn      Blocked {};
 VelocityFn     Velocity {};
@@ -829,29 +842,52 @@ int Cheb(int ax, int ay, int bx, int by) noexcept {
 	return std::max(std::abs(ax - bx), std::abs(ay - by));
 }
 
-// Moves to a point or a unit. Running needs the run velocity set first, as the
-// game's own follow move does (mode 15, speed 60, 100%).
+// Path types (D2Common): 13 is the game's own walk and run path, a straight
+// line toward the spot that steps around what is in the way; 15 slides along
+// walls. Up to 0.0.27 every order asked for 15 (the first argument of
+// Velocity is the path type, not the mode): a sliding path is a line of grid
+// steps, and it has no path at all to a spot 2 or fewer steps away (every
+// such order failed, a stop and a retry each time).
+constexpr int PathToward = 13, PathSlide = 15;
+constexpr std::uintptr_t PathIndexOffset = 0x30, PathCountOffset = 0x34, PathTargetUnitOffset = 0x70, PathDistanceOffset = 0xC0;
+
+// Re-aims a run already going, without a new mode. A new Move is a new mode:
+// the game restarts the run animation and sends the run again, so re-aiming
+// every few frames that way showed as a twitch each time. The game itself
+// re-aims a run this way when the unit it follows moves on.
+bool Steer(void* merc, int x, int y, std::uint32_t mode) noexcept {
+	if (Field<std::uint32_t>(merc, UnitModeOffset) != mode) return false;
+	void* const path = GetPath(merc);
+	if (!path || Field<void*>(path, PathTargetUnitOffset)) return false;
+	if (Field<std::int32_t>(path, PathIndexOffset) >= Field<std::int32_t>(path, PathCountOffset)) return false; // the run is ending
+	PathTarget(path, x, y);
+	static_cast<std::uint8_t*>(path)[PathDistanceOffset] = 20; // steps it may still re-plan, as a new move sets
+	PathType(path, PathToward);
+	int points = FindPath(path, merc, 0, 1);
+	if (!points) {
+		PathType(path, PathSlide);
+		points = FindPath(path, merc, 0, 1);
+	}
+	if (points) Refresh(merc, 1); // sends the new path to the clients
+	return points != 0;
+}
+
+// Moves to a point or a unit. Running needs the run speed set first, as the
+// game's own follow move does (speed 60 percent, path up to 100 steps).
 void* GoingOwner = nullptr; // the owner of the mercenary thinking now
 
 bool Go(void* game, void* merc, void* target, int x, int y, bool run) noexcept {
-	Velocity(merc, run ? ModeRun : 0, run ? 60 : 0, 100);
-	// Steps 8: the whole path, corners included. With 1 (the game's usual
-	// value) a run ended at the first corner, so going around you or another
-	// mercenary became a stop, a new think and a new direction each time.
-	const bool ok = Move(game, merc, target, run ? ModeRun : ModeWalk, x, y, 8, 0) != 0;
-	// Where the other mercenaries stand and their footprints, to see what it meets.
-	if (void* const path = GetPath(merc)) {
-		char        others[300] {};
-		int         written = 0;
-		const auto  mercId  = Field<std::uint32_t>(merc, UnitIdOffset);
-		const DWORD now     = GetTickCount();
-		for (const auto& other : Mercs)
-			if (other.id != mercId && other.id && now - other.seen < 1000 && written < 260)
-				written += std::snprintf(others + written, sizeof(others) - written, " id%u(%d,%d)", other.id, other.x, other.y);
-		Mv(merc, "  own pattern %d mask 0x%X | others:%s", Field<std::int32_t>(path, 0x5C), Field<std::uint32_t>(path, 0x64), others);
+	const int mode = run ? ModeRun : ModeWalk;
+	if (!target && Steer(merc, x, y, mode)) {
+		Mv(merc, "  Steer to (%d,%d) run %d -> ok, path type %d, %d points", x, y, run, Field<std::int32_t>(GetPath(merc), 0x50), Field<std::int32_t>(GetPath(merc), PathCountOffset));
+		return true;
 	}
-	if (target) Mv(merc, "  Move to unit %u (%d,%d) run %d -> %s, mode now %u", Field<std::uint32_t>(target, UnitIdOffset), x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C));
-	else Mv(merc, "  Move to (%d,%d) run %d -> %s, mode now %u", x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C));
+	Velocity(merc, 0, run ? 60 : 0, 100); // 0: the mode's own path type (13)
+	const bool ok = Move(game, merc, target, mode, x, y, 1, 0) != 0;
+	void* const path = GetPath(merc);
+	const int   type = path ? Field<std::int32_t>(path, 0x50) : -1, points = path ? Field<std::int32_t>(path, PathCountOffset) : 0;
+	if (target) Mv(merc, "  Move to unit %u (%d,%d) run %d -> %s, mode now %u, path type %d, %d points", Field<std::uint32_t>(target, UnitIdOffset), x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C), type, points);
+	else Mv(merc, "  Move to (%d,%d) run %d -> %s, mode now %u, path type %d, %d points", x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C), type, points);
 	return ok;
 }
 
@@ -889,7 +925,12 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	if (loose <= 0 && running) {
 		const OwnerState& heading = OwnerOf(owner);
 		if (heading.hx == 0 && heading.hy == 0) return Mv(merc, " follow: you just started moving, waits for your heading"), false;
-		if (away <= 1) return Mv(merc, " follow: already on its lane spot"), false; // no run to where it stands
+		// Already on its spot (it runs as fast as you): aim a little further
+		// along your way, so it keeps running instead of stopping for a frame.
+		if (away <= 1) {
+			x += static_cast<int>(std::lround(heading.hx * 3.0)), y += static_cast<int>(std::lround(heading.hy * 3.0));
+			Mv(merc, " follow: on its lane spot, aims 3 further");
+		}
 		Mv(merc, " follow: you head (%.2f,%.2f), runs to its lane spot (%d,%d)", heading.hx, heading.hy, x, y);
 		DeleteEvent(game, merc, 2, 0);
 		if (Go(game, merc, nullptr, x, y, true)) {
@@ -1052,8 +1093,11 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	{
 		int ox = 0, oy = 0;
 		Position(owner, ox, oy);
-		Mv(merc, "THINK you (%d,%d) m%u dist %d face (%.2f,%.2f) slot %d%s spot (%d,%d)", ox, oy, Field<std::uint32_t>(owner, UnitModeOffset), fromOwner,
-		   ownerState.fx, ownerState.fy, mercState.slot, melee ? " front" : " back", sx, sy);
+		void* const path = GetPath(merc);
+		Mv(merc, "THINK you (%d,%d) m%u dist %d face (%.2f,%.2f) slot %d%s spot (%d,%d) | path type %d point %d/%d to (%d,%d)", ox, oy, Field<std::uint32_t>(owner, UnitModeOffset), fromOwner,
+		   ownerState.fx, ownerState.fy, mercState.slot, melee ? " front" : " back", sx, sy, path ? Field<std::int32_t>(path, 0x50) : -1,
+		   path ? Field<std::int32_t>(path, PathIndexOffset) : 0, path ? Field<std::int32_t>(path, PathCountOffset) : 0,
+		   path ? Field<std::uint16_t>(path, 0x10) : 0, path ? Field<std::uint16_t>(path, 0x12) : 0);
 	}
 	if (fromOwner > 40) {
 		Mv(merc, " far (>40): game trail run %s", walking ? "(already moving)" : "");
@@ -1243,7 +1287,7 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 // ---- version check ----
 
 bool Locate() noexcept {
-	const std::array<const Code*, 35> checks { &SetEventCode, &RemoveFootCode, &BlockedCode, &VelocityCode, &WalkToCode, &PetMoveCode, &MoveCode, &GetPathCode, &SetStepsCode, &UnitRoomCode, &InTownCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
+	const std::array<const Code*, 39> checks { &FindPathCode, &PathTargetCode, &PathTypeCode, &RefreshCode, &SetEventCode, &RemoveFootCode, &BlockedCode, &VelocityCode, &WalkToCode, &PetMoveCode, &MoveCode, &GetPathCode, &SetStepsCode, &UnitRoomCode, &InTownCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
 		                                       &EscapeCode, &WalkToOwnerCode, &DeleteEventCode, &DistanceCode, &InMeleeCode, &GetStatCode,
 		                                       &CheckStateCode, &GetSkillCode, &SkillLevelCode, &SkillsTxtCode, &MonStatsCode, &AllyForBuffCode,
 		                                       &FindTargetCode, &CanTargetCode, &OwnerCode, &UnitTypeCode, &PetInfoCode, &SkillTargetCode };
@@ -1280,6 +1324,10 @@ bool Locate() noexcept {
 	PetMove         = reinterpret_cast<PetMoveFn>(at(PetMoveCode));
 	Move            = reinterpret_cast<MoveFn>(at(MoveCode));
 	GetPath         = reinterpret_cast<GetPathFn>(at(GetPathCode));
+	FindPath        = reinterpret_cast<FindPathFn>(at(FindPathCode));
+	PathTarget      = reinterpret_cast<PathTargetFn>(at(PathTargetCode));
+	PathType        = reinterpret_cast<PathTypeFn>(at(PathTypeCode));
+	Refresh         = reinterpret_cast<RefreshFn>(at(RefreshCode));
 	RemoveFoot      = reinterpret_cast<RemoveFootFn>(at(RemoveFootCode));
 	Blocked         = reinterpret_cast<BlockedFn>(at(BlockedCode));
 	Velocity        = reinterpret_cast<VelocityFn>(at(VelocityCode));

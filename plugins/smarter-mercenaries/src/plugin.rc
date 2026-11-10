@@ -5,19 +5,19 @@ D2RL_PLUGIN_MANIFEST_RESOURCE_ID RCDATA { D2RL_PLUGIN_RESOURCE_DWORD(D2RL_PLUGIN
 D2RL_PLUGIN_CONFIG_RESOURCE_ID RCDATA "smarter-mercenaries.toml"
 
 1 VERSIONINFO
-FILEVERSION 0,0,27,0
-PRODUCTVERSION 0,0,27,0
+FILEVERSION 0,0,28,0
+PRODUCTVERSION 0,0,28,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Smarter Mercenaries D2RLoader plugin"
-      VALUE "FileVersion", "0.0.27"
+      VALUE "FileVersion", "0.0.28"
       VALUE "InternalName", "smarter-mercenaries"
       VALUE "OriginalFilename", "d2rl-smarter-mercenaries.dll"
       VALUE "ProductName", "Smarter Mercenaries"
-      VALUE "ProductVersion", "0.0.27"
+      VALUE "ProductVersion", "0.0.28"
     END
   END
   BLOCK "VarFileInfo"
