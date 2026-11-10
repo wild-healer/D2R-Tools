@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.22";
+constexpr const char* PluginVersion = "0.0.23";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -768,12 +768,15 @@ void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y)
 	if (state.hx != 0 || state.hy != 0) state.fx = state.hx, state.fy = state.hy;
 	// Every mercenary has its own lane beside your path, none on it: running
 	// alongside you they never bump into you or each other.
-	static constexpr int Side[] = { -3, 3, -6, 6, -9, 9, -12, 12 };
+	// Melee and ranged lanes interleave, so no two mercenaries share one
+	// (a shared lane made a front and a back mercenary run into each other).
+	static constexpr int FrontSide[] = { -2, 2, -6, 6, -10, 10, -14, 14 };
+	static constexpr int BackSide[]  = { -4, 4, -8, 8, -12, 12, -16, 16 };
 	// While you move the spot is ahead of you, so each run is long and
 	// straight (it only thinks again once a run is over).
-	const double lead  = moving && (state.hx != 0 || state.hy != 0) ? 5.0 : 0.0;
+	const double lead  = moving && (state.hx != 0 || state.hy != 0) ? 3.0 : 0.0;
 	const double depth = (merc.front ? 2.0 : -3.0) + lead;
-	const double side  = Side[merc.slot & 7];
+	const double side  = (merc.front ? FrontSide : BackSide)[merc.slot & 7];
 	x = ox + static_cast<int>(std::lround(state.fx * depth - state.fy * side));
 	y = oy + static_cast<int>(std::lround(state.fy * depth + state.fx * side));
 }
@@ -848,7 +851,10 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	}
 	// Ranged mercenaries accept a place slightly off their spot, as long as
 	// it is still close to you, instead of hunting for the exact spot.
-	const int tolerance = state.front ? 1 : 3;
+	// When you stop, a mercenary that ran a little ahead with you stays
+	// where it is instead of running back to the exact spot (a run there and
+	// a run back looked like a zig-zag).
+	const int tolerance = 3;
 	if (loose <= 0 && away <= tolerance && (state.front || Cheb(mx, my, ox, oy) <= 7) && (away == 0 || !Crowded(state, ox, oy))) {
 		if (running && walking) return Mv(merc, " form: at spot (away %d), keeps running with you", away), true; // keep the run going, the spot moves on
 		state.moving = false;
