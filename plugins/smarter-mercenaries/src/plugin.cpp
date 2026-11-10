@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.10";
+constexpr const char* PluginVersion = "0.0.11";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -676,6 +676,9 @@ struct MercState {
 	int           spotX, spotY;
 	bool          moving;
 	DWORD         seen;
+	int           x, y;    // where it stood at its last think
+	std::uint32_t chase;   // monster it is running to
+	DWORD         chaseAt; // when that run was ordered
 };
 std::array<OwnerState, 8> Owners {};
 std::array<MercState, 24> Mercs {};
@@ -697,7 +700,10 @@ MercState& MercOf(void* merc, void* owner, bool front) noexcept {
 	const std::uint32_t id = Field<std::uint32_t>(merc, UnitIdOffset), ownerId = Field<std::uint32_t>(owner, UnitIdOffset);
 	const DWORD         now = GetTickCount();
 	for (auto& entry : Mercs)
-		if (entry.id == id && entry.owner == ownerId && entry.front == front) return entry.seen = now, entry;
+		if (entry.id == id && entry.owner == ownerId && entry.front == front) {
+			Position(merc, entry.x, entry.y);
+			return entry.seen = now, entry;
+		}
 	MercState* slot = &Mercs[0];
 	for (auto& entry : Mercs)
 		if (now - entry.seen > now - slot->seen) slot = &entry;
@@ -708,7 +714,8 @@ MercState& MercOf(void* merc, void* owner, bool front) noexcept {
 		for (const auto& entry : Mercs)
 			if (&entry != slot && entry.owner == ownerId && entry.front == front && entry.slot == place && now - entry.seen < 10000) taken = true, ++place;
 	}
-	*slot = { id, ownerId, place, front, 0, 0, false, now };
+	*slot = { id, ownerId, place, front, 0, 0, false, now, 0, 0, 0, 0 };
+	Position(merc, slot->x, slot->y);
 	return *slot;
 }
 
@@ -721,12 +728,13 @@ void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y)
 	const int mx = ox - state.lastX, my = oy - state.lastY;
 	// Facing follows where you went over the last few steps, blended with the
 	// old facing, so the grid's zig-zag steps don't swing the whole formation.
-	if (std::max(std::abs(mx), std::abs(my)) >= 5) {
+	// The formation only turns on a real change of direction (more than about
+	// 35 degrees over 8 steps): small turns would swap the mercenaries' sides
+	// and make them cross each other's path.
+	if (std::max(std::abs(mx), std::abs(my)) >= 8) {
 		const double length = std::sqrt(double(mx) * mx + double(my) * my);
-		const double nx = 0.4 * state.fx + 0.6 * mx / length, ny = 0.4 * state.fy + 0.6 * my / length;
-		const double blended = std::sqrt(nx * nx + ny * ny);
-		if (blended > 0.1) state.fx = nx / blended, state.fy = ny / blended;
-		else state.fx = mx / length, state.fy = my / length; // turned right around
+		const double nx = mx / length, ny = my / length;
+		if (nx * state.fx + ny * state.fy < 0.82) state.fx = nx, state.fy = ny;
 		state.lastX = ox, state.lastY = oy;
 	}
 	static constexpr int Side[] = { 0, -4, 4, -8, 8, -11, 11, 0 }; // room to pass each other
@@ -751,6 +759,16 @@ bool Go(void* game, void* merc, void* target, int x, int y, bool run) noexcept {
 }
 
 // Goes to (or keeps going to) its formation spot. Returns false when already there.
+// Standing on you or on another of your mercenaries (all of them start the
+// game on top of you): not a place to stay.
+bool Crowded(const MercState& state, int ox, int oy) noexcept {
+	if (Cheb(state.x, state.y, ox, oy) < 2) return true;
+	const DWORD now = GetTickCount();
+	for (const auto& other : Mercs)
+		if (&other != &state && other.owner == state.owner && now - other.seen < 2000 && Cheb(state.x, state.y, other.x, other.y) <= 1) return true;
+	return false;
+}
+
 // `loose` (town): stays wherever it is while within that range of you.
 bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x, int y, bool walking, int loose = 0) noexcept {
 	int mx = 0, my = 0, ox = 0, oy = 0;
@@ -760,16 +778,17 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	const bool running = Field<std::uint32_t>(owner, UnitModeOffset) == PlayerRun;
 	if (loose > 0) {
 		// Loose: no need for the spot, only to stay close to you.
-		if (Cheb(mx, my, ox, oy) <= loose) {
+		if (Cheb(mx, my, ox, oy) <= loose && !Crowded(state, ox, oy)) {
 			state.moving = false;
 			return false;
 		}
 		if (walking && state.moving) return true; // let it finish the run back
+		if (Cheb(mx, my, x, y) <= 1) return false; // it is on its spot already
 	}
 	// Ranged mercenaries accept a place slightly off their spot, as long as
 	// it is still close to you, instead of hunting for the exact spot.
 	const int tolerance = state.front ? 1 : 3;
-	if (loose <= 0 && away <= tolerance && (state.front || Cheb(mx, my, ox, oy) <= 7)) {
+	if (loose <= 0 && away <= tolerance && (state.front || Cheb(mx, my, ox, oy) <= 7) && (away == 0 || !Crowded(state, ox, oy))) {
 		if (running && walking) return true; // keep the run going, the spot moves on
 		state.moving = false;
 		if (!running) return false;
@@ -807,7 +826,14 @@ bool Reposition(void* game, void* merc, void* owner, const Scan& scan, Role role
 		return true;
 	};
 	const auto fromOwner = [&](double x, double y) { return std::sqrt((x - ox) * (x - ox) + (y - oy) * (y - oy)); };
-	if (clear(mx, my) && fromOwner(mx, my) <= 7.0) return false;
+	// Where it stands is good enough while a little looser than the target
+	// distances: no hopping between two nearly equal places.
+	const auto loose = [&](double x, double y) {
+		for (int index = 0; index < count; ++index)
+			if ((ex[index] - x) * (ex[index] - x) + (ey[index] - y) * (ey[index] - y) < (exclusion - 1) * (exclusion - 1)) return false;
+		return true;
+	};
+	if (loose(mx, my) && fromOwner(mx, my) <= 9.0) return false;
 	double bestScore = 1e9;
 	int    bx = 0, by = 0;
 	for (const double radius : { 2.0, 3.5, 5.0, 6.5, 8.0, 10.0 }) {
@@ -885,6 +911,11 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 		if (target) {
 			mercState.moving = false;
 			if (Distance(merc, target) >= 3 || !InMelee(merc, target, 0, nullptr)) {
+				// Already running to it: let the run go on instead of starting
+				// it over every few frames (that made them stutter).
+				const std::uint32_t targetId = Field<std::uint32_t>(target, UnitIdOffset);
+				if (walking && mercState.chase == targetId && GetTickCount() - mercState.chaseAt < 500) return;
+				mercState.chase = targetId, mercState.chaseAt = GetTickCount();
 				void* const stats2 = Field<void*>(tick, TickMonStats2);
 				if (void* const path = GetPath(merc); path && stats2) SetSteps(path, Field<std::uint8_t>(stats2, 0x0E));
 				DeleteEvent(game, merc, 2, 0);
@@ -942,10 +973,10 @@ void TownThink(void* game, void* merc, void* owner, Role role) noexcept {
 	MercState&  mercState  = MercOf(merc, owner, IsMelee(role));
 	int         sx = 0, sy = 0;
 	Spot(ownerState, owner, mercState, sx, sy);
-	// Half way to its field spot: well inside the range once it gets there.
+	// Two thirds of its field spot: well inside the range once it gets there.
 	int ox = 0, oy = 0;
 	Position(owner, ox, oy);
-	sx = ox + (sx - ox) / 2, sy = oy + (sy - oy) / 2;
+	sx = ox + (sx - ox) * 2 / 3, sy = oy + (sy - oy) * 2 / 3;
 	if (KeepFormation(game, merc, owner, mercState, sx, sy, walking, TownRange)) return;
 	if (walking) return;
 	Idle(game, merc, 5);
