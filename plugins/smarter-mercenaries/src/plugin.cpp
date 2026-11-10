@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.17";
+constexpr const char* PluginVersion = "0.0.18";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -696,8 +696,6 @@ struct MercState {
 	int           x, y;    // where it stood at its last think
 	std::uint32_t chase;   // monster it is running to
 	DWORD         chaseAt; // when that run was ordered
-	int           lane;    // side offset from your path (negative: left), 0 = none yet
-	double        lfx, lfy; // your facing when the lane was picked
 };
 std::array<OwnerState, 8> Owners {};
 std::array<MercState, 24> Mercs {};
@@ -733,36 +731,14 @@ MercState& MercOf(void* merc, void* owner, bool front) noexcept {
 		for (const auto& entry : Mercs)
 			if (&entry != slot && entry.owner == ownerId && entry.front == front && entry.slot == place && now - entry.seen < 10000) taken = true, ++place;
 	}
-	*slot = { id, ownerId, place, front, 0, 0, false, now, 0, 0, 0, 0, 0, 0.0, 0.0 };
+	*slot = { id, ownerId, place, front, 0, 0, false, now, 0, 0, 0, 0 };
 	Position(merc, slot->x, slot->y);
 	return *slot;
 }
 
 // Formation spot: `depth` toward where you're heading (negative: behind you),
 // spread sideways by place in the line.
-// Its lane: the side of your path it is already on (so it never crosses in
-// front of you or behind you to get there), at the first distance from your
-// path (3, 6, 9, 12) no other mercenary of its line has on that side. Kept
-// until you really turn (over 60 degrees), then picked again the same way.
-void PickLane(MercState& merc, int ox, int oy, double fx, double fy) noexcept {
-	if (merc.lane != 0 && fx * merc.lfx + fy * merc.lfy >= 0.5) return;
-	// Side: across your facing (the same axis the spot uses: -fy, fx).
-	const double lateral = (merc.x - ox) * -fy + (merc.y - oy) * fx;
-	const int    sign    = lateral > 0.5 ? 1 : lateral < -0.5 ? -1 : (merc.slot & 1 ? 1 : -1);
-	const DWORD  now     = GetTickCount();
-	int          lane    = 0;
-	for (int distance = 3; distance <= 12 && lane == 0; distance += 3) {
-		bool taken = false;
-		for (const auto& other : Mercs)
-			if (&other != &merc && other.owner == merc.owner && other.front == merc.front && now - other.seen < 2000 && other.lane == sign * distance) taken = true;
-		if (!taken) lane = sign * distance;
-	}
-	if (lane == 0) lane = sign * 15;
-	Log(false, "mv merc id%u (%d,%d): lane %d (you at (%d,%d) facing (%.2f,%.2f), it was %.1f to the side)", merc.id, merc.x, merc.y, lane, ox, oy, fx, fy, lateral);
-	merc.lane = lane, merc.lfx = fx, merc.lfy = fy;
-}
-
-void Spot(OwnerState& state, void* owner, MercState& merc, int& x, int& y) noexcept {
+void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y) noexcept {
 	int ox = 0, oy = 0;
 	Position(owner, ox, oy);
 	if (state.px < 0) state.px = ox, state.py = oy;
@@ -787,15 +763,14 @@ void Spot(OwnerState& state, void* owner, MercState& merc, int& x, int& y) noexc
 	}
 	// The formation faces where you last headed.
 	if (state.hx != 0 || state.hy != 0) state.fx = state.hx, state.fy = state.hy;
-	// Every mercenary has its own lane beside your path, none on it, on the
-	// side it already stands: no move order makes it cross your path or
-	// another mercenary's lane.
-	PickLane(merc, ox, oy, state.fx, state.fy);
+	// Every mercenary has its own lane beside your path, none on it: running
+	// alongside you they never bump into you or each other.
+	static constexpr int Side[] = { -3, 3, -6, 6, -9, 9, -12, 12 };
 	// While you move the spot is ahead of you, so each run is long and
 	// straight (it only thinks again once a run is over).
 	const double lead  = moving && (state.hx != 0 || state.hy != 0) ? 5.0 : 0.0;
 	const double depth = (merc.front ? 2.0 : -3.0) + lead;
-	const double side  = merc.lane;
+	const double side  = Side[merc.slot & 7];
 	x = ox + static_cast<int>(std::lround(state.fx * depth - state.fy * side));
 	y = oy + static_cast<int>(std::lround(state.fy * depth + state.fx * side));
 }
@@ -818,14 +793,10 @@ bool Go(void* game, void* merc, void* target, int x, int y, bool run) noexcept {
 }
 
 // Goes to (or keeps going to) its formation spot. Returns false when already there.
-// Standing on you or on another of your mercenaries (all of them start the
-// game on top of you): not a place to stay.
+// Standing on you (they all start the game on top of you): not a place to stay.
 bool Crowded(const MercState& state, int ox, int oy) noexcept {
-	if (Cheb(state.x, state.y, ox, oy) < 2) return true;
-	const DWORD now = GetTickCount();
-	for (const auto& other : Mercs)
-		if (&other != &state && other.owner == state.owner && now - other.seen < 2000 && Cheb(state.x, state.y, other.x, other.y) <= 1) return true;
-	return false;
+	// Other mercenaries don't count: they walk through each other.
+	return Cheb(state.x, state.y, ox, oy) < 2;
 }
 
 // `loose` (town): stays wherever it is while within that range of you.
