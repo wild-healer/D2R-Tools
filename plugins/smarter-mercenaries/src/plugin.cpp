@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.12";
+constexpr const char* PluginVersion = "0.0.13";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -683,6 +683,8 @@ struct OwnerState {
 	std::uint32_t id;
 	int           lastX, lastY;
 	double        fx, fy; // facing (where you last moved)
+	int           px, py; // last sample for the heading
+	double        hx, hy; // heading right now (last 3 steps)
 };
 struct MercState {
 	std::uint32_t id, owner;
@@ -707,7 +709,7 @@ OwnerState& OwnerOf(void* owner) noexcept {
 	for (auto& entry : Owners)
 		if (entry.id == id && (entry.fx != 0 || entry.fy != 0)) return entry;
 	OwnerState& entry = Owners[id % Owners.size()];
-	entry = { id, -1, -1, 0.0, 1.0 };
+	entry = { id, -1, -1, 0.0, 1.0, -1, -1, 0.0, 0.0 };
 	return entry;
 }
 
@@ -740,6 +742,11 @@ void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y)
 	int ox = 0, oy = 0;
 	Position(owner, ox, oy);
 	if (state.lastX < 0) state.lastX = ox, state.lastY = oy;
+	if (state.px < 0) state.px = ox, state.py = oy;
+	if (const int hx = ox - state.px, hy = oy - state.py; std::max(std::abs(hx), std::abs(hy)) >= 3) {
+		const double length = std::sqrt(double(hx) * hx + double(hy) * hy);
+		state.hx = hx / length, state.hy = hy / length, state.px = ox, state.py = oy;
+	}
 	const int mx = ox - state.lastX, my = oy - state.lastY;
 	// Facing follows where you went over the last few steps, blended with the
 	// old facing, so the grid's zig-zag steps don't swing the whole formation.
@@ -793,7 +800,8 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	Position(merc, mx, my);
 	Position(owner, ox, oy);
 	const int  away    = Cheb(mx, my, x, y);
-	const bool running = Field<std::uint32_t>(owner, UnitModeOffset) == PlayerRun;
+	const std::uint32_t ownerMode = Field<std::uint32_t>(owner, UnitModeOffset);
+	const bool          running   = ownerMode == PlayerRun || ownerMode == 2 || ownerMode == 6; // run, walk, town walk
 	if (loose > 0) {
 		// Loose: no need for the spot, only to stay close to you.
 		if (Cheb(mx, my, ox, oy) <= loose && !Crowded(state, ox, oy)) {
@@ -803,6 +811,27 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 		}
 		if (walking && state.moving) return Mv(merc, " town: still running back"), true; // let it finish the run back
 		if (Cheb(mx, my, x, y) <= 1) return Mv(merc, " town: on its spot"), false; // it is on its spot already
+	}
+	// You're running: run alongside you. It keeps where it is relative to
+	// you (pulled within 2..6) and aims where you'll be in a moment, so each
+	// order is a long straight run parallel to yours. The game only lets it
+	// think again once a run is over, so short orders made it stop and
+	// turn every few steps.
+	if (loose <= 0 && running) {
+		const OwnerState& heading = OwnerOf(owner);
+		if (heading.hx != 0 || heading.hy != 0) {
+			double       rx = mx - ox, ry = my - oy;
+			const double length = std::sqrt(rx * rx + ry * ry);
+			if (length > 6.0) rx *= 6.0 / length, ry *= 6.0 / length;
+			else if (length < 2.0) rx = x - ox, ry = y - oy; // on top of you: use its formation side
+			const int fx = ox + static_cast<int>(std::lround(rx + heading.hx * 5.0)), fy = oy + static_cast<int>(std::lround(ry + heading.hy * 5.0));
+			Mv(merc, " follow: you head (%.2f,%.2f), runs to (%d,%d)", heading.hx, heading.hy, fx, fy);
+			DeleteEvent(game, merc, 2, 0);
+			if (Go(game, merc, nullptr, fx, fy, true)) {
+				state.spotX = fx, state.spotY = fy, state.moving = true;
+				return true;
+			}
+		}
 	}
 	// Ranged mercenaries accept a place slightly off their spot, as long as
 	// it is still close to you, instead of hunting for the exact spot.
@@ -825,6 +854,13 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 		state.spotX = x, state.spotY = y, state.moving = true;
 		return true;
 	}
+	// Spot taken (another mercenary, a wall): try around it.
+	static constexpr int Around[8][2] = { { 2, 0 }, { -2, 0 }, { 0, 2 }, { 0, -2 }, { 2, 2 }, { -2, -2 }, { 2, -2 }, { -2, 2 } };
+	for (const auto& offset : Around)
+		if (Go(game, merc, nullptr, x + offset[0], y + offset[1], run)) {
+			state.spotX = x, state.spotY = y, state.moving = true;
+			return true;
+		}
 	// Spot blocked (wall, cliff). Ranged: stay put if already near you.
 	state.moving = false;
 	if (!state.front && Cheb(mx, my, ox, oy) <= 7) return Mv(merc, " form: spot blocked, stays"), false;
@@ -958,7 +994,12 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 				void* const stats2 = Field<void*>(tick, TickMonStats2);
 				if (void* const path = GetPath(merc); path && stats2) SetSteps(path, Field<std::uint8_t>(stats2, 0x0E));
 				DeleteEvent(game, merc, 2, 0);
-				if (Go(game, merc, target, 0, 0, true)) return Note(merc, role, target, -4, "leaves the formation for an enemy in range");
+				// To where it stands, not to the unit: a run to a unit only lasts
+				// a step or two before it has to think again.
+				int tx = 0, ty = 0;
+				const bool placed = Position(target, tx, ty);
+				if (int ux = 0, uy = 0; placed && Position(merc, ux, uy)) tx += (ux > tx) - (ux < tx), ty += (uy > ty) - (uy < ty); // next to it
+				if (placed ? Go(game, merc, nullptr, tx, ty, true) : Go(game, merc, target, 0, 0, true)) return Note(merc, role, target, -4, "leaves the formation for an enemy in range");
 			}
 			if (walking) return Mv(merc, " melee: in reach but still moving");
 			Mv(merc, " melee: attacks %u", Field<std::uint32_t>(target, UnitIdOffset));
