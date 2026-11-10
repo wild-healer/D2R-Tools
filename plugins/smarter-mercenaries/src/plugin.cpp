@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.23";
+constexpr const char* PluginVersion = "0.0.24";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -855,7 +855,11 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	// where it is instead of running back to the exact spot (a run there and
 	// a run back looked like a zig-zag).
 	const int tolerance = 3;
-	if (loose <= 0 && away <= tolerance && (state.front || Cheb(mx, my, ox, oy) <= 7) && (away == 0 || !Crowded(state, ox, oy))) {
+	// "Close to you" means no further than its own spot is (the outer lanes
+	// are 8 to the side): with a fixed 7 a mercenary on its outer spot never
+	// counted as in place and stepped off it and back again forever.
+	const int closeEnough = std::max(7, Cheb(x, y, ox, oy) + 1);
+	if (loose <= 0 && (away == 0 || (away <= tolerance && (state.front || Cheb(mx, my, ox, oy) <= closeEnough) && !Crowded(state, ox, oy)))) {
 		if (running && walking) return Mv(merc, " form: at spot (away %d), keeps running with you", away), true; // keep the run going, the spot moves on
 		state.moving = false;
 		if (!running) return Mv(merc, " form: in place (away %d, crowded %d)", away, Crowded(state, ox, oy)), false;
@@ -882,7 +886,7 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 		}
 	// Spot blocked (wall, cliff). Ranged: stay put if already near you.
 	state.moving = false;
-	if (!state.front && Cheb(mx, my, ox, oy) <= 7) return Mv(merc, " form: spot blocked, stays"), false;
+	if (!state.front && Cheb(mx, my, ox, oy) <= closeEnough) return Mv(merc, " form: spot blocked, stays"), false;
 	Mv(merc, " form: spot blocked, game follow move");
 	PetMove(game, owner, merc, 0, run ? 1 : 0, run ? 60 : 0, 0);
 	return true;
