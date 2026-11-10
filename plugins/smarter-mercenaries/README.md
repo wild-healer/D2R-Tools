@@ -27,7 +27,8 @@ dice roll.
   crowds near it.
 - Barbarian: Battle Cry on groups, Stun on bosses and champions, Bash
   otherwise. Frenzy Barbarian Taunts monsters attacking you, Frenzy otherwise.
-- In town the game's own AI runs.
+- In town they stay in a loose group, never more than 7 steps from you (inside
+  warcry range, so Battle Orders reaches them), and only move to catch up.
 - Attack rate is the game's own (same chance per think), only the choices change.
 - Works with every mercenary Multi Mercenary adds (each one runs the same AI).
 - Single player and games you host (it is server side); nothing changes in games you join.
