@@ -3,7 +3,7 @@
 D2RLoader plugin. Turns on, so you don't have to press their keys after launching D2R:
 
 - **Item labels** on the ground (the Show Items key), in your first game after launch. They stay as you leave them after that. Needs the game's Item Name Display option on Toggle.
-- **Top-right game info** (the Toggle Minimap key), in every game, since the game resets it on each join.
+- **Automap** (the AutoMap key, Tab), opened in every game.
 
 Their keys still turn them off. Both options are in `shown-on-start.toml` and in game with I Hate TOMLs.
 

@@ -1,6 +1,6 @@
 // Shown on Start: item labels on the ground (the Show Items key) and the
-// game info text at the top right (the Toggle Minimap key) start turned on, so
-// you don't have to press their keys after launching D2R.
+// automap (the AutoMap key, Tab) start turned on, so you don't have to press
+// their keys after launching D2R.
 //
 // How the game keeps it (Steam 3.4.95041 / 3.3.94995 RVAs):
 // The Show Items state is a static array of two bytes, one per key: 0 = Show
@@ -13,11 +13,11 @@
 // same two calls the key uses. With the Hold option the game clears it again
 // whenever a key is released, as it does for the key itself.
 //
-// The Toggle Minimap key (0xD4300) flips one byte (D2R+0x2A2ADD5, read by
-// 0xD34B0). The game resets that byte from the Automap Size option in
-// 0xD34C0, which the in-game UI setup (0xC8550) runs on every game join. The
-// plugin hooks 0xD34C0 and sets the byte to 1 after it, so the text starts
-// shown in every game, and the key still turns it off.
+// The automap is the game panel 10. Panel open flags are a byte array at
+// D2R+0x2A2ADA0 (one per panel id), and 0xCD7C0 `bool (int panel, int)` opens
+// a panel; the game's own Automap Auto Open option makes the same call while
+// it sets up a game. The plugin opens it on the next UI frame after you are in
+// each game, when it is not open already. The key still closes it.
 // The code bytes of every function are checked at load; on a mismatch the
 // plugin stays inactive.
 
@@ -39,7 +39,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shown-on-start";
-constexpr const char* PluginVersion = "0.0.1";
+constexpr const char* PluginVersion = "0.0.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -48,13 +48,13 @@ const D2RL::PluginInfo Info {
 	.name        = "Shown on Start",
 	.version     = PluginVersion,
 	.author      = "wild-healer",
-	.description = "Item labels and the top-right game info start turned on.",
-	.flags       = D2RL::PluginFlags::Shared | D2RL::PluginFlags::NativeHooks,
+	.description = "Item labels and the automap start turned on.",
+	.flags       = D2RL::PluginFlags::Shared,
 };
 
 struct Settings {
 	std::atomic<bool> items { true };
-	std::atomic<bool> minimap { true };
+	std::atomic<bool> automap { true };
 } Config;
 
 // ---- native layout (Steam 3.4.95041 / 3.3.94995) ----
@@ -66,23 +66,23 @@ constexpr std::array<std::uint8_t, 16> ItemsSetBytes { 0x40, 0x53, 0x48, 0x83, 0
 constexpr std::uint64_t ItemsApplyRva = 0xCE450; // void (): applies the state (labels HUD, shown flag)
 constexpr std::array<std::uint8_t, 16> ItemsApplyBytes { 0x48, 0x83, 0xEC, 0x28, 0xE8, 0x27, 0xC9, 0x12, 0x00, 0x84, 0xC0, 0x74, 0x54, 0xE8, 0xAE, 0x99 };
 constexpr std::uint8_t ModeShowItems = 0;
-constexpr std::uint64_t MinimapToggleRva = 0xD4300; // void (): the Toggle Minimap key, flips the byte below
-constexpr std::array<std::uint8_t, 15> MinimapToggleBytes { 0x80, 0x3D, 0xCE, 0x6A, 0x95, 0x02, 0x00, 0x0F, 0x94, 0x05, 0xC7, 0x6A, 0x95, 0x02, 0xC3 };
-constexpr std::uint64_t MinimapGetRva = 0xD34B0; // uint8 (): reads the byte
-constexpr std::array<std::uint8_t, 8> MinimapGetBytes { 0x0F, 0xB6, 0x05, 0x1E, 0x79, 0x95, 0x02, 0xC3 };
-constexpr std::uint64_t MinimapFlagRva = 0x2A2ADD5;
-constexpr std::uint64_t SettingsApplyRva = 0xD34C0; // void (): applies the automap and other options on game join
-constexpr std::array<std::uint8_t, 16> SettingsApplyBytes { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x7C, 0x24, 0x10, 0x55, 0x48, 0x8D, 0xAC, 0x24, 0xE0 };
+constexpr std::uint64_t OpenPanelRva = 0xCD7C0; // bool (int panel, int)
+constexpr std::array<std::uint8_t, 16> OpenPanelBytes { 0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC };
+constexpr std::uint64_t OpenPanelFlagsReadRva = 0xCD7FB; // movzx r15d, byte [r12 + rbx + 0x2A2ADA0] (r12 = image base)
+constexpr std::array<std::uint8_t, 9> OpenPanelFlagsReadBytes { 0x45, 0x0F, 0xB6, 0xBC, 0x1C, 0xA0, 0xAD, 0xA2, 0x02 };
+constexpr std::uint64_t PanelOpenFlagsRva = 0x2A2ADA0;
+constexpr int           PanelAutomap      = 10;
 
 using GetFn   = bool (*)(std::uint8_t mode) noexcept;
 using SetFn   = void (*)(std::uint8_t mode, bool on) noexcept;
 using VoidFn  = void (*)() noexcept;
+using OpenFn  = bool (*)(int panel, int mode) noexcept;
 
 std::uintptr_t Base {};
 GetFn          ItemsGet {};
 SetFn          ItemsSet {};
 VoidFn         ItemsApply {};
-VoidFn         SettingsApply {}; // original, after the hook
+OpenFn         OpenPanel {};
 
 const D2RL::PluginContext* Context {};
 const D2RL::ThreadService* Threads {};
@@ -125,26 +125,30 @@ bool LocateItems() noexcept {
 	return true;
 }
 
-// ---- minimap ----
+// ---- automap ----
 
-bool LocateMinimap() noexcept {
-	return CodeMatches(MinimapToggleRva, MinimapToggleBytes) && CodeMatches(MinimapGetRva, MinimapGetBytes) && CodeMatches(SettingsApplyRva, SettingsApplyBytes);
+bool LocateAutomap() noexcept {
+	if (!CodeMatches(OpenPanelRva, OpenPanelBytes) || !CodeMatches(OpenPanelFlagsReadRva, OpenPanelFlagsReadBytes)) return false;
+	OpenPanel = reinterpret_cast<OpenFn>(Base + OpenPanelRva);
+	return true;
 }
 
-void HookSettingsApply() noexcept {
-	SettingsApply();
-	if (!Config.minimap.load()) return;
-	auto* const flag = reinterpret_cast<std::uint8_t volatile*>(Base + MinimapFlagRva);
-	if (*flag == 0) {
-		*flag = 1;
-		Log(false, "top-right game info turned on");
-	}
+bool AutomapOpen() noexcept {
+	return *reinterpret_cast<const std::uint8_t volatile*>(Base + PanelOpenFlagsRva + PanelAutomap) != 0;
 }
 
-// ---- UI thread, once in a game ----
+// ---- UI thread, in a game ----
 
 void __cdecl TurnOn(const D2RL::PluginContext*, void*) noexcept {
 	Queued.store(false);
+	if (OpenPanel && Config.automap.load()) {
+		if (AutomapOpen()) {
+			Log(false, "automap was already open");
+		} else {
+			const bool opened = OpenPanel(PanelAutomap, 0) && AutomapOpen();
+			Log(!opened, "automap %s", opened ? "opened" : "could not be opened");
+		}
+	}
 	if (ItemsGet && !ItemsDone.exchange(true) && Config.items.load()) {
 		if (ItemsGet(ModeShowItems)) {
 			Log(false, "item labels were already shown");
@@ -158,7 +162,6 @@ void __cdecl TurnOn(const D2RL::PluginContext*, void*) noexcept {
 
 void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
 	if (!event || event->kind != D2RL::Lifecycle::GameplayEventKind::LocalPlayerReady || !Threads) return;
-	if (ItemsDone.load()) return;
 	// Run on the next UI frame, after the game has finished setting up its HUD.
 	if (!Queued.exchange(true) && Threads->runOnUiThread(Context, TurnOn, nullptr) != D2RL::Threads::Result::Success) Queued.store(false);
 }
@@ -185,14 +188,14 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 		return true;
 	};
 	if (key == "items") return flag(Config.items);
-	if (key == "minimap") return flag(Config.minimap);
+	if (key == "automap") return flag(Config.automap);
 	return error = "unknown setting", false;
 }
 
 std::string ValueOf(const std::string& key) {
 	const auto flag = [](bool on) { return std::string(on ? "true" : "false"); };
 	if (key == "items") return flag(Config.items);
-	if (key == "minimap") return flag(Config.minimap);
+	if (key == "automap") return flag(Config.automap);
 	return {};
 }
 
@@ -203,14 +206,13 @@ std::string Render() {
 # - items: item labels on the ground (the Show Items key), in your first game
 #   after launch. They stay as you leave them after that. Needs the game's
 #   Item Name Display option on Toggle.
-# - minimap: the game info text at the top right (the Toggle Minimap key), in
-#   every game, since the game resets it on each join.
+# - automap: the automap (the AutoMap key, Tab), opened in every game.
 # Their keys still turn them off. Every setting can also be changed in game
 # with I Hate TOMLs.
 
 [shown-on-start]
 items = )" + ValueOf("items") + R"(
-minimap = )" + ValueOf("minimap") + "\n";
+automap = )" + ValueOf("automap") + "\n";
 }
 
 void SaveConfig() {
@@ -258,10 +260,10 @@ type = "bool"
 label = "Item labels shown on start"
 note = "Turned on in your first game after launch. Needs Item Name Display on Toggle."
 [[setting]]
-key = "minimap"
+key = "automap"
 type = "bool"
-label = "Top-right game info shown on start"
-note = "The Toggle Minimap key's text, turned on in every game."
+label = "Automap open on start"
+note = "Opened in every game, as if you pressed the AutoMap key."
 )toml";
 
 PluginMenu::Connection Menu;
@@ -308,17 +310,9 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
 	Base = context->exeBase;
 	if (!Base) return true;
-	// Hooked even when turned off: it can be turned on while playing.
-	if (!LocateMinimap()) {
-		Log(true, "top-right game info: inactive, this game build isn't supported (Steam 3.4.95041 / 3.3.94995 are)");
-	} else if (!context->InstallInlineHook(SettingsApplyRva, SettingsApplyBytes.data(), static_cast<std::uint32_t>(SettingsApplyBytes.size()), reinterpret_cast<void*>(&HookSettingsApply), reinterpret_cast<void**>(&SettingsApply)) || !SettingsApply) {
-		Log(true, "top-right game info: inactive, could not hook D2R+0x%llX", static_cast<unsigned long long>(SettingsApplyRva));
-		SettingsApply = nullptr;
-	}
-	if (!LocateItems()) {
-		Log(true, "item labels: inactive, this game build isn't supported (Steam 3.4.95041 / 3.3.94995 are)");
-		return true;
-	}
+	if (!LocateAutomap()) Log(true, "automap: inactive, this game build isn't supported (Steam 3.4.95041 / 3.3.94995 are)");
+	if (!LocateItems()) Log(true, "item labels: inactive, this game build isn't supported (Steam 3.4.95041 / 3.3.94995 are)");
+	if (!ItemsGet && !OpenPanel) return true;
 	Threads = Query<D2RL::ThreadService>("thread");
 	if (Threads && !D2RL::HasThreadServiceField(Threads, D2RL::ThreadServiceRequiredSize)) Threads = nullptr;
 	const auto* lifecycle = Query<D2RL::LifecycleService>("lifecycle");
@@ -336,8 +330,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "Shown on Start %s: inactive, could not listen to game joins", PluginVersion);
 		return true;
 	}
-	Log(false, "Shown on Start %s: active (item labels %s, top-right game info %s)", PluginVersion, Config.items ? "on at start" : "left alone",
-	    !SettingsApply ? "inactive" : Config.minimap ? "on at start" : "left alone");
+	Log(false, "Shown on Start %s: active (item labels %s, automap %s)", PluginVersion, !ItemsGet ? "inactive" : Config.items ? "on at start" : "left alone",
+	    !OpenPanel ? "inactive" : Config.automap ? "opened in every game" : "left alone");
 	return true;
 }
 

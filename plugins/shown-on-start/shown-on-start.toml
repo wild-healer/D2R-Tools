@@ -4,11 +4,10 @@
 # - items: item labels on the ground (the Show Items key), in your first game
 #   after launch. They stay as you leave them after that. Needs the game's
 #   Item Name Display option on Toggle.
-# - minimap: the game info text at the top right (the Toggle Minimap key), in
-#   every game, since the game resets it on each join.
+# - automap: the automap (the AutoMap key, Tab), opened in every game.
 # Their keys still turn them off. Every setting can also be changed in game
 # with I Hate TOMLs.
 
 [shown-on-start]
 items = true
-minimap = true
+automap = true
