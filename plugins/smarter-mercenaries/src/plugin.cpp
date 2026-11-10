@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.26";
+constexpr const char* PluginVersion = "0.0.27";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -694,6 +694,7 @@ struct OwnerState {
 	int           sx, sy; // where you stood at the last think
 	DWORD         movedAt; // last time you were seen moving
 	bool          moving;  // moving, or stopped for less than a moment
+	int           mirror;  // 1 or -1: which side of you each lane is on
 };
 struct MercState {
 	std::uint32_t id, owner;
@@ -718,7 +719,7 @@ OwnerState& OwnerOf(void* owner) noexcept {
 	for (auto& entry : Owners)
 		if (entry.id == id && (entry.fx != 0 || entry.fy != 0)) return entry;
 	OwnerState& entry = Owners[id % Owners.size()];
-	entry = { id, -1, -1, 0.0, 1.0, -1, -1, 0.0, 0.0, -1, -1, 0, false };
+	entry = { id, -1, -1, 0.0, 1.0, -1, -1, 0.0, 0.0, -1, -1, 0, false, 1 };
 	return entry;
 }
 
@@ -743,6 +744,37 @@ MercState& MercOf(void* merc, void* owner, bool front) noexcept {
 	*slot = { id, ownerId, place, front, 0, 0, false, now, 0, 0, 0, 0 };
 	Position(merc, slot->x, slot->y);
 	return *slot;
+}
+
+// Every mercenary has its own lane beside your path, none on it: running
+// alongside you they never bump into you or each other.
+// Melee and ranged lanes interleave, so no two mercenaries share one
+// (a shared lane made a front and a back mercenary run into each other).
+double LaneSide(const MercState& merc) noexcept {
+	static constexpr int FrontSide[] = { -2, 2, -6, 6, -10, 10, -14, 14 };
+	static constexpr int BackSide[]  = { -4, 4, -8, 8, -12, 12, -16, 16 };
+	return (merc.front ? FrontSide : BackSide)[merc.slot & 7];
+}
+
+// A new heading (you start moving, or turn sharply): lanes are set on the
+// sides of your path where the mercenaries already are. Turning around
+// otherwise sent every mercenary to the other side of you, all of them
+// crossing in front of you and each other.
+void ChooseSides(OwnerState& state, int ox, int oy, double nx, double ny) noexcept {
+	const DWORD now = GetTickCount();
+	double      keep = 0.0, flip = 0.0;
+	int         count = 0;
+	for (const auto& merc : Mercs) {
+		if (!merc.id || merc.owner != state.id || now - merc.seen > 2000) continue;
+		const double side = -ny * (merc.x - ox) + nx * (merc.y - oy); // its place across your new path
+		const double lane = LaneSide(merc) * state.mirror;
+		keep += std::abs(side - lane), flip += std::abs(side + lane), ++count;
+	}
+	if (count && flip < keep) {
+		state.mirror = -state.mirror;
+		Log(false, "mv %lu sides: new heading (%.2f,%.2f), lanes flip to keep %d mercenaries on their side (cost %.0f vs %.0f)",
+		    static_cast<unsigned long>(now % 1000000), nx, ny, count, flip, keep);
+	}
 }
 
 // Formation spot: `depth` toward where you're heading (negative: behind you),
@@ -772,7 +804,10 @@ void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y)
 	else if (const int dx = ox - state.px, dy = oy - state.py; std::max(std::abs(dx), std::abs(dy)) >= ((state.hx == 0 && state.hy == 0) ? 2 : 3)) {
 		const double length = std::sqrt(double(dx) * dx + double(dy) * dy);
 		const double nx = dx / length, ny = dy / length;
-		if ((state.hx == 0 && state.hy == 0) || nx * state.hx + ny * state.hy < 0.5) state.hx = nx, state.hy = ny;
+		if ((state.hx == 0 && state.hy == 0) || nx * state.hx + ny * state.hy < 0.5) {
+			ChooseSides(state, ox, oy, nx, ny);
+			state.hx = nx, state.hy = ny;
+		}
 		else {
 			const double bx = state.hx + nx, by = state.hy + ny, blended = std::sqrt(bx * bx + by * by);
 			state.hx = bx / blended, state.hy = by / blended;
@@ -781,17 +816,11 @@ void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y)
 	}
 	// The formation faces where you last headed.
 	if (state.hx != 0 || state.hy != 0) state.fx = state.hx, state.fy = state.hy;
-	// Every mercenary has its own lane beside your path, none on it: running
-	// alongside you they never bump into you or each other.
-	// Melee and ranged lanes interleave, so no two mercenaries share one
-	// (a shared lane made a front and a back mercenary run into each other).
-	static constexpr int FrontSide[] = { -2, 2, -6, 6, -10, 10, -14, 14 };
-	static constexpr int BackSide[]  = { -4, 4, -8, 8, -12, 12, -16, 16 };
 	// While you move the spot is ahead of you, so each run is long and
 	// straight (it only thinks again once a run is over).
 	const double lead  = moving && (state.hx != 0 || state.hy != 0) ? 3.0 : 0.0;
 	const double depth = (merc.front ? 2.0 : -3.0) + lead;
-	const double side  = (merc.front ? FrontSide : BackSide)[merc.slot & 7];
+	const double side  = LaneSide(merc) * state.mirror;
 	x = ox + static_cast<int>(std::lround(state.fx * depth - state.fy * side));
 	y = oy + static_cast<int>(std::lround(state.fy * depth + state.fx * side));
 }
@@ -840,6 +869,10 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	Position(owner, ox, oy);
 	const int  away    = Cheb(mx, my, x, y);
 	const bool running = OwnerOf(owner).moving; // moving, or stopped only for a moment
+	// "Close to you" means no further than its own spot is (the outer lanes
+	// are 8 to the side): with a fixed 7 a mercenary on its outer spot never
+	// counted as in place and stepped off it and back again forever.
+	const int closeEnough = std::max(7, Cheb(x, y, ox, oy) + 1);
 	if (loose > 0) {
 		// Loose: no need for the spot, only to stay close to you.
 		if (Cheb(mx, my, ox, oy) <= loose && !Crowded(state, ox, oy)) {
@@ -868,6 +901,20 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 			SetEvent(game, merc, 2, Field<std::int32_t>(game, 0x170) + 6, 0, 0, 0);
 			return true;
 		}
+		// Lane spot blocked (a wall, the edge of a path): halfway to you
+		// instead. No more tries around it: ten orders in one think made it
+		// stand and twitch, and the next think has a new spot anyway.
+		const int hx = (x + ox) / 2, hy = (y + oy) / 2;
+		if (Cheb(hx, hy, mx, my) > 1 && Go(game, merc, nullptr, hx, hy, true)) {
+			state.spotX = x, state.spotY = y, state.moving = true;
+			SetEvent(game, merc, 2, Field<std::int32_t>(game, 0x170) + 6, 0, 0, 0);
+			return true;
+		}
+		state.moving = false;
+		if (Cheb(mx, my, ox, oy) <= closeEnough) return Mv(merc, " follow: lane blocked, waits for the next think"), false;
+		Mv(merc, " follow: lane blocked, game follow move");
+		PetMove(game, owner, merc, 0, 1, 60, 0);
+		return true;
 	}
 	// Ranged mercenaries accept a place slightly off their spot, as long as
 	// it is still close to you, instead of hunting for the exact spot.
@@ -875,10 +922,6 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	// where it is instead of running back to the exact spot (a run there and
 	// a run back looked like a zig-zag).
 	const int tolerance = 3;
-	// "Close to you" means no further than its own spot is (the outer lanes
-	// are 8 to the side): with a fixed 7 a mercenary on its outer spot never
-	// counted as in place and stepped off it and back again forever.
-	const int closeEnough = std::max(7, Cheb(x, y, ox, oy) + 1);
 	if (loose <= 0 && (away == 0 || (away <= tolerance && (state.front || Cheb(mx, my, ox, oy) <= closeEnough) && !Crowded(state, ox, oy)))) {
 		if (running && walking) return Mv(merc, " form: at spot (away %d), keeps running with you", away), true; // keep the run going, the spot moves on
 		state.moving = false;
