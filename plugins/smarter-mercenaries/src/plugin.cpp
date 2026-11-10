@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.15";
+constexpr const char* PluginVersion = "0.0.16";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1045,6 +1045,22 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	Idle(game, merc, 3);
 }
 
+// Mercenaries walk through your other mercenaries and summons. With allies
+// on the game's pet footprint (Walk Through Allies) a pet only stands in
+// the PET bit (0x2000) of the collision grid, and monsters move with that
+// bit in their mask (0x3C01), so your mercenaries kept bumping into each
+// other: each bump ends a run, and the next run starts in a new direction.
+// Enemies and you still block them (NO_PATH 0x1000 stays in the mask).
+void PassAllies(void* merc) noexcept {
+	void* const path = GetPath(merc);
+	if (!path) return;
+	auto& mask = *reinterpret_cast<std::uint32_t*>(static_cast<char*>(path) + 0x64);
+	if (mask & 0x2000) {
+		Mv(merc, "collision mask 0x%X -> 0x%X (walks through your other pets), footprint 0x%X", mask, mask & ~0x2000u, Field<std::uint32_t>(path, 0x60));
+		mask &= ~0x2000u;
+	}
+}
+
 // Town: a loose group around you, never further than a warcry reaches.
 constexpr int TownRange = 7;
 
@@ -1076,6 +1092,7 @@ void HookHireable(void* game, void* unit, void* tick) noexcept {
 			void* const owner = PlayerOwner(unit);
 			void* const room  = owner ? UnitRoom(unit) : nullptr;
 			if (owner && room) {
+				PassAllies(unit);
 				if (InTown(room)) {
 					Trace(unit, "town think");
 					return TownThink(game, unit, owner, role);
