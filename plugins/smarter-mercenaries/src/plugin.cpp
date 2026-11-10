@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.24";
+constexpr const char* PluginVersion = "0.0.25";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -688,6 +688,9 @@ struct OwnerState {
 	double        fx, fy; // facing (where you last moved)
 	int           px, py; // last sample for the heading
 	double        hx, hy; // heading right now (last 3 steps)
+	int           sx, sy; // where you stood at the last think
+	DWORD         movedAt; // last time you were seen moving
+	bool          moving;  // moving, or stopped for less than a moment
 };
 struct MercState {
 	std::uint32_t id, owner;
@@ -712,7 +715,7 @@ OwnerState& OwnerOf(void* owner) noexcept {
 	for (auto& entry : Owners)
 		if (entry.id == id && (entry.fx != 0 || entry.fy != 0)) return entry;
 	OwnerState& entry = Owners[id % Owners.size()];
-	entry = { id, -1, -1, 0.0, 1.0, -1, -1, 0.0, 0.0 };
+	entry = { id, -1, -1, 0.0, 1.0, -1, -1, 0.0, 0.0, -1, -1, 0, false };
 	return entry;
 }
 
@@ -745,8 +748,17 @@ void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y)
 	int ox = 0, oy = 0;
 	Position(owner, ox, oy);
 	if (state.px < 0) state.px = ox, state.py = oy;
+	// Moving: your mode says so, or you changed place less than half a
+	// second ago. Holding the mouse to run makes you stand for a frame between
+	// two moves; going by the mode alone, every such frame dropped the
+	// mercenaries back to formation (and you "started moving" again a moment
+	// later), a change of direction each time in a straight run.
 	const std::uint32_t ownerMode = Field<std::uint32_t>(owner, UnitModeOffset);
-	const bool          moving    = ownerMode == PlayerRun || ownerMode == 2 || ownerMode == 6;
+	const DWORD         now       = GetTickCount();
+	if (ownerMode == PlayerRun || ownerMode == 2 || ownerMode == 6 || ox != state.sx || oy != state.sy) state.movedAt = now;
+	state.sx = ox, state.sy = oy;
+	const bool moving = now - state.movedAt < 500;
+	state.moving      = moving;
 	// Heading: where you're going right now. Standing still forgets it, so a
 	// new move doesn't start in the direction of the previous one; the first
 	// 2 steps give the new one. Small changes are blended (the grid makes a
@@ -824,8 +836,7 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	Position(merc, mx, my);
 	Position(owner, ox, oy);
 	const int  away    = Cheb(mx, my, x, y);
-	const std::uint32_t ownerMode = Field<std::uint32_t>(owner, UnitModeOffset);
-	const bool          running   = ownerMode == PlayerRun || ownerMode == 2 || ownerMode == 6; // run, walk, town walk
+	const bool running = OwnerOf(owner).moving; // moving, or stopped only for a moment
 	if (loose > 0) {
 		// Loose: no need for the spot, only to stay close to you.
 		if (Cheb(mx, my, ox, oy) <= loose && !Crowded(state, ox, oy)) {
