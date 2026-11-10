@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.19";
+constexpr const char* PluginVersion = "0.0.20";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -807,6 +807,23 @@ bool Go(void* game, void* merc, void* target, int x, int y, bool run) noexcept {
 	// value) a run ended at the first corner, so going around you or another
 	// mercenary became a stop, a new think and a new direction each time.
 	const bool ok = Move(game, merc, target, run ? ModeRun : ModeWalk, x, y, 8, 0) != 0;
+	// The planned path (points at path +0x204, count at +0x200) and where the
+	// other mercenaries stand, to see detours around them mid-run.
+	if (void* const path = ok ? GetPath(merc) : nullptr) {
+		char         text[300] {};
+		int          used  = 0;
+		const auto   count = std::min<std::uint32_t>(Field<std::uint32_t>(path, 0x200), 12);
+		for (std::uint32_t index = 0; index < count && used < 250; ++index)
+			used += std::snprintf(text + used, sizeof(text) - used, " (%u,%u)", Field<std::uint16_t>(path, 0x204 + index * 4), Field<std::uint16_t>(path, 0x206 + index * 4));
+		char       others[200] {};
+		int        written = 0;
+		const auto mercId  = Field<std::uint32_t>(merc, UnitIdOffset);
+		const DWORD now    = GetTickCount();
+		for (const auto& other : Mercs)
+			if (other.id != mercId && other.id && now - other.seen < 1000 && written < 170)
+				written += std::snprintf(others + written, sizeof(others) - written, " id%u(%d,%d)", other.id, other.x, other.y);
+		Mv(merc, "  path %u points:%s | mask 0x%X | others:%s", Field<std::uint32_t>(path, 0x200), text, Field<std::uint32_t>(path, 0x64), others);
+	}
 	if (target) Mv(merc, "  Move to unit %u (%d,%d) run %d -> %s, mode now %u", Field<std::uint32_t>(target, UnitIdOffset), x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C));
 	else Mv(merc, "  Move to (%d,%d) run %d -> %s, mode now %u", x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C));
 	return ok;
