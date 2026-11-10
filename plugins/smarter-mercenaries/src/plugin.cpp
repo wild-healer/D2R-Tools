@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.13";
+constexpr const char* PluginVersion = "0.0.14";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -743,7 +743,11 @@ void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y)
 	Position(owner, ox, oy);
 	if (state.lastX < 0) state.lastX = ox, state.lastY = oy;
 	if (state.px < 0) state.px = ox, state.py = oy;
-	if (const int hx = ox - state.px, hy = oy - state.py; std::max(std::abs(hx), std::abs(hy)) >= 3) {
+	// Standing still: forget the heading, so a new move doesn't start in the
+	// direction of the previous one. The first 2 steps give the new heading.
+	if (const std::uint32_t ownerMode = Field<std::uint32_t>(owner, UnitModeOffset); ownerMode == 1 || ownerMode == 5)
+		state.hx = state.hy = 0.0, state.px = ox, state.py = oy;
+	else if (const int hx = ox - state.px, hy = oy - state.py; std::max(std::abs(hx), std::abs(hy)) >= ((state.hx == 0 && state.hy == 0) ? 2 : 3)) {
 		const double length = std::sqrt(double(hx) * hx + double(hy) * hy);
 		state.hx = hx / length, state.hy = hy / length, state.px = ox, state.py = oy;
 	}
@@ -777,7 +781,10 @@ int Cheb(int ax, int ay, int bx, int by) noexcept {
 // game's own follow move does (mode 15, speed 60, 100%).
 bool Go(void* game, void* merc, void* target, int x, int y, bool run) noexcept {
 	Velocity(merc, run ? ModeRun : 0, run ? 60 : 0, 100);
-	const bool ok = Move(game, merc, target, run ? ModeRun : ModeWalk, x, y, 1, 0) != 0;
+	// Steps 8: the whole path, corners included. With 1 (the game's usual
+	// value) a run ended at the first corner, so going around you or another
+	// mercenary became a stop, a new think and a new direction each time.
+	const bool ok = Move(game, merc, target, run ? ModeRun : ModeWalk, x, y, 8, 0) != 0;
 	if (target) Mv(merc, "  Move to unit %u (%d,%d) run %d -> %s, mode now %u", Field<std::uint32_t>(target, UnitIdOffset), x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C));
 	else Mv(merc, "  Move to (%d,%d) run %d -> %s, mode now %u", x, y, run, ok ? "ok" : "FAIL", Field<std::uint32_t>(merc, 0x0C));
 	return ok;
@@ -819,7 +826,8 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	// turn every few steps.
 	if (loose <= 0 && running) {
 		const OwnerState& heading = OwnerOf(owner);
-		if (heading.hx != 0 || heading.hy != 0) {
+		if (heading.hx == 0 && heading.hy == 0) return Mv(merc, " follow: you just started moving, waits for your heading"), false;
+		{
 			double       rx = mx - ox, ry = my - oy;
 			const double length = std::sqrt(rx * rx + ry * ry);
 			if (length > 6.0) rx *= 6.0 / length, ry *= 6.0 / length;
