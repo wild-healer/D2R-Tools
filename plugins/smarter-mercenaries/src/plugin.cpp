@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.14";
+constexpr const char* PluginVersion = "0.0.15";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -741,33 +741,35 @@ MercState& MercOf(void* merc, void* owner, bool front) noexcept {
 void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y) noexcept {
 	int ox = 0, oy = 0;
 	Position(owner, ox, oy);
-	if (state.lastX < 0) state.lastX = ox, state.lastY = oy;
 	if (state.px < 0) state.px = ox, state.py = oy;
-	// Standing still: forget the heading, so a new move doesn't start in the
-	// direction of the previous one. The first 2 steps give the new heading.
-	if (const std::uint32_t ownerMode = Field<std::uint32_t>(owner, UnitModeOffset); ownerMode == 1 || ownerMode == 5)
+	const std::uint32_t ownerMode = Field<std::uint32_t>(owner, UnitModeOffset);
+	const bool          moving    = ownerMode == PlayerRun || ownerMode == 2 || ownerMode == 6;
+	// Heading: where you're going right now. Standing still forgets it, so a
+	// new move doesn't start in the direction of the previous one; the first
+	// 2 steps give the new one. Small changes are blended (the grid makes a
+	// straight run look like a zig-zag of steps), a real turn (over 60
+	// degrees) is taken at once.
+	if (!moving)
 		state.hx = state.hy = 0.0, state.px = ox, state.py = oy;
-	else if (const int hx = ox - state.px, hy = oy - state.py; std::max(std::abs(hx), std::abs(hy)) >= ((state.hx == 0 && state.hy == 0) ? 2 : 3)) {
-		const double length = std::sqrt(double(hx) * hx + double(hy) * hy);
-		state.hx = hx / length, state.hy = hy / length, state.px = ox, state.py = oy;
+	else if (const int dx = ox - state.px, dy = oy - state.py; std::max(std::abs(dx), std::abs(dy)) >= ((state.hx == 0 && state.hy == 0) ? 2 : 3)) {
+		const double length = std::sqrt(double(dx) * dx + double(dy) * dy);
+		const double nx = dx / length, ny = dy / length;
+		if ((state.hx == 0 && state.hy == 0) || nx * state.hx + ny * state.hy < 0.5) state.hx = nx, state.hy = ny;
+		else {
+			const double bx = state.hx + nx, by = state.hy + ny, blended = std::sqrt(bx * bx + by * by);
+			state.hx = bx / blended, state.hy = by / blended;
+		}
+		state.px = ox, state.py = oy;
 	}
-	const int mx = ox - state.lastX, my = oy - state.lastY;
-	// Facing follows where you went over the last few steps, blended with the
-	// old facing, so the grid's zig-zag steps don't swing the whole formation.
-	// The formation only turns on a real change of direction (more than about
-	// 35 degrees over 8 steps): small turns would swap the mercenaries' sides
-	// and make them cross each other's path.
-	if (std::max(std::abs(mx), std::abs(my)) >= 8) {
-		const double length = std::sqrt(double(mx) * mx + double(my) * my);
-		const double nx = mx / length, ny = my / length;
-		if (nx * state.fx + ny * state.fy < 0.82) state.fx = nx, state.fy = ny;
-		state.lastX = ox, state.lastY = oy;
-	}
-	static constexpr int Side[] = { 0, -4, 4, -8, 8, -11, 11, 0 }; // room to pass each other
-	// While you run the spot is a few steps ahead of where you are, so it
-	// keeps running with you instead of stopping and starting each time.
-	const double lead  = Field<std::uint32_t>(owner, UnitModeOffset) == PlayerRun ? 3.0 : 0.0;
-	const double depth = (merc.front ? 3.0 : -4.0) + lead;
+	// The formation faces where you last headed.
+	if (state.hx != 0 || state.hy != 0) state.fx = state.hx, state.fy = state.hy;
+	// Every mercenary has its own lane beside your path, none on it: running
+	// alongside you they never bump into you or each other.
+	static constexpr int Side[] = { -3, 3, -6, 6, -9, 9, -12, 12 };
+	// While you move the spot is ahead of you, so each run is long and
+	// straight (it only thinks again once a run is over).
+	const double lead  = moving && (state.hx != 0 || state.hy != 0) ? 5.0 : 0.0;
+	const double depth = (merc.front ? 2.0 : -3.0) + lead;
 	const double side  = Side[merc.slot & 7];
 	x = ox + static_cast<int>(std::lround(state.fx * depth - state.fy * side));
 	y = oy + static_cast<int>(std::lround(state.fy * depth + state.fx * side));
@@ -819,26 +821,17 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 		if (walking && state.moving) return Mv(merc, " town: still running back"), true; // let it finish the run back
 		if (Cheb(mx, my, x, y) <= 1) return Mv(merc, " town: on its spot"), false; // it is on its spot already
 	}
-	// You're running: run alongside you. It keeps where it is relative to
-	// you (pulled within 2..6) and aims where you'll be in a moment, so each
-	// order is a long straight run parallel to yours. The game only lets it
-	// think again once a run is over, so short orders made it stop and
-	// turn every few steps.
+	// You're moving: run along its lane, to a spot ahead of you. The game
+	// only lets it think again once a run is over, so short orders made it
+	// stop and turn every few steps.
 	if (loose <= 0 && running) {
 		const OwnerState& heading = OwnerOf(owner);
 		if (heading.hx == 0 && heading.hy == 0) return Mv(merc, " follow: you just started moving, waits for your heading"), false;
-		{
-			double       rx = mx - ox, ry = my - oy;
-			const double length = std::sqrt(rx * rx + ry * ry);
-			if (length > 6.0) rx *= 6.0 / length, ry *= 6.0 / length;
-			else if (length < 2.0) rx = x - ox, ry = y - oy; // on top of you: use its formation side
-			const int fx = ox + static_cast<int>(std::lround(rx + heading.hx * 5.0)), fy = oy + static_cast<int>(std::lround(ry + heading.hy * 5.0));
-			Mv(merc, " follow: you head (%.2f,%.2f), runs to (%d,%d)", heading.hx, heading.hy, fx, fy);
-			DeleteEvent(game, merc, 2, 0);
-			if (Go(game, merc, nullptr, fx, fy, true)) {
-				state.spotX = fx, state.spotY = fy, state.moving = true;
-				return true;
-			}
+		Mv(merc, " follow: you head (%.2f,%.2f), runs to its lane spot (%d,%d)", heading.hx, heading.hy, x, y);
+		DeleteEvent(game, merc, 2, 0);
+		if (Go(game, merc, nullptr, x, y, true)) {
+			state.spotX = x, state.spotY = y, state.moving = true;
+			return true;
 		}
 	}
 	// Ranged mercenaries accept a place slightly off their spot, as long as
@@ -925,7 +918,7 @@ bool Reposition(void* game, void* merc, void* owner, const Scan& scan, Role role
 // you, where you can see what you fight, rather than look for a shot.
 bool StepToOwner(void* game, void* merc, void* owner, Role role) noexcept {
 	int ox = 0, oy = 0, mx = 0, my = 0;
-	if (!Position(owner, ox, oy) || !Position(merc, mx, my) || Cheb(mx, my, ox, oy) <= 2) return false;
+	if (!Position(owner, ox, oy) || !Position(merc, mx, my) || Cheb(mx, my, ox, oy) <= 3) return false;
 	DeleteEvent(game, merc, 2, 0);
 	if (!Go(game, merc, nullptr, ox + (mx > ox ? 1 : mx < ox ? -1 : 0), oy + (my > oy ? 1 : my < oy ? -1 : 0), true)) return false;
 	Note(merc, role, nullptr, -7, "no clear shot, steps next to you");
