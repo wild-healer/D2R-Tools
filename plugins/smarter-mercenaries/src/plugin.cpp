@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.9";
+constexpr const char* PluginVersion = "0.0.10";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -729,8 +729,11 @@ void Spot(OwnerState& state, void* owner, const MercState& merc, int& x, int& y)
 		else state.fx = mx / length, state.fy = my / length; // turned right around
 		state.lastX = ox, state.lastY = oy;
 	}
-	static constexpr int Side[] = { 0, -3, 3, -5, 5, -7, 7, 0 };
-	const double depth = merc.front ? 3.0 : -4.0;
+	static constexpr int Side[] = { 0, -4, 4, -8, 8, -11, 11, 0 }; // room to pass each other
+	// While you run the spot is a few steps ahead of where you are, so it
+	// keeps running with you instead of stopping and starting each time.
+	const double lead  = Field<std::uint32_t>(owner, UnitModeOffset) == PlayerRun ? 3.0 : 0.0;
+	const double depth = (merc.front ? 3.0 : -4.0) + lead;
 	const double side  = Side[merc.slot & 7];
 	x = ox + static_cast<int>(std::lround(state.fx * depth - state.fy * side));
 	y = oy + static_cast<int>(std::lround(state.fy * depth + state.fx * side));
@@ -767,18 +770,13 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	// it is still close to you, instead of hunting for the exact spot.
 	const int tolerance = state.front ? 1 : 3;
 	if (loose <= 0 && away <= tolerance && (state.front || Cheb(mx, my, ox, oy) <= 7)) {
+		if (running && walking) return true; // keep the run going, the spot moves on
 		state.moving = false;
-		return false;
+		if (!running) return false;
 	}
 	// On its way: keep the run going in a straight line instead of
 	// re-planning every time the spot shifts a little.
 	if (walking && state.moving && Cheb(state.spotX, state.spotY, x, y) <= (running ? 5 : 3)) return true;
-	// While you run, aim a little past the spot so it runs through in one go.
-	if (running && away > 3) {
-		const int dx = x - mx, dy = y - my;
-		const double length = std::sqrt(double(dx) * dx + double(dy) * dy);
-		x += static_cast<int>(std::lround(dx / length * 2.0)), y += static_cast<int>(std::lround(dy / length * 2.0));
-	}
 	DeleteEvent(game, merc, 2, 0);
 	// Runs like you: whenever you run, or when it is more than a couple of steps off.
 	const bool run = running || away > 3;
