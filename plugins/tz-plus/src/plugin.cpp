@@ -56,7 +56,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.5";
+constexpr const char* PluginVersion = "0.0.6";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -580,18 +580,27 @@ void* ClientUnitOf(const std::uint8_t* client) noexcept {
 }
 
 // level < 0: every player. Else only the players in that level.
+int RewardLogs = 0; // reward diagnostics, per game
+
 int GiveRewards(std::uint8_t* game, const GameMods& g, bool on, int level = -1) noexcept {
 	int players = 0, given = 0;
 	for (auto* client = Field<std::uint8_t*>(game, GameClients); client && players < 64; client = Field<std::uint8_t*>(client, ClientNext), ++players) {
 		void* unit = ClientUnitOf(client);
+		if (RewardLogs < 12)
+			++RewardLogs, Log(false, "rewards: client %p (state %u, flags 0x%X) -> player %p", client, Field<std::uint32_t>(client, 4),
+			                  Field<std::uint32_t>(client, ClientFlags), unit);
 		if (!unit) continue;
 		if (level >= 0) {
 			void* room = At<UnitRoomFn>(0x34B440)(unit);
 			if (!room || At<RoomLevelFn>(0x2EFC10)(room) != level) continue;
 		}
 		const std::int32_t gold = on ? g.gold : 0, magic = on ? g.magic : 0;
-		if (GetStat(unit, StatGoldFind) != gold) SetStat(unit, StatGoldFind, gold);
-		if (GetStat(unit, StatMagicFind) != magic) SetStat(unit, StatMagicFind, magic);
+		const std::int32_t gold0 = GetStat(unit, StatGoldFind), magic0 = GetStat(unit, StatMagicFind);
+		if (gold0 != gold) SetStat(unit, StatGoldFind, gold);
+		if (magic0 != magic) SetStat(unit, StatMagicFind, magic);
+		if ((gold0 != gold || magic0 != magic) && RewardLogs < 24)
+			++RewardLogs, Log(false, "rewards on server player %p: gold find %d -> %d, magic find %d -> %d", unit, gold0, GetStat(unit, StatGoldFind), magic0,
+			                  GetStat(unit, StatMagicFind));
 		++given;
 	}
 	return given;
@@ -625,7 +634,8 @@ std::uint64_t HookApply(std::uint8_t* game, std::uint8_t* zone, std::uint8_t fla
 	Applying.thread.store(0);
 	// Hell: every level counts. Nightmare: set as the players reach a level (see AddMods).
 	// At game creation the player may not be in yet: AddMods gives them again.
-	GiveRewards(game, *g, difficulty == 2);
+	const int players = GiveRewards(game, *g, difficulty == 2);
+	if (RewardLogs < 24) ++RewardLogs, Log(false, "rewards at zone change: %d player(s) found", players);
 	return result;
 }
 
@@ -1041,7 +1051,8 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 		InGame = false, CurrentLevel = -1;
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
 		Games.clear();
-		Last = nullptr;
+		Last       = nullptr;
+		RewardLogs = 0;
 		ReleaseSRWLockExclusive(&Lock);
 		break;
 	}
@@ -1094,8 +1105,13 @@ void ShowRewards(int level) noexcept {
 	ReleaseSRWLockShared(&Lock);
 	if (!difficulty) return;
 	const bool on = difficulty == 2 || (level > 0 && At<InZoneListFn>(InZoneListRva)(level));
-	if (GetStat(player, StatGoldFind) != (on ? gold : 0)) SetStat(player, StatGoldFind, on ? gold : 0);
-	if (GetStat(player, StatMagicFind) != (on ? magic : 0)) SetStat(player, StatMagicFind, on ? magic : 0);
+	const std::int32_t gold0 = GetStat(player, StatGoldFind), magic0 = GetStat(player, StatMagicFind);
+	if (gold0 != (on ? gold : 0)) SetStat(player, StatGoldFind, on ? gold : 0);
+	if (magic0 != (on ? magic : 0)) SetStat(player, StatMagicFind, on ? magic : 0);
+	static int logs = 0;
+	if ((gold0 != (on ? gold : 0) || magic0 != (on ? magic : 0)) && logs < 12)
+		++logs, Log(false, "rewards on client player %p (index %d, level %d): gold find %d -> %d, magic find %d -> %d", player, index, level, gold0,
+		            GetStat(player, StatGoldFind), magic0, GetStat(player, StatMagicFind));
 }
 
 void* HookMapLine(void* text, char c) noexcept {
