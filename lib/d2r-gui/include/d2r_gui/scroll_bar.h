@@ -46,6 +46,9 @@ public:
 		return out;
 	}
 
+	// The view shown has no bar (nothing to drag).
+	void Clear() { max_ = 0; }
+
 	// The furthest the content scrolls (from the last Layout).
 	int Max() const { return max_; }
 

@@ -21,3 +21,4 @@
 #include "d2r_gui/font.h"
 #include "d2r_gui/widgets.h"
 #include "d2r_gui/left_panel.h"
+#include "d2r_gui/character_window.h"

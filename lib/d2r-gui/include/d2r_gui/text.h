@@ -101,15 +101,16 @@ inline std::wstring Wide(const std::string& text) {
 }
 
 // What fits in a box `width` units wide at `charWidth` units a character:
-// the start of a long text, or its end while typing (where the caret is).
-inline std::string Fit(const std::string& text, int width, bool end, int charWidth = 17) {
+// the start of a long text, or its end while typing (where the caret is),
+// cut with `ellipsis`.
+inline std::string Fit(const std::string& text, int width, bool end, int charWidth = 17, const char* ellipsis = "\u2026") {
 	std::vector<std::size_t> starts; // each character's first byte
 	for (std::size_t i = 0; i < text.size(); ++i)
 		if ((static_cast<unsigned char>(text[i]) & 0xC0) != 0x80) starts.push_back(i);
 	const std::size_t room = static_cast<std::size_t>(std::max(4, width / std::max(1, charWidth)));
 	if (starts.size() <= room) return text;
-	if (end) return "..." + text.substr(starts[starts.size() - room + 1]);
-	return text.substr(0, starts[room - 1]) + "...";
+	if (end) return ellipsis + text.substr(starts[starts.size() - room + 1]);
+	return text.substr(0, starts[room - 1]) + ellipsis;
 }
 
 } // namespace D2RGui

@@ -38,6 +38,8 @@ inline constexpr const char* Warn =
 inline constexpr const char* Comment =
     R"({"fontColor": "$FontColorWhite", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "top"}, "options": {"lineWrap": true, "newlineHandling": "standard"}})";
 inline constexpr const char* SmallLeft = R"({"fontColor": "$FontColorLightGold", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}})";
+inline constexpr const char* LabelOneLine =
+    R"({"fontColor": "$FontColorLightGold", "pointSize": "$MediumFontSize", "spacing": "$ReducedSpacing", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}})";
 inline constexpr const char* SmallRight = R"({"fontColor": "$FontColorLightGold", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "right", "v": "center"}})";
 } // namespace Style
 

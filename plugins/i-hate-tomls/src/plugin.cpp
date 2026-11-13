@@ -28,7 +28,7 @@
 // console command "pluginmenu".
 
 #include "../include/i_hate_tomls_client.h"
-#include "gear.inc"
+#include <d2r_gui.h>
 #include "toml_edit.h"
 #include <D2RLPlugin/api.h>
 #include <windows.h>
@@ -51,7 +51,7 @@
 namespace {
 
 constexpr const char* PluginId      = "i-hate-tomls";
-constexpr const char* PluginVersion = "1.1.1";
+constexpr const char* PluginVersion = "1.1.1-dev-1";
 constexpr const char* CommandPrefix = "i-hate-tomls/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -74,13 +74,8 @@ const D2RL::SharedEventService* EventApi {};
 
 // ---- window geometry (the character screen's, HD layout units) ----
 
-constexpr int PanelX = 236, PanelY = -651, PanelWidth = 1162, PanelHeight = 1507;
-// Parts of the background covered with its own stone (measured on the
-// 1162x1507 Character_Background): the area of the stat boxes, below the
-// header box and above the bottom strip, and the experience bar in the header.
-constexpr int CoverX = 70, CoverY = 306, CoverWidth = 1022, CoverHeight = 1040;
-constexpr int PatchX = 80, PatchY = 465, PatchWidth = 420, PatchHeight = 165; // plain stone between two stat boxes
-constexpr int BarX = 120, BarY = 208, BarWidth = 928, BarHeight = 44;         // the experience bar
+namespace Gui = D2RGui;
+constexpr int PanelX = Gui::CharacterWindow::X, PanelY = Gui::CharacterWindow::Y, PanelWidth = Gui::CharacterWindow::Width, PanelHeight = Gui::CharacterWindow::Height;
 constexpr int ContentLeft = 105, ContentRight = 1044;       // the scroll bar is right of the content
 constexpr int HeaderY = 165;  // plugin name and its back arrow, in the header box
 constexpr int RowsTop = 318;  // first row
@@ -99,21 +94,13 @@ constexpr int ListTop = SearchY + BoxHeight + 18;      // the plugin list's firs
 constexpr int TextBoxWidth = ContentRight - TomlControl;   // a value's text box
 constexpr int ItemBoxWidth = TextBoxWidth - 70;            // a list item's, beside its remove button
 constexpr int FieldHeight = 76, ItemHeight = 66;
-// Text metrics, set from the game's font at load (Font::Measure): comment
-// line height and characters per line, a key's width per character and the
-// height of a key stacked on its own line. The defaults fit the game's own
-// font (a wide small caps font, about 17 px a character); a font mod with
-// taller or wider letters raises them, never lowers them.
+// Text metrics, set from the game's font (RefreshText): comment line height
+// and characters per line, a key's width per character and the height of a
+// key stacked on its own line. The defaults fit the game's own font (a wide
+// small caps font, about 17 px a character); a font mod with taller or wider
+// letters raises them, never lowers them.
 int NoteLine = 34, NoteChars = 50;
-int LabelChar = 20, LabelLine = 50;
-// The Latin font's advance of each printable ASCII character, in ems (0 when
-// not measured), and the layout units an em of Small and Medium text spans.
-double Advance[95] {};
-double AdvanceMean {};
-double SmallEm = 30.45, MediumEm = 33.9;
-namespace Font {
-void Refresh();
-}
+int LabelLine = 50; // (without the font, a character is taken as 20 units: D2R GUI Font::fallbackChar)
 constexpr int WheelStep = 120;                         // pixels per wheel notch
 constexpr int DropWidth = ContentRight - ControlLeft, TileHeight = 52; // a choice's drop-down box and its list's lines
 constexpr int ArrowSize = 56;                          // the up/down arrows of a position's X and Y
@@ -124,8 +111,9 @@ constexpr int GearSize = 64;                           // the square button that
 constexpr int CharWidth = 17;                          // a text box's characters (estimate)
 // The scroll bar, on the cover's right edge: a track cut into steps of
 // StepHeight, each an invisible button scrolling to its share of the rows.
-constexpr int BarLeft = 1054, ScrollWidth = 30, StepHeight = 30, MaxSteps = ViewHeight / StepHeight;
+constexpr int BarLeft = 1054, ScrollWidth = 30, StepHeight = 30;
 constexpr int PoolSize = 60;     // panels registered at load (64 allowed)
+
 
 // ---- log ----
 
@@ -152,80 +140,8 @@ void Say(const char* format, ...) noexcept {
 
 // ---- text helpers ----
 
-std::string Json(std::string_view text) {
-	std::string out = "\"";
-	for (const char c : text) {
-		if (c == '"' || c == '\\') out += '\\';
-		if (c == '\n') out += "\\n";
-		else if (c == '\t') out += ' ';
-		else if (static_cast<unsigned char>(c) >= 0x20) out += c;
-	}
-	return out + '"';
-}
-
-// Text for the game's font. A character the font lacks (box drawing,
-// arrows, curly quotes) makes the game draw the whole text box in another,
-// much bigger font, which runs over the rows below and is slow to draw, so
-// those are written with plain characters. A rule of box lines
-// ("── Title ────") keeps only its title.
-std::string GameText(std::string_view text) {
-	std::string out;
-	out.reserve(text.size());
-	bool rule = false; // box lines skipped since the last plain character
-	for (std::size_t i = 0; i < text.size();) {
-		const auto     c = static_cast<unsigned char>(text[i]);
-		char32_t       u = c;
-		std::size_t    n = 1;
-		if (c >= 0xF0 && i + 3 < text.size()) u = ((c & 7u) << 18) | ((text[i + 1] & 0x3Fu) << 12) | ((text[i + 2] & 0x3Fu) << 6) | (text[i + 3] & 0x3Fu), n = 4;
-		else if (c >= 0xE0 && i + 2 < text.size()) u = ((c & 0xFu) << 12) | ((text[i + 1] & 0x3Fu) << 6) | (text[i + 2] & 0x3Fu), n = 3;
-		else if (c >= 0xC0 && i + 1 < text.size()) u = ((c & 0x1Fu) << 6) | (text[i + 1] & 0x3Fu), n = 2;
-		const std::string_view raw = text.substr(i, n);
-		i += n;
-		if (u == '\r') continue;
-		if (u >= 0x2500 && u <= 0x259F) { // box drawing and blocks
-			if (u == 0x2502 || u == 0x2503 || u == 0x2551) out += '|';
-			else rule = true;
-			continue;
-		}
-		if (rule) {
-			rule = false;
-			if (u != '\n' && u != ' ' && !out.empty() && out.back() != ' ' && out.back() != '\n') out += ' ';
-		}
-		switch (u) {
-		case 0x00A0: case 0x2002: case 0x2003: case 0x2009: case 0x202F: out += ' '; break;
-		case 0x2010: case 0x2011: case 0x2012: case 0x2013: case 0x2014: case 0x2015: case 0x2212: out += '-'; break;
-		case 0x2018: case 0x2019: case 0x201A: case 0x2032: out += '\''; break;
-		case 0x201C: case 0x201D: case 0x201E: case 0x2033: out += '"'; break;
-		case 0x2026: out += "..."; break;
-		case 0x2022: case 0x2023: case 0x25CF: case 0x2043: out += '*'; break;
-		case 0x2190: case 0x21D0: out += "<-"; break;
-		case 0x2192: case 0x21D2: case 0x279C: case 0x27A4: out += "->"; break;
-		case 0x2194: case 0x21D4: out += "<->"; break;
-		case 0x2191: out += '^'; break;
-		case 0x2193: out += 'v'; break;
-		case 0x2264: out += "<="; break;
-		case 0x2265: out += ">="; break;
-		case 0x2260: out += "!="; break;
-		case 0x2248: out += '~'; break;
-		case 0x2713: case 0x2714: out += "yes"; break;
-		case 0x2717: case 0x2718: out += "no"; break;
-		default:
-			if (u >= 0x2000 && u < 0x3000) out += '?'; // other symbols
-			else if (u >= 0x1F000) out += '?';        // emoji
-			else out += raw;
-		}
-	}
-	// spaces left at line ends by removed rules
-	std::string clean;
-	clean.reserve(out.size());
-	for (const char c : out) {
-		if (c == '\n')
-			while (!clean.empty() && clean.back() == ' ') clean.pop_back();
-		clean += c;
-	}
-	while (!clean.empty() && clean.back() == ' ') clean.pop_back();
-	return clean;
-}
+using Gui::Json;
+using Gui::GameText;
 
 std::string Trim(std::string_view text) {
 	std::size_t start = 0, end = text.size();
@@ -1084,10 +1000,14 @@ void Try() {
 void __cdecl OnPlayerReady(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent*, void*) noexcept {
 	PlayerReady = true;
 	InGame      = true;
+	D2RGui::LeftPanel::InGame(true);
 	Try();
 }
 
-void __cdecl OnGameLeft(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent*, void*) noexcept { InGame = false; }
+void __cdecl OnGameLeft(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent*, void*) noexcept {
+	InGame = false;
+	D2RGui::LeftPanel::InGame(false);
+}
 } // namespace Chat
 
 int Chat::UpdateCount() {
@@ -1118,20 +1038,16 @@ void SetNotice(std::string text, bool warn = false) {
 
 void ShowView();
 bool MenuOpen();
-void CloseLeftPanels();
 
 // Typing: the game's own text boxes don't get the keys in a plugin's panel
 // (they go to the game's key bindings), so, as Grail On! does, a keyboard
 // hook takes them while a box is active (see "typing" below). The box being
 // typed in: "search", "f<field>" (a TOML value), "i<field>.<item>" (a TOML
 // list item) or "s<setting>" (a joined plugin's text).
-std::atomic<bool> Typing {};
 std::string       TypingKey;    // UI thread
 std::string       TypingBefore; // its text when typing began (Esc puts it back)
 std::string       ClientDraft;  // a joined plugin's text being typed
 
-// The scroll bar of the view shown, for the mouse (read on the window's thread).
-std::atomic<int> BarTop {}, BarSteps {}, BarMax {};
 std::atomic<bool> MenuVisible {}; // the menu is open, as last seen on the UI thread
 void              WatchMouse();
 
@@ -1250,10 +1166,6 @@ void __cdecl UnregisterClient(uint64_t handle) noexcept {
 
 void __cdecl ValueChanged(uint64_t, const char*) noexcept { QueueRefresh(); }
 
-namespace Camera {
-void Hold();
-} // namespace Camera
-
 void __cdecl OpenFor(uint64_t handle) noexcept {
 	for (std::size_t i = 0; i < Clients.size(); ++i)
 		if (Clients[i].handle == handle) Shown = static_cast<int>(i), ClientScroll = 0, Current = View::Client;
@@ -1261,9 +1173,8 @@ void __cdecl OpenFor(uint64_t handle) noexcept {
 		(void)Threads->runOnUiThread(
 		    Context,
 		    [](const D2RL::PluginContext*, void*) noexcept {
-			    if (!MenuOpen()) CloseLeftPanels();
+			    if (!MenuOpen()) WatchMouse(), D2RGui::LeftPanel::Opening();
 			    ShowView();
-			    Camera::Hold();
 		    },
 		    nullptr);
 }
@@ -1381,71 +1292,21 @@ struct TomlPage {
 
 TomlPage Toml;
 
-// A character's advance in ems: printable ASCII from the font, anything else
-// (one count per UTF-8 character) at the font's mean.
-double Ems(std::string_view text) {
-	double sum = 0;
-	for (const char c : text) {
-		const auto u = static_cast<unsigned char>(c);
-		if ((u & 0xC0) == 0x80) continue;
-		sum += u >= 32 && u < 127 ? Advance[u - 32] : AdvanceMean;
-	}
-	return sum;
+// A text's width in layout units, Medium (labels, values) or Small (the game's font, see D2R GUI).
+int TextWidth(std::string_view text, bool medium = true) { return Gui::Font::TextWidth(text, medium); }
+
+// Lines comment text takes in the comment box.
+int Lines(const std::string& text) { return Gui::Font::WrappedLines(text, ContentRight - ContentLeft, NoteChars); }
+
+// Sizes text for the profile in use (Low Vision Mode may have changed).
+void RefreshText() {
+	Gui::Font::Refresh();
+	if (!Gui::Font::Measured()) return;
+	NoteLine  = std::max(34, Gui::Font::LineHeight(false) + 1);
+	LabelLine = std::max(50, Gui::Font::LineHeight(true) + 8);
 }
 
-// Text's width in layout units, Medium (labels, values) or Small.
-int TextWidth(std::string_view text, bool medium = true) {
-	if (AdvanceMean <= 0) {
-		int chars = 0;
-		for (const char c : text)
-			if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) ++chars;
-		return chars * LabelChar;
-	}
-	return static_cast<int>(std::ceil(Ems(text) * (medium ? MediumEm : SmallEm)));
-}
 
-// Lines comment text takes in the comment box: word wrapped with the font's
-// own widths when it was measured, else from a count of characters.
-int Lines(const std::string& text) {
-	constexpr int Box   = ContentRight - ContentLeft;
-	int           lines = 0;
-	std::size_t   start = 0;
-	while (start <= text.size()) {
-		const auto        end  = text.find('\n', start);
-		const std::string line = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-		if (AdvanceMean > 0) {
-			const double room  = Box / SmallEm;
-			const double space = Advance[0];
-			double       used  = 0;
-			int          count = 1;
-			std::size_t  at    = 0;
-			while (at < line.size()) {
-				const auto        stop = line.find(' ', at);
-				const std::string word = line.substr(at, stop == std::string::npos ? std::string::npos : stop - at);
-				double            w    = Ems(word);
-				if (used > 0 && used + space + w > room) ++count, used = 0;
-				else if (used > 0) used += space;
-				while (w > room) ++count, w -= room; // a word longer than a line is cut
-				used += w;
-				if (stop == std::string::npos) break;
-				at = stop + 1;
-			}
-			lines += count;
-		} else {
-			int chars = 0;
-			for (const char c : line)
-				if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) ++chars;
-			lines += std::max(1, (chars + NoteChars - 1) / NoteChars);
-		}
-		if (end == std::string::npos) break;
-		start = end + 1;
-	}
-	return lines;
-}
-
-// A comment line that only continues the one before it: that one is long and
-// does not end a sentence, and this one starts with plain text, not a list
-// mark or indentation.
 bool JoinsPrevious(const std::string& previous, const std::string& line) {
 	if (previous.size() < 50 || line.empty()) return false;
 	const char last = previous.back(), first = line.front();
@@ -1570,684 +1431,55 @@ void ApplyToml() {
 	SetNotice("Saved " + std::to_string(changed) + (changed == 1 ? " change" : " changes") + ". Restart the game to apply.");
 }
 
-// ---- game art (read on the game thread, made into sprites on the UI thread) ----
-// The game's art comes from its files through D2RCore's archive open (export
-// 160) and the game's file calls; the calls' first bytes are checked first, as
-// Grail On! does.
+// ---- layout (D2R GUI pieces) ----
 
-namespace FileApi {
-constexpr std::uint16_t OpenOrdinal = 160;
-constexpr std::uint64_t Size = 0xA00050, Read = 0xA00EC0, Close = 0x9FFE50;
-constexpr std::uint8_t  SizeBytes[] { 0x48, 0x8B, 0x01, 0x48, 0xFF, 0x60, 0x30 };
-constexpr std::uint8_t  ReadBytes[] { 0x4C, 0x89, 0x44, 0x24, 0x18, 0x48, 0x89, 0x54, 0x24, 0x10 };
-constexpr std::uint8_t  CloseBytes[] { 0xE9 };
-} // namespace FileApi
+using Gui::Text;
+using Gui::HitButton;
+using Gui::Check;
 
-using FileOpenFn  = void* (*)(const char* path) noexcept;
-using FileSizeFn  = std::uint64_t (*)(void* file) noexcept;
-using FileReadFn  = bool (*)(void* file, void* buffer, std::uint64_t size, std::uint64_t* read) noexcept;
-using FileCloseFn = void (*)(void* file) noexcept;
-
-std::string ArchiveFile(const char* path, std::string& trouble) {
-	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
-	const auto same = [&](std::uint64_t rva, const std::uint8_t* bytes, std::size_t count) { return std::memcmp(reinterpret_cast<const void*>(base + rva), bytes, count) == 0; };
-	HMODULE    core = GetModuleHandleW(L"D2RCore.dll");
-	if (!base || !core || !same(FileApi::Size, FileApi::SizeBytes, sizeof(FileApi::SizeBytes)) || !same(FileApi::Read, FileApi::ReadBytes, sizeof(FileApi::ReadBytes))
-	    || !same(FileApi::Close, FileApi::CloseBytes, sizeof(FileApi::CloseBytes))) {
-		trouble = "the game's file calls are not where this build expects them";
-		return {};
-	}
-	const auto open = reinterpret_cast<FileOpenFn>(reinterpret_cast<void*>(GetProcAddress(core, MAKEINTRESOURCEA(FileApi::OpenOrdinal))));
-	if (!open) {
-		trouble = "D2RCore's archive open is missing";
-		return {};
-	}
-	void* file = open(path);
-	if (!file) {
-		trouble = "the game's files do not have it";
-		return {};
-	}
-	std::string         bytes;
-	const std::uint64_t size = reinterpret_cast<FileSizeFn>(base + FileApi::Size)(file);
-	if (size > 0 && size < (64u << 20)) {
-		bytes.resize(size);
-		std::uint64_t read = 0;
-		if (!reinterpret_cast<FileReadFn>(base + FileApi::Read)(file, bytes.data(), size, &read) || read != size) bytes.clear();
-	}
-	reinterpret_cast<FileCloseFn>(base + FileApi::Close)(file);
-	if (bytes.empty()) trouble = "reading it failed";
-	return bytes;
-}
-
-struct Picture {
-	int                        width {}, height {};
-	std::vector<unsigned char> rgba;
-	unsigned char*             at(int x, int y) { return rgba.data() + (static_cast<std::size_t>(y) * width + x) * 4; }
-	const unsigned char*       at(int x, int y) const { return rgba.data() + (static_cast<std::size_t>(y) * width + x) * 4; }
-};
-
-Picture Blank(int width, int height) { return { width, height, std::vector<unsigned char>(static_cast<std::size_t>(width) * height * 4) }; }
-
-// The frames of a game sprite (SpA1 version 31, RGBA, frames side by side).
-std::vector<Picture> Frames(const std::string& file, std::string& trouble) {
-	if (file.size() < 0x28 || file.compare(0, 4, "SpA1")) {
-		trouble = "not a sprite";
-		return {};
-	}
-	const auto    u32 = [&](std::size_t at) { std::uint32_t v; std::memcpy(&v, file.data() + at, 4); return v; };
-	std::uint16_t version = 0, frameWidth = 0;
-	std::memcpy(&version, file.data() + 4, 2), std::memcpy(&frameWidth, file.data() + 6, 2);
-	const std::uint32_t width = u32(8), height = u32(12), count = std::max<std::uint32_t>(1, u32(20));
-	char what[160] {};
-	std::snprintf(what, sizeof(what), "version %u, frame %ux%u, sheet %ux%u, %u frames, %zu bytes", version, frameWidth, height, width, height, count, file.size());
-	trouble = what;
-	if (version != 31 || !frameWidth || !height || width < frameWidth || width > 8192 || height > 4096 || file.size() < 0x28 + static_cast<std::size_t>(width) * height * 4) return {};
-	std::vector<Picture> frames;
-	for (std::uint32_t f = 0; f < count && (f + 1) * frameWidth <= width; ++f) {
-		Picture frame = Blank(frameWidth, static_cast<int>(height));
-		for (std::uint32_t y = 0; y < height; ++y)
-			std::memcpy(frame.at(0, static_cast<int>(y)), file.data() + 0x28 + (static_cast<std::size_t>(y) * width + f * frameWidth) * 4, static_cast<std::size_t>(frameWidth) * 4);
-		frames.push_back(std::move(frame));
-	}
-	return frames;
-}
-
-Picture FirstFrame(const std::string& file, std::string& trouble) {
-	auto frames = Frames(file, trouble);
-	return frames.empty() ? Picture {} : std::move(frames.front());
-}
-
-double Noise(std::uint32_t x, std::uint32_t y, std::uint32_t seed) {
-	std::uint32_t h = x * 374761393u + y * 668265263u + seed * 2246822519u;
-	h               = (h ^ (h >> 13)) * 1274126177u;
-	return ((h ^ (h >> 16)) & 0xFF) / 255.0;
-}
-
-// The fine grain of the game's dark stone: single pixels and 3x3 blotches.
-Picture Stone(int width, int height, const int color[3], int grain, std::uint32_t seed) {
-	Picture out = Blank(width, height);
-	for (int y = 0; y < height; ++y)
-		for (int x = 0; x < width; ++x) {
-			const double n = 0.6 * Noise(x, y, seed) + 0.4 * Noise(x / 3, y / 3, seed + 1) - 0.5;
-			auto*        p = out.at(x, y);
-			for (int c = 0; c < 3; ++c) p[c] = static_cast<unsigned char>(std::clamp(static_cast<int>(color[c] + n * grain), 0, 255));
-			p[3] = 255;
-		}
-	return out;
-}
-
-// Bilinear scaling.
-Picture Resize(const Picture& in, int width, int height) {
-	Picture out = Blank(std::max(1, width), std::max(1, height));
-	if (!in.width || !in.height) return out;
-	for (int y = 0; y < out.height; ++y)
-		for (int x = 0; x < out.width; ++x) {
-			const double sx = std::clamp((x + 0.5) * in.width / out.width - 0.5, 0.0, in.width - 1.0), sy = std::clamp((y + 0.5) * in.height / out.height - 0.5, 0.0, in.height - 1.0);
-			const int    x0 = static_cast<int>(sx), y0 = static_cast<int>(sy), x1 = std::min(x0 + 1, in.width - 1), y1 = std::min(y0 + 1, in.height - 1);
-			const double fx = sx - x0, fy = sy - y0;
-			for (int k = 0; k < 4; ++k) {
-				const double top = in.at(x0, y0)[k] * (1 - fx) + in.at(x1, y0)[k] * fx, bottom = in.at(x0, y1)[k] * (1 - fx) + in.at(x1, y1)[k] * fx;
-				out.at(x, y)[k] = static_cast<unsigned char>(std::lround(top * (1 - fy) + bottom * fy));
-			}
-		}
-	return out;
-}
-
-Picture Half(const Picture& in) { return Resize(in, in.width / 2, in.height / 2); }
-
-Picture Mirror(const Picture& in) {
-	Picture out = Blank(in.width, in.height);
-	for (int y = 0; y < in.height; ++y)
-		for (int x = 0; x < in.width; ++x) std::memcpy(out.at(x, y), in.at(in.width - 1 - x, y), 4);
-	return out;
-}
-
-void Paste(Picture& onto, const Picture& piece, int left, int top, int sourceLeft = 0, int width = -1) {
-	if (width < 0) width = piece.width - sourceLeft;
-	for (int y = 0; y < piece.height && top + y < onto.height; ++y)
-		for (int x = 0; x < width && left + x < onto.width; ++x)
-			if (left + x >= 0 && top + y >= 0) std::memcpy(onto.at(left + x, top + y), piece.at(sourceLeft + x, y), 4);
-}
-
-// A box of any width from the game's: its ends kept, its middle tiled. The
-// right end is the left end's mirror when none is given.
-Picture Join(const Picture& leftEnd, const Picture& middle, const Picture& rightEnd, int width, int height) {
-	const auto scale = [&](const Picture& p) { return p.width ? Resize(p, std::max(1, p.width * height / std::max(1, p.height)), height) : Picture {}; };
-	const Picture left = scale(leftEnd), right = rightEnd.width ? scale(rightEnd) : Mirror(left), mid = scale(middle);
-	Picture       out = Blank(width, height);
-	if (!left.width || !mid.width) return out;
-	for (int x = left.width; x < width - right.width; x += mid.width) Paste(out, mid, x, 0, 0, std::min(mid.width, width - right.width - x));
-	Paste(out, left, 0, 0, 0, std::min(left.width, width / 2));
-	const int keep = std::min(right.width, width - width / 2);
-	Paste(out, right, width - keep, 0, right.width - keep, keep);
-	return out;
-}
-
-// A long piece of art fitted to another size: its ends kept, its middle stretched.
-Picture Stretch(const Picture& in, int width, int height, int leftKeep, int rightKeep) {
-	const Picture tall = Resize(in, in.width, height);
-	Picture       out  = Blank(width, height);
-	const int     l = std::min(leftKeep, width / 2), r = std::min(rightKeep, width - l);
-	Paste(out, tall, 0, 0, 0, l);
-	Paste(out, tall, width - r, 0, tall.width - r, r);
-	Picture middle = Blank(std::max(1, tall.width - leftKeep - rightKeep), height);
-	Paste(middle, tall, 0, 0, leftKeep, middle.width);
-	Paste(out, Resize(middle, std::max(1, width - l - r), height), l, 0);
-	return out;
-}
-
-std::string SpriteFile(const std::vector<Picture>& frames) {
-	const int   width = frames.front().width, height = frames.front().height, count = static_cast<int>(frames.size());
-	std::string out(40, '\0');
-	const auto  put = [&](std::size_t at, std::uint32_t value, int bytes) {
-        for (int i = 0; i < bytes; ++i) out[at + i] = static_cast<char>((value >> (8 * i)) & 0xFF);
-	};
-	std::memcpy(out.data(), "SpA1", 4);
-	put(4, 31, 2);
-	put(6, static_cast<std::uint32_t>(width), 2);
-	put(8, static_cast<std::uint32_t>(width * count), 4);
-	put(12, static_cast<std::uint32_t>(height), 4);
-	put(20, static_cast<std::uint32_t>(count), 4);
-	for (int y = 0; y < height; ++y)
-		for (const auto& frame : frames) out.append(reinterpret_cast<const char*>(frame.at(0, y)), static_cast<std::size_t>(width) * 4);
-	return out;
-}
-
-bool RegisterResource(const std::string& path, const std::string& bytes) {
-	static std::vector<std::string> kept;
-	kept.push_back(bytes);
-	const D2RL::Resources::ResourceRegistration resource {
-		.structSize = D2RL::Resources::ResourceRegistrationSize,
-		.path       = path.c_str(),
-		.bytes      = kept.back().data(),
-		.byteCount  = kept.back().size(),
-	};
-	D2RL::Resources::RegistrationHandle handle = D2RL::Resources::InvalidHandle;
-	return ResourceApi->registerResource(Context, &resource, &handle) == D2RL::Resources::Result::Success;
-}
-
-bool RegisterSprite(const std::string& name, const std::vector<Picture>& frames) {
-	if (frames.empty() || !frames.front().width) return false;
-	std::vector<Picture> half;
-	for (const auto& f : frames) half.push_back(Half(f));
-	const std::string path = "data/hd/global/ui/d2rloader/i-hate-tomls/" + name;
-	return RegisterResource(path + ".sprite", SpriteFile(frames)) && RegisterResource(path + ".lowend.sprite", SpriteFile(half));
-}
-
-// The lobby's refresh button: its sprite file and frames.
-struct NativeButton {
-	std::string file;
-	int         normal {}, hovered {}, pressed {};
-};
-NativeButton RefreshArt;
-
-// Read on the game thread.
-enum { ArtBackground, ArtRow, ArtBoxLeft, ArtBoxCenter, ArtClose, ArtBoxRight, ArtTileLeft, ArtTileCenter, ArtTileRight, ArtUp, ArtDown, ArtCount };
-constexpr const char* ArtPaths[ArtCount] {
-	"data/hd/global/ui/panel/character_sheet/character_background.sprite",
-	"data/hd/global/ui/panel/loot_filter/slot_large_list.sprite",
-	"data/hd/global/ui/panel/dropdownbutton_left.sprite",
-	"data/hd/global/ui/panel/dropdownbutton_center.sprite",
-	"data/hd/global/ui/panel/closebtn_4x.sprite",
-	"data/hd/global/ui/panel/dropdownbutton_right.sprite",
-	"data/hd/global/ui/panel/dropdowntile_left.sprite",
-	"data/hd/global/ui/panel/dropdowntile_center.sprite",
-	"data/hd/global/ui/panel/dropdowntile_right.sprite",
-	"data/hd/global/ui/panel/loot_filter/slot_large_list_btn_1.sprite",
-	"data/hd/global/ui/panel/loot_filter/slot_large_list_btn_2.sprite",
-};
-std::string ArtFiles[ArtCount];
-bool        CoverReady {}, LineReady {}, BarReady {}, RowReady {}, BoxReady {}, ButtonReady {}, RemoveReady {}, IconsReady {}, GearReady {}, ScrollReady {}, BlankReady {}, DropReady {}, ArrowsReady {}, ResetReady {};
-
-// The cover: the stone between two stat boxes, mirrored over the whole box
-// area so no seam shows. Without the background, plain grained stone.
-Picture MakeCover(const Picture& background) {
-	if (background.width < CoverX + CoverWidth || background.height < CoverY + CoverHeight) {
-		const int color[3] { 14, 15, 16 };
-		return Stone(CoverWidth, CoverHeight, color, 12, 11);
-	}
-	Picture    out    = Blank(CoverWidth, CoverHeight);
-	const auto mirror = [](int at, int size) {
-		const int period = 2 * size, m = at % period;
-		return m < size ? m : period - 1 - m;
-	};
-	for (int y = 0; y < CoverHeight; ++y)
-		for (int x = 0; x < CoverWidth; ++x) {
-			std::memcpy(out.at(x, y), background.at(PatchX + mirror(x, PatchWidth), PatchY + mirror(y, PatchHeight)), 4);
-			out.at(x, y)[3] = 255;
-		}
-	return out;
-}
-
-// The header box's stone over the experience bar: the rows just above it,
-// mirrored downwards.
-Picture MakeBarCover(const Picture& background) {
-	if (background.width < BarX + BarWidth || background.height < BarY + BarHeight) return {};
-	Picture out = Blank(BarWidth, BarHeight);
-	for (int y = 0; y < BarHeight; ++y)
-		for (int x = 0; x < BarWidth; ++x) {
-			std::memcpy(out.at(x, y), background.at(BarX + x, BarY - 1 - y), 4);
-			out.at(x, y)[3] = 255;
-		}
-	return out;
-}
-
-// A thin gold rule under a section title.
-Picture MakeLine() {
-	const int width = ContentRight - ContentLeft, height = 4;
-	Picture   out   = Blank(width, height);
-	for (int y = 0; y < height; ++y)
-		for (int x = 0; x < width; ++x) {
-			const double fade = std::min(1.0, std::min(x, width - 1 - x) / 80.0);
-			const int    tone[4][3] { { 60, 48, 24 }, { 150, 126, 70 }, { 120, 98, 47 }, { 40, 32, 16 } };
-			auto*        p = out.at(x, y);
-			for (int c = 0; c < 3; ++c) p[c] = static_cast<unsigned char>(tone[y][c]);
-			p[3] = static_cast<unsigned char>(255 * fade);
-		}
-	return out;
-}
-
-// A dark box with a thin gold edge, when the game's art is missing.
-Picture PlainBox(int width, int height, int edge) {
-	const int color[3] { 20, 20, 22 };
-	Picture   out = Stone(width, height, color, 10, 5);
-	for (int y = 0; y < height; ++y)
-		for (int x = 0; x < width; ++x)
-			if (x < 2 || y < 2 || x >= width - 2 || y >= height - 2) {
-				auto* p = out.at(x, y);
-				p[0] = static_cast<unsigned char>(edge), p[1] = static_cast<unsigned char>(edge * 82 / 100), p[2] = static_cast<unsigned char>(edge * 45 / 100);
-			}
-	return out;
-}
-
-// A round gem: what kind of settings a plugin has.
-Picture Gem(const int color[3]) {
-	Picture      out = Blank(IconSize, IconSize);
-	const double r = IconSize / 2.0 - 3, c = IconSize / 2.0;
-	for (int y = 0; y < IconSize; ++y)
-		for (int x = 0; x < IconSize; ++x) {
-			const double dx = x + 0.5 - c, dy = y + 0.5 - c, d = std::sqrt(dx * dx + dy * dy);
-			auto*        p = out.at(x, y);
-			if (d > r + 2.5) continue;
-			if (d > r) { // gold setting
-				const double a = std::clamp(r + 2.5 - d, 0.0, 1.0);
-				p[0] = 150, p[1] = 122, p[2] = 64, p[3] = static_cast<unsigned char>(255 * a);
-				continue;
-			}
-			// lit from the top left
-			const double light = std::clamp(1.0 - (d / r) * 0.55 + (-dx - dy) / (2.2 * r), 0.25, 1.35);
-			const double spot  = std::exp(-((dx + r * 0.35) * (dx + r * 0.35) + (dy + r * 0.35) * (dy + r * 0.35)) / (r * r * 0.05));
-			for (int k = 0; k < 3; ++k) p[k] = static_cast<unsigned char>(std::clamp(color[k] * light + 255 * 0.7 * spot, 0.0, 255.0));
-			p[3] = 255;
-		}
-	return out;
-}
-
-// An empty slot of any size: the stash slot's corners and edges stretched
-// around grained stone of its inside colour (as Grail On!'s buttons).
-Picture Slot(int width, int height) {
-	const int  s = SlotSize, c = SlotCorner;
-	const auto src = [&](int x, int y) { return SlotPixels + (static_cast<std::size_t>(y) * s + x) * 4; };
-	long       sum[3] {}, count = 0;
-	for (int y = c; y < s - c; ++y)
-		for (int x = c; x < s - c; ++x, ++count)
-			for (int k = 0; k < 3; ++k) sum[k] += src(x, y)[k];
-	const int inside[3] { static_cast<int>(sum[0] / count), static_cast<int>(sum[1] / count), static_cast<int>(sum[2] / count) };
-	Picture   out = Stone(width, height, inside, 10, 7);
-	const int cw = std::min(c, width / 2), ch = std::min(c, height / 2);
-	for (int y = 0; y < height; ++y)
-		for (int x = 0; x < width; ++x) {
-			const bool left = x < cw, right = x >= width - cw, top = y < ch, bottom = y >= height - ch;
-			if (!left && !right && !top && !bottom) continue;
-			const int sx = left ? x : right ? s - (width - x) : s / 2;
-			const int sy = top ? y : bottom ? s - (height - y) : s / 2;
-			std::memcpy(out.at(x, y), src(sx, sy), 4);
-		}
-	return out;
-}
-
-// The square gear button (Grail On!'s Config menu button): a slot, lighter
-// when hovered, darker when pressed, the cog in the game's gold.
-std::vector<Picture> GearButton(int size) {
-	Picture cog = Blank(CogSize, CogSize);
-	for (int p = 0; p < CogSize * CogSize; ++p) cog.rgba[static_cast<std::size_t>(p) * 4 + 3] = CogMask[p];
-	const int icon = size * 66 / 100, at = (size - icon) / 2;
-	cog            = Resize(cog, icon, icon);
-	std::vector<Picture> frames;
-	const int            shift[3] { 0, 22, -8 };
-	const int            gold[3][3] { { 215, 200, 150 }, { 255, 240, 190 }, { 180, 165, 120 } };
-	for (int f = 0; f < 3; ++f) {
-		Picture picture = Slot(size, size);
-		for (int y = 0; y < size; ++y)
-			for (int x = 0; x < size; ++x) {
-				auto* p = picture.at(x, y);
-				for (int k = 0; k < 3; ++k) p[k] = static_cast<unsigned char>(std::clamp(p[k] + shift[f], 0, 255));
-			}
-		for (int y = 0; y < icon; ++y)
-			for (int x = 0; x < icon; ++x) {
-				const double a = cog.at(x, y)[3] / 255.0;
-				auto*        p = picture.at(at + x, at + y);
-				for (int k = 0; k < 3; ++k) p[k] = static_cast<unsigned char>(std::lround(p[k] * (1 - a) + gold[f][k] * a));
-			}
-		frames.push_back(std::move(picture));
-	}
-	return frames;
-}
-
-// A sprite's frames cut to what they draw, scaled to fit a square (the
-// game's sheets pad their art differently).
-std::vector<Picture> Fitted(const std::vector<Picture>& frames, int size) {
-	int left = 1 << 30, top = 1 << 30, right = -1, bottom = -1;
-	for (const auto& frame : frames)
-		for (int y = 0; y < frame.height; ++y)
-			for (int x = 0; x < frame.width; ++x)
-				if (frame.at(x, y)[3] > 24) left = std::min(left, x), right = std::max(right, x), top = std::min(top, y), bottom = std::max(bottom, y);
-	std::vector<Picture> out;
-	for (const auto& frame : frames) {
-		Picture cut = frame;
-		if (right >= left && right < frame.width && bottom < frame.height) {
-			cut = Blank(right - left + 1, bottom - top + 1);
-			for (int y = 0; y < cut.height; ++y) std::memcpy(cut.at(0, y), frame.at(left, top + y), static_cast<std::size_t>(cut.width) * 4);
-		}
-		const double scale = std::min(static_cast<double>(size) / std::max(1, cut.width), static_cast<double>(size) / std::max(1, cut.height));
-		const Picture fit  = Resize(cut, std::max(1, static_cast<int>(cut.width * scale)), std::max(1, static_cast<int>(cut.height * scale)));
-		Picture       box  = Blank(size, size);
-		Paste(box, fit, (size - fit.width) / 2, (size - fit.height) / 2);
-		out.push_back(std::move(box));
-	}
-	return out;
-}
-
-// The reset button: a slot with a gold circular arrow (frames 0 normal, 1
-// hovered, 2 pressed).
-std::vector<Picture> ResetButton(int size) {
-	std::vector<Picture> frames;
-	const int            shift[3] { 0, 22, -8 };
-	const int            gold[3][3] { { 215, 200, 150 }, { 255, 240, 190 }, { 180, 165, 120 } };
-	const double         c = size / 2.0, r = size * 0.27, w = size * 0.06;
-	constexpr double     pi = 3.14159265358979;
-	for (int f = 0; f < 3; ++f) {
-		Picture picture = Slot(size, size);
-		for (int y = 0; y < size; ++y)
-			for (int x = 0; x < size; ++x) {
-				auto*        p     = picture.at(x, y);
-				const double dx    = x + 0.5 - c, dy = y + 0.5 - c, d = std::sqrt(dx * dx + dy * dy);
-				const double angle = std::atan2(dy, dx); // 0 right, pi/2 down
-				double       a     = 0;
-				// the ring, open at the top right
-				if (!(angle < -pi / 4 && angle > -pi / 2 - 0.5)) a = std::clamp(w + 0.5 - std::abs(d - r), 0.0, 1.0);
-				// the arrow head at the gap's end, pointing clockwise
-				const double hx = c + r * std::cos(-pi / 4), hy = c + r * std::sin(-pi / 4);
-				const double ux = x + 0.5 - hx, uy = y + 0.5 - hy;
-				// a triangle: along the tangent (down-right) and across it
-				const double along = (ux * 0.7071 + uy * 0.7071), across = (ux * 0.7071 - uy * 0.7071);
-				if (along > -w * 2.6 && along < w * 2.2 && std::abs(across) < (w * 2.2 - along) * 0.9) a = std::max(a, 1.0);
-				for (int k = 0; k < 3; ++k) {
-					const int base = std::clamp(p[k] + shift[f], 0, 255);
-					p[k]           = static_cast<unsigned char>(std::lround(base * (1 - a) + gold[f][k] * a));
-				}
-			}
-		frames.push_back(std::move(picture));
-	}
-	return frames;
-}
-
-// The scroll bar's thumb: a bronze bar `steps` steps tall.
-Picture ScrollThumb(int steps) {
-	const int height = steps * StepHeight;
-	Picture   out    = Blank(ScrollWidth, height);
-	for (int y = 0; y < height; ++y)
-		for (int x = 0; x < ScrollWidth; ++x) {
-			const int edge = std::min({ x, y, ScrollWidth - 1 - x, height - 1 - y });
-			const int lit  = edge < 3 ? (std::min(x, y) == edge ? 50 : -50) : static_cast<int>(18 * Noise(x, y, 11)) - 9;
-			const int rgba[4] { 128 + lit, 102 + lit, 62 + lit, edge < 1 ? 255 : 235 };
-			for (int k = 0; k < 4; ++k) out.at(x, y)[k] = static_cast<unsigned char>(std::clamp(rgba[k], 0, 255));
-		}
-	return out;
-}
-
-void __cdecl MakeArt(const D2RL::PluginContext*, void*) noexcept {
-	std::string trouble;
-	Picture     background = FirstFrame(ArtFiles[ArtBackground], trouble);
-	Log(background.width == 0, "character screen background: %s%s", trouble.c_str(), background.width ? "" : " (cover drawn without it)");
-	CoverReady = RegisterSprite("cover", { MakeCover(background) });
-	if (const Picture bar = MakeBarCover(background); bar.width) BarReady = RegisterSprite("bar", { bar });
-	LineReady = RegisterSprite("line", { MakeLine() });
-
-	// the loot filter list's row, for the plugin list
-	const Picture row = FirstFrame(ArtFiles[ArtRow], trouble);
-	RowReady          = RegisterSprite("row", { row.width ? Stretch(row, ListRowWidth, ListRowBack, 24, 16) : PlainBox(ListRowWidth, ListRowBack, 90) });
-
-	// text boxes and buttons: the drop-down box's frame, its end and middle
-	const auto left = Frames(ArtFiles[ArtBoxLeft], trouble), middle = Frames(ArtFiles[ArtBoxCenter], trouble);
-	const bool box  = left.size() >= 4 && middle.size() >= 4;
-	BoxReady        = RegisterSprite("box", { box ? Join(left[0], middle[0], {}, TextBoxWidth, BoxHeight) : PlainBox(TextBoxWidth, BoxHeight, 60) })
-	        && RegisterSprite("itembox", { box ? Join(left[0], middle[0], {}, ItemBoxWidth, BoxHeight) : PlainBox(ItemBoxWidth, BoxHeight, 60) });
-	std::vector<Picture> button;
-	for (std::size_t f = 0; f < 4; ++f) button.push_back(box ? Join(left[f], middle[f], {}, ButtonWidth, BoxHeight) : PlainBox(ButtonWidth, BoxHeight, f == 1 || f == 3 ? 170 : 90));
-	ButtonReady = RegisterSprite("button", button);
-
-	// the close button, smaller, to remove a list item
-	auto close = Frames(ArtFiles[ArtClose], trouble);
-	if (close.size() >= 4) {
-		for (auto& f : close) f = Resize(f, 52, 52);
-		RemoveReady = RegisterSprite("remove", close);
-	}
-
-	// the search bar's box, a joined plugin's text box
-	(void)RegisterSprite("searchbox", { box ? Join(left[0], middle[0], {}, ListRowWidth, BoxHeight) : PlainBox(ListRowWidth, BoxHeight, 60) });
-	(void)RegisterSprite("stringbox", { box ? Join(left[0], middle[0], {}, ContentRight - ControlLeft, BoxHeight) : PlainBox(ContentRight - ControlLeft, BoxHeight, 60) });
-
-	GearReady = RegisterSprite("gear", GearButton(GearSize));
-
-	// the drop-down: its box (frames 0 normal, 1 pressed, 2 disabled, 3
-	// hovered) and its list's lines (0 normal, 1 hovered), as Grail On!'s
-	{
-		const auto right = Frames(ArtFiles[ArtBoxRight], trouble);
-		std::vector<Picture> drop;
-		for (std::size_t f = 0; f < 4; ++f)
-			drop.push_back(box ? Join(left[std::min(f, left.size() - 1)], middle[std::min(f, middle.size() - 1)], right.empty() ? Picture {} : right[std::min(f, right.size() - 1)], DropWidth, BoxHeight)
-			                   : PlainBox(DropWidth, BoxHeight, f == 3 ? 170 : 90));
-		const auto tl = Frames(ArtFiles[ArtTileLeft], trouble), tm = Frames(ArtFiles[ArtTileCenter], trouble), tr = Frames(ArtFiles[ArtTileRight], trouble);
-		std::vector<Picture> tile;
-		for (std::size_t f = 0; f < 2; ++f)
-			tile.push_back(!tl.empty() && !tm.empty() && !tr.empty() ? Join(tl[std::min(f, tl.size() - 1)], tm[std::min(f, tm.size() - 1)], tr[std::min(f, tr.size() - 1)], DropWidth, TileHeight)
-			                                                         : PlainBox(DropWidth, TileHeight, f ? 170 : 70));
-		DropReady = RegisterSprite("dropbox", drop) && RegisterSprite("droptile", tile);
-	}
-	// the loot filter list's up and down arrows (0 normal, 1 hovered, 2 pressed), cut to their art
-	{
-		const auto up = Frames(ArtFiles[ArtUp], trouble), down = Frames(ArtFiles[ArtDown], trouble);
-		ArrowsReady = up.size() >= 3 && down.size() >= 3 && RegisterSprite("uparrow", Fitted(up, ArrowSize)) && RegisterSprite("downarrow", Fitted(down, ArrowSize));
-		// the reset: the lobby's refresh button (as Grail On!), else the plugin's own
-		ResetReady = false;
-		if (!RefreshArt.file.empty()) {
-			auto frames = Frames(RefreshArt.file, trouble);
-			const int count = static_cast<int>(frames.size());
-			for (auto& frame : frames) {
-				const double scale = std::min(static_cast<double>(ArrowSize) / std::max(1, frame.width), static_cast<double>(ArrowSize) / std::max(1, frame.height));
-				const Picture fit = Resize(frame, std::max(1, static_cast<int>(frame.width * scale)), std::max(1, static_cast<int>(frame.height * scale)));
-				Picture box = Blank(ArrowSize, ArrowSize);
-				Paste(box, fit, (ArrowSize - fit.width) / 2, (ArrowSize - fit.height) / 2);
-				frame = std::move(box);
-			}
-			if (count > 0) {
-				const int pick[3] { std::clamp(RefreshArt.normal, 0, count - 1), std::clamp(RefreshArt.hovered, 0, count - 1), std::clamp(RefreshArt.pressed, 0, count - 1) };
-				// registered as frames 0 normal, 1 hovered, 2 pressed (the plugin's own order)
-				ResetReady = RegisterSprite("reset", { frames[pick[0]], frames[pick[1]], frames[pick[2]] });
-			}
-		}
-		if (!ResetReady) ResetReady = RegisterSprite("reset", ResetButton(ArrowSize));
-	}
-	// the scroll bar: a track per length, a thumb per height, invisible steps
-	ScrollReady = true;
-	for (int steps = 1; steps <= MaxSteps; ++steps)
-		ScrollReady = RegisterSprite("track" + std::to_string(steps), { Slot(ScrollWidth, steps * StepHeight) }) && RegisterSprite("thumb" + std::to_string(steps), { ScrollThumb(steps) }) && ScrollReady;
-	{
-		Picture clear = Blank(4, 4), lit = Blank(4, 4);
-		for (int p = 0; p < 16; ++p) std::memcpy(lit.rgba.data() + p * 4, "\xFF\xF0\xC8\x28", 4);
-		BlankReady = RegisterSprite("blank", { clear, lit });
-	}
-
-	const int menu[3] { 60, 200, 70 }, window[3] { 70, 120, 235 }, file[3] { 200, 200, 190 };
-	IconsReady = RegisterSprite("iconmenu", { Gem(menu) }) && RegisterSprite("iconwindow", { Gem(window) }) && RegisterSprite("icontoml", { Gem(file) });
-	if (!CoverReady || !LineReady || !RowReady || !BoxReady || !ButtonReady) Log(true, "could not register all of the window's sprites");
-	for (auto& f : ArtFiles) f.clear(), f.shrink_to_fit();
-	RefreshArt.file.clear(), RefreshArt.file.shrink_to_fit();
-}
-
-// ---- layout ----
-
-std::string Rect(int x, int y, int width = -1, int height = -1) {
-	char text[96] {};
-	if (width < 0) std::snprintf(text, sizeof(text), R"("rect": {"x": %d, "y": %d})", x, y);
-	else std::snprintf(text, sizeof(text), R"("rect": {"x": %d, "y": %d, "width": %d, "height": %d})", x, y, width, height);
-	return text;
-}
-
-std::string Command(const std::string& command) { return Json(std::string("PanelManager:ClosePanel:") + CommandPrefix + command); }
-
-std::string Tooltip(const std::string& tooltip) {
-	return R"(, "children": [{"type": "FocusableWidget", "name": "Tooltip", "fields": {"fitToParent": true, "tooltipString": )" + Json(tooltip)
-	     + R"(, "tooltipStyle": {"fontStyle": {"options": {"newlineHandling": "standard"}}}}}])";
-}
-
-std::string Text(const std::string& name, int x, int y, int width, int height, const std::string& text, const char* style, const std::string& tooltip = {}) {
-	std::string widget = R"(, {"type": "TextBoxWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height) + R"(, "text": )" + Json(GameText(text)) + R"(, "style": )" + style + "}";
-	if (!tooltip.empty()) widget += Tooltip(GameText(tooltip));
-	return widget + "}";
-}
-
-std::string Image(const std::string& name, int x, int y, const std::string& file) {
-	return R"(, {"type": "ImageWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y) + R"(, "filename": "d2rloader\\i-hate-tomls\\)" + file + R"("}})";
-}
-
-// `file` is written into the JSON as is (backslashes doubled).
-std::string Button(const std::string& name, int x, int y, const char* file, int normal, int pressed, int hovered, const std::string& command, const std::string& tooltip = {},
-                   const char* sound = "cursor_button_click_hd") {
-	char head[512] {};
-	std::snprintf(head, sizeof(head), R"(, {"type": "ButtonWidget", "name": "%s", "fields": {"rect": {"x": %d, "y": %d}, "filename": "%s", "normalFrame": %d, "pressedFrame": %d, "hoveredFrame": %d, "sound": "%s")",
-	              name.c_str(), x, y, file, normal, pressed, hovered, sound);
-	std::string widget = head;
-	if (!tooltip.empty()) widget += R"(, "tooltipString": )" + Json(tooltip);
-	return widget + R"(, "onClickMessage": )" + Command(command) + "}}";
+// A button on a sprite (written into the JSON as is).
+std::string Button(const std::string& name, int x, int y, const std::string& file, int normal, int pressed, int hovered, const std::string& command, const std::string& tooltip = {}) {
+	return Gui::Button(name, x, y, file, { normal, pressed, hovered }, command, tooltip);
 }
 
 // A button with its text on it.
 std::string TextButton(const std::string& name, int x, int y, const std::string& text, const std::string& command, const std::string& tooltip = {}) {
-	std::string out = R"(, {"type": "ButtonWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, ButtonWidth, BoxHeight)
-	                + R"(, "filename": "d2rloader\\i-hate-tomls\\button", "normalFrame": 0, "hoveredFrame": 3, "pressedFrame": 1, "textString": )" + Json(text)
-	                + R"(, "textColor": "$FontColorLightGold", "text/style": {"pointSize": "$MediumFontSize", "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "center", "v": "center"}})";
-	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(tooltip);
-	return out + R"(, "sound": "cursor_button_click_hd", "onClickMessage": )" + Command(command) + "}}";
+	return Gui::TextButton(name, x, y, ButtonWidth, BoxHeight, text, command, tooltip);
 }
 
-// An invisible button: `command` on a click, a faint light when hovered.
-std::string HitButton(const std::string& name, int x, int y, int width, int height, const std::string& command, const std::string& tooltip = {}) {
-	std::string out = R"(, {"type": "ButtonWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height)
-	                + R"(, "filename": "d2rloader\\i-hate-tomls\\blank", "normalFrame": 0, "hoveredFrame": 1, "pressedFrame": 1)";
-	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(tooltip);
-	return out + R"(, "sound": "cursor_menu_select_hd", "onClickMessage": )" + Command(command) + "}}";
+// A text box `width` wide.
+std::string TypedBox(const std::string& name, const std::string& key, int x, int y, int width, const std::string& text, const std::string& hint, const std::string& tooltip = {}) {
+	return Gui::TypedBox(name, key, x, y, width, BoxHeight, text, hint, tooltip, CharWidth);
 }
 
-// What fits in a box `width` wide: the start of a long text, or its end
-// while typing (where the caret is).
-std::string Fit(const std::string& text, int width, bool end) {
-	std::vector<std::size_t> starts; // each character's first byte
-	for (std::size_t i = 0; i < text.size(); ++i)
-		if ((static_cast<unsigned char>(text[i]) & 0xC0) != 0x80) starts.push_back(i);
-	const std::size_t room = static_cast<std::size_t>(std::max(4, width / CharWidth));
-	if (starts.size() <= room) return text;
-	if (end) return "\u2026" + text.substr(starts[starts.size() - room + 1]);
-	return text.substr(0, starts[room - 1]) + "\u2026";
-}
+namespace S = Gui::Style;
+constexpr const char* LabelStyle      = S::Label;
+constexpr const char* SmallLabelStyle = S::SmallLabel;
+constexpr const char* ValueStyle      = S::Value;
+constexpr const char* SmallValueStyle = S::SmallValue;
+constexpr const char* AxisStyle       = S::Axis;
+constexpr const char* SectionStyle    = S::Section;
+constexpr const char* NameStyle       = S::Name;
+constexpr const char* NoteStyle       = S::Note;
+constexpr const char* WarnStyle       = S::Warn;
+constexpr const char* CommentStyle    = S::Comment;
+constexpr const char* SmallLeftStyle  = S::SmallLeft;
+constexpr const char* SmallRightStyle = S::SmallRight;
+constexpr const char* PluginNameStyle = S::LabelOneLine;
 
-// A text box: its frame, the text (a caret while typing, a grey hint while
-// empty) and a button over it that starts typing.
-std::string TypedBox(const std::string& name, const std::string& key, int x, int y, int width, const char* frame, const std::string& text, const std::string& hint,
-                     const std::string& tooltip = {}) {
-	std::string out;
-	if (BoxReady) out += Image(name + "Frame", x, y, frame);
-	else out += R"(, {"type": "RectangleWidget", "name": )" + Json(name + "Frame") + R"(, "fields": {)" + Rect(x, y, width, BoxHeight) + R"(, "color": [0.0, 0.0, 0.0, 0.55]}})";
-	const bool        typing = Typing && TypingKey == key;
-	const bool        empty  = text.empty() && !typing;
-	const std::string shown  = empty ? hint : Fit(text, width - 40, typing) + (typing ? "|" : "");
-	out += R"(, {"type": "TextBoxWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x + 20, y, width - 40, BoxHeight) + R"(, "text": )" + Json(shown)
-	     + R"(, "style": {"fontColor": ")" + (empty ? "$FontColorLightGray" : "$FontColorWhite")
-	     + R"(", "pointSize": "$MediumFontSize", "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "left", "v": "center"}}}})";
-	return out + HitButton(name + "Hit", x, y, width, BoxHeight, "type" + key, tooltip);
-}
+constexpr const char* LeftArrow  = Gui::Kit::Native::LeftArrow;
+constexpr const char* RightArrow = Gui::Kit::Native::RightArrow;
+constexpr const char* AddButton  = Gui::Kit::Native::AddButton;
 
-// Game styles: the options screen's text, the panel title's colour.
-constexpr const char* LabelStyle =
-    R"({"fontColor": "$FontColorLightGold", "pointSize": "$MediumFontSize", "spacing": "$ReducedSpacing", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}, "options": {"lineWrap": true}})";
-constexpr const char* SmallLabelStyle =
-    R"({"fontColor": "$FontColorLightGold", "pointSize": "$SmallFontSize", "spacing": "$ReducedSpacing", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}, "options": {"lineWrap": true}})";
-constexpr const char* ValueStyle =
-    R"({"fontColor": "$FontColorWhite", "pointSize": "$MediumFontSize", "spacing": "$ReducedSpacing", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "center", "v": "center"}})";
-constexpr const char* SmallValueStyle =
-    R"({"fontColor": "$FontColorWhite", "pointSize": "$SmallFontSize", "spacing": "$ReducedSpacing", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "center", "v": "center"}, "options": {"lineWrap": true}})";
-constexpr const char* AxisStyle =
-    R"({"fontColor": "$FontColorGoldYellow", "pointSize": "$MediumFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "center", "v": "center"}})";
-constexpr const char* SectionStyle =
-    R"({"fontColor": "$FontColorGoldYellow", "pointSize": "$MediumLargeFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}})";
-constexpr const char* NameStyle =
-    R"({"fontColor": "$FontColorWhite", "pointSize": "$LargeFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "center", "v": "center"}})";
-constexpr const char* NoteStyle =
-    R"({"fontColor": "$FontColorLightGold", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "center", "v": "center"}, "options": {"lineWrap": true}})";
-constexpr const char* WarnStyle =
-    R"({"fontColor": "$FontColorLightRed", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "center", "v": "center"}, "options": {"lineWrap": true}})";
-constexpr const char* CommentStyle =
-    R"({"fontColor": "$FontColorWhite", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "top"}, "options": {"lineWrap": true, "newlineHandling": "standard"}})";
-constexpr const char* SmallLeftStyle =
-    R"({"fontColor": "$FontColorLightGold", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}})";
-constexpr const char* SmallRightStyle =
-    R"({"fontColor": "$FontColorLightGold", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "right", "v": "center"}})";
-constexpr const char* PluginNameStyle =
-    R"({"fontColor": "$FontColorLightGold", "pointSize": "$MediumFontSize", "spacing": "$ReducedSpacing", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}})";
+// The scroll bar of the view shown (its steps send "step<i>").
+Gui::ScrollBar Bar("", BarLeft, ScrollWidth, StepHeight, PanelX, PanelY);
 
-constexpr const char* LeftArrow  = "PauseMenu\\\\LeftArrow";
-constexpr const char* RightArrow = "PauseMenu\\\\RightArrow";
-constexpr const char* CheckBox   = "PANEL\\\\loot_filter\\\\lootfilter_large_list_btn_checkbox";
-constexpr const char* OpenArrow  = "PANEL\\\\Character_Sheet\\\\advancedstatsbutton";
-constexpr const char* AddButton  = "PANEL\\\\loot_filter\\\\chronicle_btn_add";
-constexpr const char* RemoveFile = "d2rloader\\\\i-hate-tomls\\\\remove";
-constexpr const char* GearFile   = "d2rloader\\\\i-hate-tomls\\\\gear";
-
-// Check box frames: 0-3 empty, 4-7 ticked (normal, pressed, disabled, hovered).
-std::string Check(const std::string& name, int x, int y, bool on, const std::string& command) { return Button(name, x, y, CheckBox, on ? 4 : 0, on ? 5 : 1, on ? 7 : 3, command); }
-
-// The scroll bar beside content `total` pixels tall shown in `room` pixels
-// from `top`, while it doesn't all fit: a recessed track, the thumb (as tall
-// as the share shown), and one invisible button per step. Also tells the
-// mouse where it is.
-std::string ScrollBar(int top, int room, int total, int scroll) {
-	const int steps = std::clamp(room / StepHeight, 2, MaxSteps);
-	const int max   = std::max(0, total - room);
-	BarTop = top, BarSteps = steps, BarMax = max;
-	if (max <= 0) return {};
-	const int   thumb = std::clamp((steps * room + total / 2) / total, 1, steps - 1);
-	const int   y     = top + (steps - thumb) * StepHeight * std::clamp(scroll, 0, max) / max;
-	std::string out;
-	if (ScrollReady) {
-		out += Image("Track", BarLeft, top, "track" + std::to_string(steps));
-		out += Image("Thumb", BarLeft, y, "thumb" + std::to_string(thumb));
-	} else {
-		out += R"(, {"type": "RectangleWidget", "name": "Track", "fields": {)" + Rect(BarLeft, top, ScrollWidth, steps * StepHeight) + R"(, "color": [0.0, 0.0, 0.0, 0.6]}})";
-		out += R"(, {"type": "RectangleWidget", "name": "Thumb", "fields": {)" + Rect(BarLeft + 4, y, ScrollWidth - 8, thumb * StepHeight) + R"(, "color": [0.5, 0.4, 0.24, 1.0]}})";
-	}
-	for (int i = 0; i < steps; ++i) out += HitButton("Step" + std::to_string(i), BarLeft, top + i * StepHeight, ScrollWidth, StepHeight, "step" + std::to_string(i));
-	return out;
-}
+std::string ScrollBar(int top, int room, int total, int scroll) { return Bar.Layout(top, room, total, scroll); }
 
 // The rows' area: the game's ClipViewWidget cuts what it holds at its edges
 // (drawing and clicks), so rows half scrolled out show their visible part.
 // Its children's rects are relative to it: it starts at x 0, y `top`.
-std::string Clip(int top, int room, const std::string& children) {
-	if (children.empty()) return {};
-	std::string body = children.substr(children[0] == ',' ? 1 : 0);
-	return R"(, {"type": "ClipViewWidget", "name": "Rows", "fields": {)" + Rect(0, top, BarLeft - 6, room) + R"(, "clipMouseInput": true}, "children": [)" + body + "]}";
-}
+std::string Clip(int top, int room, const std::string& children) { return Gui::Clip("Rows", 0, top, BarLeft - 6, room, children); }
 
 // The header box: a back arrow to the list, the plugin's name and a line under it.
 std::string Header(const std::string& name, const std::string& under) {
@@ -2259,6 +1491,7 @@ std::string Header(const std::string& name, const std::string& under) {
 
 // The open drop-down: its setting, and where its list goes (drawn last, over the rest).
 int OpenDrop = -1;
+
 struct DropList {
 	int                      x {}, y {}, current {};
 	std::vector<std::string> names;
@@ -2288,18 +1521,13 @@ std::string StepTip(const Setting& setting) {
 
 // A small up or down arrow button (the loot filter list's), or the options arrows.
 std::string ArrowButton(const std::string& name, int x, int y, bool up, const std::string& command, const std::string& tooltip) {
-	if (ArrowsReady) return Button(name, x, y, up ? "d2rloader\\\\i-hate-tomls\\\\uparrow" : "d2rloader\\\\i-hate-tomls\\\\downarrow", 0, 2, 1, command, tooltip);
-	return Button(name, x, y + 4, up ? RightArrow : LeftArrow, 0, 1, 3, command, tooltip);
+	return Gui::ArrowButton(name, x, y, up, ArrowSize, command, tooltip);
 }
 
 std::string RowWidgets(const Client& client, const Setting& setting, int row, int y) {
 	const std::string id = std::to_string(row);
 	std::string       out;
-	if (setting.kind == Kind::Header) {
-		out += Text("Section" + id, ContentLeft, y + 10, ContentRight - ContentLeft, 70, setting.label, SectionStyle, setting.hint);
-		if (LineReady) out += Image("Line" + id, ContentLeft, y + 82, "line");
-		return out;
-	}
+	if (setting.kind == Kind::Header) return Gui::SectionTitle(id, ContentLeft, y, ContentRight - ContentLeft, setting.label, setting.hint);
 	if (setting.kind == Kind::Text) return Text("Text" + id, ContentLeft, y + 4, ContentRight - ContentLeft, RowHeightOf(setting) - 8, setting.label, CommentStyle, setting.hint);
 	if (setting.kind == Kind::Table) {
 		// title, note, then the column names over a grid of check boxes
@@ -2332,12 +1560,7 @@ std::string RowWidgets(const Client& client, const Setting& setting, int row, in
 	case Kind::Bool: out += Check("Check" + id, ContentRight - 70, y + 14, Unquote(GetValue(client, setting)) == "true", "T" + id); break;
 	case Kind::Int:
 	case Kind::Float: {
-		const std::string tip = StepTip(setting);
-		out += Button("Left" + id, ControlLeft, y + 24, LeftArrow, 0, 1, 3, "L" + id, tip);
-		const std::string value = ShownValue(client, setting);
-		const int         width = ContentRight - ControlLeft - 120;
-		out += Text("Value" + id, ControlLeft + 60, y, width, RowHeight - 6, value, TextWidth(value) > width ? SmallValueStyle : ValueStyle, tip);
-		out += Button("Right" + id, ContentRight - 50, y + 24, RightArrow, 0, 1, 3, "R" + id, tip);
+		out += Gui::Stepper(id, ControlLeft, y, ContentRight - ControlLeft, RowHeight - 6, ShownValue(client, setting), "L" + id, "R" + id, StepTip(setting));
 		break;
 	}
 	case Kind::Enum: {
@@ -2345,15 +1568,7 @@ std::string RowWidgets(const Client& client, const Setting& setting, int row, in
 		const int         current = EnumIndex(setting, GetValue(client, setting));
 		const std::string shown   = EnumLabel(setting, current);
 		const int         boxY    = y + (RowHeight - BoxHeight) / 2 - 3;
-		if (DropReady)
-			out += R"(, {"type": "ButtonWidget", "name": "Drop)" + id + R"(", "fields": {)" + Rect(ControlLeft, boxY, DropWidth, BoxHeight)
-			     + R"(, "filename": "d2rloader\\i-hate-tomls\\dropbox", "normalFrame": 0, "pressedFrame": 1, "disabledFrame": 2, "hoveredFrame": 3, "textString": )" + Json(shown)
-			     + R"(, "textColor": "$FontColorLightGold", "text/style": {"pointSize": ")" + (TextWidth(shown) > DropWidth - 110 ? "$SmallFontSize" : "$MediumFontSize")
-			     + R"(", "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "center", "v": "center"}}, "sound": "cursor_button_click_hd", "onClickMessage": )" + Command("D" + id) + "}}";
-		else {
-			out += Button("Left" + id, ControlLeft, y + 24, LeftArrow, 0, 1, 3, "D" + id);
-			out += Text("Value" + id, ControlLeft + 60, y, DropWidth - 60, RowHeight - 6, shown, ValueStyle);
-		}
+		out += Gui::DropDown::Box("Drop" + id, ControlLeft, boxY, DropWidth, BoxHeight, shown, "D" + id);
 		if (OpenDrop == row) {
 			Drop.x = ControlLeft, Drop.y = RowsTop + boxY + BoxHeight, Drop.current = current;
 			Drop.names.clear();
@@ -2380,16 +1595,13 @@ std::string RowWidgets(const Client& client, const Setting& setting, int row, in
 			out += ArrowButton("Up" + a + id, at, top, true, (a == "X" ? "J" : "M") + id, tip);
 			at += ArrowSize + 14;
 		}
-		if (!setting.defaultValue.empty()) {
-			if (ResetReady) out += Button("Reset" + id, ContentRight - ArrowSize, top, "d2rloader\\\\i-hate-tomls\\\\reset", 0, 2, 1, "Z" + id, "Back to " + setting.defaultValue);
-			else out += TextButton("Reset" + id, ContentRight - ButtonWidth, top, "Reset", "Z" + id, "Back to " + setting.defaultValue);
-		}
+		if (!setting.defaultValue.empty()) out += Gui::ResetButton("Reset" + id, ContentRight - ArrowSize, top, ArrowSize, "Z" + id, "Back to " + setting.defaultValue);
 		break;
 	}
 	case Kind::String: {
 		const std::string key  = "s" + id;
-		const std::string text = Typing && TypingKey == key ? ClientDraft : ShownValue(client, setting);
-		out += TypedBox("Input" + id, key, ControlLeft, y + 20, ContentRight - ControlLeft, "stringbox", text, "(empty)", "Click to type; Enter saves, Esc cancels");
+		const std::string text = Gui::TextInput::Key() == key ? ClientDraft : ShownValue(client, setting);
+		out += TypedBox("Input" + id, key, ControlLeft, y + 20, ContentRight - ControlLeft, text, "(empty)", "Click to type; Enter saves, Esc cancels");
 		break;
 	}
 	case Kind::Action: {
@@ -2412,7 +1624,11 @@ std::string ModeTip(Mode mode) {
 	}
 }
 
-const char* ModeIcon(Mode mode) { return mode == Mode::Menu ? "iconmenu" : mode == Mode::Window ? "iconwindow" : "icontoml"; }
+// A round gem: what kind of settings a plugin has.
+std::string ModeIcon(Mode mode) {
+	static constexpr int menu[3] { 60, 200, 70 }, window[3] { 70, 120, 235 }, file[3] { 200, 200, 190 };
+	return mode == Mode::Menu ? Gui::Kit::Gem("menu", menu, IconSize) : mode == Mode::Window ? Gui::Kit::Gem("window", window, IconSize) : Gui::Kit::Gem("toml", file, IconSize);
+}
 
 // Lower case, for the search.
 std::wstring Lower(const std::string& text) {
@@ -2452,11 +1668,10 @@ std::string ListLayout() {
 
 	// the search bar: a clear button and the count found while something is typed
 	const int barWidth = ContentRight - ContentLeft;
-	out += TypedBox("Search", "search", ContentLeft, SearchY, barWidth, "searchbox", SearchText, "Search", "Type part of a plugin's name");
+	out += TypedBox("Search", "search", ContentLeft, SearchY, barWidth, SearchText, "Search", "Type part of a plugin's name");
 	if (!SearchText.empty()) {
 		out += Text("Found", ContentRight - 330, SearchY, 240, BoxHeight, std::to_string(shown.size()) + " found", SmallRightStyle);
-		if (RemoveReady) out += Button("SearchClear", ContentRight - 60, SearchY + 2, RemoveFile, 0, 1, 3, "searchclear", "Clear the search");
-		else out += TextButton("SearchClear", ContentRight - 60, SearchY, "x", "searchclear", "Clear the search");
+		out += Gui::RemoveButton("SearchClear", ContentRight - 60, SearchY + 2, 52, "searchclear", "Clear the search");
 	}
 
 	const int room  = ViewBottom - ListTop;
@@ -2472,11 +1687,8 @@ std::string ListLayout() {
 		const auto&       e     = list[static_cast<std::size_t>(index)];
 		const std::string id    = std::to_string(at);
 		std::string&      out   = rows;
-		if (RowReady) out += Image("RowBack" + id, ContentLeft, y, "row");
-		if (e.mode != Mode::None && IconsReady) {
-			out += Image("Icon" + id, ContentLeft + 34, y + (ListRowBack - IconSize) / 2, ModeIcon(e.mode));
-			out += Text("IconTip" + id, ContentLeft + 34, y + (ListRowBack - IconSize) / 2, IconSize, IconSize, "", NoteStyle, ModeTip(e.mode));
-		}
+		out += Gui::Image("RowBack" + id, ContentLeft, y, Gui::Kit::Row(ListRowWidth, ListRowBack));
+		if (e.mode != Mode::None) out += Gui::Icon("Icon" + id, ContentLeft + 34, y + (ListRowBack - IconSize) / 2, IconSize, ModeIcon(e.mode), ModeTip(e.mode));
 		std::string under = e.version;
 		if (!e.author.empty()) under += (under.empty() ? "by " : "  by ") + e.author;
 		out += Text("Name" + id, ContentLeft + 92, y + 4, 700, 40, e.name, PluginNameStyle, e.id);
@@ -2486,19 +1698,17 @@ std::string ListLayout() {
 		else if (Hub::UpToDate(e.slug, e.version))
 			out += Text("UpToDate" + id, ContentRight - GearSize - 250, y, 230, ListRowBack, "up to date", SmallRightStyle, "Same version as on the D2RLoader Hub");
 		const std::string open = "O" + std::to_string(index), tip = e.mode == Mode::Window ? "Open its settings window" : "Open its settings";
-		if (e.mode == Mode::None) {
-		} else if (GearReady) out += Button("Open" + id, ContentRight - GearSize - 10, y + (ListRowBack - GearSize) / 2, GearFile, 0, 2, 1, open, tip);
-		else out += Button("Open" + id, ContentRight - 76, y + (ListRowBack - 68) / 2, OpenArrow, 0, 1, 3, open, tip);
+		if (e.mode != Mode::None) out += Gui::GearButton("Open" + id, ContentRight - GearSize - 10, y + (ListRowBack - GearSize) / 2, GearSize, open, tip);
 	}
 	out += Clip(ListTop, room, rows);
 	out += ScrollBar(ListTop, room, total, ListScroll);
 	// the icons' meaning
-	if (IconsReady) {
+	{
 		const Mode  modes[] { Mode::Menu, Mode::Window, Mode::Toml };
 		const char* names[] { "this menu", "own window", "TOML file" };
 		for (int k = 0; k < 3; ++k) {
 			const int x = ContentLeft + 120 + k * 260;
-			out += Image("Legend" + std::to_string(k), x, NoteY + 8, ModeIcon(modes[k]));
+			out += Gui::Image("Legend" + std::to_string(k), x, NoteY + 8, ModeIcon(modes[k]));
 			out += Text("LegendText" + std::to_string(k), x + IconSize + 10, NoteY + 4, 200, 48, names[k], SmallLeftStyle);
 		}
 	}
@@ -2527,15 +1737,9 @@ std::string ClientLayout() {
 	if (!note.empty()) out += Text("Note", ContentLeft, NoteY, ContentRight - ContentLeft, 56, note, NoticeWarn ? WarnStyle : NoteStyle);
 	// the open drop-down's list, over everything: a click anywhere else closes it
 	if (!Drop.names.empty()) {
-		out += HitButton("DropCatch", 0, 0, PanelWidth, PanelHeight, "dropx");
-		for (int k = 0; k < static_cast<int>(Drop.names.size()); ++k) {
-			const std::string& name = Drop.names[static_cast<std::size_t>(k)];
-			out += R"(, {"type": "ButtonWidget", "name": "DropItem)" + std::to_string(k) + R"(", "fields": {)" + Rect(Drop.x, Drop.y + k * TileHeight, DropWidth, TileHeight)
-			     + R"(, "filename": "d2rloader\\i-hate-tomls\\droptile", "normalFrame": 0, "pressedFrame": 1, "hoveredFrame": 1, "textString": )" + Json(name) + R"(, "textColor": ")"
-			     + (k == Drop.current ? "$FontColorGoldYellow" : "$FontColorWhite") + R"(", "text/style": {"pointSize": ")" + (TextWidth(name) > DropWidth - 40 ? "$SmallFontSize" : "$MediumFontSize")
-			     + R"(", "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "center", "v": "center"}}, "sound": "cursor_button_click_hd", "onClickMessage": )"
-			     + Command("P" + std::to_string(OpenDrop) + ":" + std::to_string(k)) + "}}";
-		}
+		std::string list = Gui::DropDown::List("Drop", Drop.x, Drop.y, DropWidth, TileHeight, Drop.names, Drop.current, "P" + std::to_string(OpenDrop) + ":", "dropx", PanelWidth, PanelHeight);
+		// the catcher and items keep their names (DropCatch, DropItem<k>)
+		out += list;
 	}
 	return out;
 }
@@ -2552,7 +1756,7 @@ std::string TomlLayout() {
 		const std::string why = Toml.doc.error.empty() ? "This file is empty." : "This file could not be read as TOML:\n" + Toml.doc.error + "\nEdit it in a text editor.";
 		out += Text("Error", ContentLeft, 480, ContentRight - ContentLeft, 300, why, Toml.doc.error.empty() ? NoteStyle : WarnStyle);
 		out += TextButton("Reload", ContentLeft + 20, FooterY, "Reload", "reload", "Read the file again");
-		BarMax = 0;
+		Bar.Clear();
 		return out;
 	}
 	const int total = TomlTotal();
@@ -2570,8 +1774,7 @@ std::string TomlLayout() {
 		switch (row.type) {
 		case TomlRow::Type::Note: out += Text("Comment" + id, ContentLeft, y + 4, ContentRight - ContentLeft, row.height - 8, row.text, CommentStyle); break;
 		case TomlRow::Type::Section:
-			out += Text("Section" + id, ContentLeft, y + 10, ContentRight - ContentLeft, 70, row.text, SectionStyle);
-			if (LineReady) out += Image("Line" + id, ContentLeft, y + 82, "line");
+			out += Gui::SectionTitle(id, ContentLeft, y, ContentRight - ContentLeft, row.text);
 			break;
 		case TomlRow::Type::Field: {
 			const auto& f    = Toml.fields[static_cast<std::size_t>(row.field)];
@@ -2587,7 +1790,7 @@ std::string TomlLayout() {
 			switch (f.editor) {
 			case TomlEdit::Editor::Check: out += Check("Check" + id, ContentRight - 70, y + 6, f.text == "true", "C" + id); break;
 			case TomlEdit::Editor::Text:
-			case TomlEdit::Editor::Raw: out += TypedBox("In" + id, "f" + std::to_string(row.field), TomlControl, y + 10, TextBoxWidth, "box", f.text, "(empty)", "Click to type; Esc puts the value back"); break;
+			case TomlEdit::Editor::Raw: out += TypedBox("In" + id, "f" + std::to_string(row.field), TomlControl, y + 10, TextBoxWidth, f.text, "(empty)", "Click to type; Esc puts the value back"); break;
 			case TomlEdit::Editor::ReadOnly:
 				out += Text("Fixed" + id, TomlControl, y + 10, TextBoxWidth, BoxHeight, "(on several lines: edit it in the file)", SmallLeftStyle, f.text);
 				break;
@@ -2603,9 +1806,8 @@ std::string TomlLayout() {
 			const auto& f   = Toml.fields[static_cast<std::size_t>(row.field)];
 			const auto  key = "i" + std::to_string(row.field) + "." + std::to_string(row.item);
 			out += Text("ItemNumber" + id, TomlControl - 80, y + 5, 64, BoxHeight, std::to_string(row.item + 1), SmallLeftStyle);
-			out += TypedBox("In" + id, key, TomlControl, y + 5, ItemBoxWidth, "itembox", f.list[static_cast<std::size_t>(row.item)], "(empty)", "Click to type; Esc puts the item back");
-			if (RemoveReady) out += Button("Remove" + id, ContentRight - 58, y + 7, RemoveFile, 0, 1, 3, "-" + id, "Remove this item");
-			else out += Button("Remove" + id, ContentRight - 50, y + 16, LeftArrow, 0, 1, 3, "-" + id, "Remove this item");
+			out += TypedBox("In" + id, key, TomlControl, y + 5, ItemBoxWidth, f.list[static_cast<std::size_t>(row.item)], "(empty)", "Click to type; Esc puts the item back");
+			out += Gui::RemoveButton("Remove" + id, ContentRight - 58, y + 7, 52, "-" + id, "Remove this item");
 			break;
 		}
 		}
@@ -2619,319 +1821,39 @@ std::string TomlLayout() {
 	out += Text("Note", ContentLeft, NoteY, ContentRight - ContentLeft, 56, note, NoticeWarn ? WarnStyle : NoteStyle);
 	return out;
 }
-
 // The whole window for the view shown.
-std::string ViewLayout(const std::string& panelId, unsigned probe) {
-	char open[2048] {};
-	std::snprintf(open, sizeof(open),
-	              R"({"type": "Panel", "name": "i-hate-tomls/%s", "fields": {"priority": 10, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": "$LeftPanelAnchor"}, "children": [)"
-	              R"({"type": "ClickCatcherWidget", "name": "PanelClickCatcher", "fields": {"rect": {"x": 0, "y": 0, "width": %d, "height": %d}}})"
-	              // the game's side pillar on the screen's left edge, where its own left
-	              // panels (imbue, hire menu) put it, and clicks on it kept from the game
-	              R"(, {"type": "ClickCatcherWidget", "name": "LeftSideCatcher", "fields": {"rect": {"x": -236, "y": -205, "width": 236, "height": 2160}}})"
-	              R"(, {"type": "ImageWidget", "name": "LeftSide", "fields": {"rect": {"x": -236, "y": -205}, "filename": "$LeftSideSprite"}})"
-	              R"(, {"type": "ImageWidget", "name": "Background", "fields": {"rect": {"x": 0, "y": 0}, "filename": "PANEL\\Character_Sheet\\Character_Background", "frame": 0}})",
-	              panelId.c_str(), PanelX, PanelY, PanelWidth, PanelHeight, PanelWidth, PanelHeight);
-	std::string layout = open;
-	if (CoverReady) layout += Image("Cover", CoverX, CoverY, "cover");
-	if (BarReady) layout += Image("BarCover", BarX, BarY, "bar");
-	layout += R"(, {"type": "ImageWidget", "name": "LeftHinge", "fields": {"rect": "$LeftHingeRect", "filename": "$LeftHingeSprite"}})";
-	layout += R"(, {"type": "TextBoxWidget", "name": "Title", "fields": {"rect": "$InGamePanelTitleRect", "text": "Plugins", "style": "$StyleTitleBlock"}})";
-	layout += R"(, {"type": "ButtonWidget", "name": "CloseButton", "fields": {"rect": {"x": 1075, "y": 9}, "filename": "PANEL\\closebtn_4x", "hoveredFrame": 3, "tooltipString": "@d2r:strClose", "sound": "cursor_close_window_hd", "onClickMessage": )"
-	        + Command("close") + "}}";
-	layout += R"(, {"type": "RectangleWidget", "name": "Probe)" + std::to_string(probe) + R"(", "fields": {"rect": {"x": 0, "y": 0, "width": 1, "height": 1}, "color": [0.0, 0.0, 0.0, 0.0]}})";
-
+std::string ViewLayout(const std::string& panelName, const std::string& probe) {
 	if (Current == View::Client && Clients.empty()) Current = View::List;
-	if (Current == View::List) layout += ListLayout();
-	else if (Current == View::Client) layout += ClientLayout();
-	else layout += TomlLayout();
-	return layout + "]}";
+	std::string content;
+	if (Current == View::List) content = ListLayout();
+	else if (Current == View::Client) content = ClientLayout();
+	else content = TomlLayout();
+	return Gui::CharacterWindow::Layout(panelName, probe, "Plugins", "close", content);
 }
 
-// ---- panels (UI thread) ----
+// ---- the window (D2R GUI: panel pool, typing, mouse, left panel) ----
 
-struct ViewPanel {
-	std::string                         id;
-	D2RL::Panels::RegistrationHandle    panel  = D2RL::Panels::InvalidHandle;
-	D2RL::Resources::RegistrationHandle layout = D2RL::Resources::InvalidHandle;
-	bool                                opened {};
-	int                                 uses = 1; // layouts registered for it (its placeholder at load)
-};
-std::vector<ViewPanel> Panels;
-int                    ShownPanel = -1;
-bool                   ReuseWorks = true;
-unsigned               Serial {};
-std::string            ProbeName, ProbePanel;
-ULONGLONG              ProbeUntil {};
+Gui::PanelPool Window;
 
-std::string PanelName(int panel) { return panel >= 0 && panel < static_cast<int>(Panels.size()) ? std::string(PluginId) + "/" + Panels[static_cast<std::size_t>(panel)].id : std::string(); }
-
-bool IsOpen(D2RL::Panels::RegistrationHandle handle) {
-	D2RL::Panels::PanelInfo info { .structSize = D2RL::Panels::PanelInfoSize };
-	return handle != D2RL::Panels::InvalidHandle && PanelApi->getPanelInfo(Context, handle, &info) == D2RL::Panels::Result::Success
-	    && info.presentationState == D2RL::Panels::PresentationState::Open;
-}
-
-bool MenuOpen() { return ShownPanel >= 0 && IsOpen(Panels[static_cast<std::size_t>(ShownPanel)].panel); }
-
-void ClosePanels() {
-	for (const auto& view : Panels)
-		if (IsOpen(view.panel)) (void)PanelApi->closePanel(Context, view.panel);
-	ConfirmRow = -1;
-}
-
-void StopTyping(bool keep);
-void CloseLeftPanels();
-
-namespace Camera {
-void Hold();
-void Release(bool now);
-} // namespace Camera
-
-void RetryReuse();
-
-void CloseMenu() {
-	StopTyping(true);
-	ClosePanels();
-	SetNotice({});
-	Camera::Release(true);
-	RetryReuse();
-}
-
-ULONGLONG     FallbackSince {};
-int       ProbeMisses {};
-
-// Leaving a page or closing the menu tries reopening panels again (one miss
-// gives it up again), so a slow stretch ends with the page.
-void RetryReuse() {
-	if (ReuseWorks) return;
-	ReuseWorks    = true;
-	ProbeMisses   = 1;
-	FallbackSince = 0;
-	Log(false, "trying to reopen panels again");
-}
-
-int NextPanel() {
-	const int count = static_cast<int>(Panels.size());
-	// reuse is tried again a minute after it failed: one miss gives it up again
-	if (!ReuseWorks && FallbackSince && GetTickCount64() - FallbackSince > 60000) RetryReuse();
-	if (count < 2) return 0;
-	// views swap between 2 panels; after a lost layout, a fresh panel each
-	if (ReuseWorks) return ShownPanel == 0 ? 1 : 0;
-	for (int i = 0; i < count; ++i)
-		if (i != ShownPanel && !Panels[static_cast<std::size_t>(i)].opened) return i;
-	static bool told = false;
-	if (!told) Say("I Hate TOMLs: out of fresh panels; restart the game to see changes");
-	told = true;
-	return ShownPanel == 0 ? 1 : 0;
-}
-
-void __cdecl ProbeTask(const D2RL::PluginContext*, void*) noexcept;
-
-// Whether panel `name` has finished loading the layout holding widget `probe`.
-bool Loaded(const std::string& name, const std::string& probe) {
-	D2RL::Widgets::WidgetHandle root = D2RL::Widgets::InvalidHandle, widget = D2RL::Widgets::InvalidHandle;
-	return WidgetApi && WidgetApi->findPanel(Context, name.c_str(), &root) == D2RL::Widgets::Result::Success
-	    && WidgetApi->findWidget(Context, root, probe.c_str(), &widget) == D2RL::Widgets::Result::Success;
-}
-
-// The view last opened: its panel and probe, and when it was opened.
-std::string LoadingPanel, LoadingProbe;
-ULONGLONG   LoadingSince {};
-bool        ViewWanted {}, ViewQueued {};
-
-// ---- view trace (to find why a reopened panel keeps its old layout) ----
-// The last views opened, logged when a reopened panel misses its layout.
-namespace Ui {
-extern std::uint8_t Last[0x40];
-}
-struct ViewTrace {
-	unsigned    serial {};
-	unsigned    probe {};                // its probe's tag (0 or 1)
-	int         panel {};
-	bool        reused {}, early {}; // early: the view before was not loaded yet
-	char        origin {};           // w wheel, d drag, - other
-	std::size_t bytes {};
-	int         scroll {};
-	ULONGLONG   at {};
-	int         loadMs = -1;         // -1: never seen loaded
-	unsigned    registered {}, opened {};
-	int         uses {};                 // layouts the panel had been given
-	std::uint8_t labels {};          // ui state 0x0C when opened
-};
-std::vector<ViewTrace> Traces;
-char                   ViewOrigin = '-';
-
-std::string PanelName(int panel);
-int&        ScrollOf();
-
-// Notes when views finished loading (UI thread, often).
-void TraceLoads() {
-	const auto now = GetTickCount64();
-	for (std::size_t k = 0; k < Traces.size(); ++k) {
-		auto& t = Traces[k];
-		if (t.loadMs >= 0 || now - t.at > 20000) continue;
-		bool newest = true; // a later view on the same panel reuses the names
-		for (std::size_t j = k + 1; j < Traces.size(); ++j)
-			if (Traces[j].panel == t.panel) newest = false;
-		if (newest && Loaded(PanelName(t.panel), "Probe" + std::to_string(t.probe))) {
-			t.loadMs = static_cast<int>(now - t.at);
-			if (t.loadMs > 400) Log(false, "view #%u on panel %d took %d ms to load (%zu bytes, %s)", t.serial, t.panel, t.loadMs, t.bytes, t.reused ? "reopened" : "new");
-		}
-	}
-}
-
-void DumpTraces(const char* why) {
-	TraceLoads();
-	const auto now = GetTickCount64();
-	Log(true, "%s; the last %zu views, newest last:", why, Traces.size());
-	for (const auto& t : Traces) {
-		char load[32];
-		if (t.loadMs >= 0) std::snprintf(load, sizeof(load), "loaded in %d ms", t.loadMs);
-		else std::snprintf(load, sizeof(load), "never seen loaded");
-		Log(false, "  #%u %llu ms ago: panel %d %s (layout %d), by %c%s, scroll %d, %zu bytes, layout %u open %u, labels %u, %s", t.serial, static_cast<unsigned long long>(now - t.at), t.panel,
-		    t.reused ? "reopened" : "new", t.uses, t.origin, t.early ? ", before the last view loaded" : "", t.scroll, t.bytes, t.registered, t.opened, t.labels, load);
-	}
-}
-
-void ShowViewNow();
-
-// Rebuilds wait for the next frame (fast clicks and scrolls make one) and for
-// the last view's layout to be loaded (at most 3 s): a panel opened while
-// another one is still loading can leave the game with a widget it failed to
-// create, and a panel reopened before its load ended keeps its old layout
-// (dragging the scroll bar far in a long page did that with 500 ms).
-void __cdecl ViewTask(const D2RL::PluginContext*, void*) noexcept {
-	ViewQueued = false;
-	if (!ViewWanted) return;
-	if (!LoadingPanel.empty() && (!Loaded(LoadingPanel, LoadingProbe) || GetTickCount64() - LoadingSince < 50) && GetTickCount64() - LoadingSince < 1000) {
-		ViewQueued = Threads && Threads->runOnUiThread(Context, ViewTask, nullptr) == D2RL::Threads::Result::Success;
-		if (ViewQueued) return;
-	}
-	ViewWanted = false;
-	ShowViewNow();
-}
+bool MenuOpen() { return Window.IsOpen(); }
 
 void ShowView() {
-	ViewWanted = true;
-	if (ViewQueued) return;
-	ViewQueued = Threads && Threads->runOnUiThread(Context, ViewTask, nullptr) == D2RL::Threads::Result::Success;
-	if (!ViewQueued) ViewWanted = false, ShowViewNow();
-}
-
-void ShowViewNow() {
-	if (Panels.empty() || !PanelApi || !ResourceApi) {
+	if (!Window.Ready()) {
 		Say("I Hate TOMLs is not available (see i-hate-tomls.log)");
 		return;
 	}
-	const bool early = !LoadingPanel.empty() && !Loaded(LoadingPanel, LoadingProbe);
-	const int  index = NextPanel();
-	auto&      next  = Panels[static_cast<std::size_t>(index)];
-	++Serial;
-	// The probe's name alternates between 2 per panel, so it tells the new
-	// layout from the one before: every name looked up with findWidget takes a
-	// widget handle for good (WidgetService has no release), and the loader
-	// stops at 256 of them per plugin, after which no lookup succeeds. One new
-	// name per view (Probe<serial>) used them all up at view 255 (2 panels)
-	// or 197 (60 panels).
-	const unsigned tag = static_cast<unsigned>(next.uses) % 2;
-	static std::vector<std::string> kept; // the loader copies the bytes, but keep them anyway
-	if (kept.size() > 8) kept.erase(kept.begin());
-	kept.push_back(ViewLayout(next.id, tag));
-	const std::string& layout = kept.back();
-	ClosePanels();
-	// Without reuse each view takes a fresh panel: the one left behind is
-	// unloaded, so loaded panels don't pile up.
-	if (WidgetApi && ShownPanel >= 0 && ShownPanel != index && Panels[static_cast<std::size_t>(ShownPanel)].opened) {
-		const std::string             name = std::string(PluginId) + "/" + Panels[static_cast<std::size_t>(ShownPanel)].id;
-		const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = name.c_str() };
-		(void)WidgetApi->dispatchUiAction(Context, &unload);
-	}
-	if (next.opened && WidgetApi) {
-		const std::string             name = std::string(PluginId) + "/" + next.id;
-		const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = name.c_str() };
-		(void)WidgetApi->dispatchUiAction(Context, &unload);
-	}
-	if (next.layout != D2RL::Resources::InvalidHandle) (void)ResourceApi->unregisterResource(Context, next.layout);
-	next.layout            = D2RL::Resources::InvalidHandle;
-	const std::string path = "data/global/ui/layouts/i-hate-tomls/" + next.id + "hd.json";
-	const D2RL::Resources::ResourceRegistration resource {
-		.structSize = D2RL::Resources::ResourceRegistrationSize,
-		.path       = path.c_str(),
-		.bytes      = layout.data(),
-		.byteCount  = layout.size(),
-	};
-	const auto registered = ResourceApi->registerResource(Context, &resource, &next.layout);
-	++next.uses;
-	const auto opened     = PanelApi->openPanel(Context, next.panel);
-	if (registered != D2RL::Resources::Result::Success || opened != D2RL::Panels::Result::Success)
-		Log(true, "view on %s: layout result %u, open result %u (%zu bytes)", next.id.c_str(), static_cast<unsigned>(registered), static_cast<unsigned>(opened), layout.size());
-	LoadingPanel = std::string(PluginId) + "/" + next.id;
-	LoadingProbe = "Probe" + std::to_string(tag);
-	LoadingSince = GetTickCount64();
-	ViewTrace trace { .serial = Serial, .probe = tag, .panel = index, .reused = next.opened, .early = early, .origin = ViewOrigin, .bytes = layout.size(), .scroll = ScrollOf(), .at = LoadingSince,
-		              .registered = static_cast<unsigned>(registered), .opened = static_cast<unsigned>(opened), .uses = next.uses, .labels = Ui::Last[0x0C] };
-	ViewOrigin = '-';
-	if (Traces.size() >= 30) Traces.erase(Traces.begin());
-	Traces.push_back(trace);
-	if (ReuseWorks && next.opened) {
-		ProbeName  = LoadingProbe;
-		ProbePanel = LoadingPanel;
-		ProbeUntil = 0; // counted from when the panel is open
-	}
-	next.opened = true;
-	ShownPanel  = index;
-	MenuVisible = true;
-	WatchMouse();
-	if (Threads) (void)Threads->runOnUiThread(Context, ProbeTask, nullptr);
+	Window.Show();
 }
 
-// Each frame until done: once a reused panel is open, checks that it shows
-// the new layout. True to run again next frame.
-// Only a probe of the panel still shown, open for 1 s, counts; reuse is given
-// up after three such misses in a row.
-bool CheckProbe() {
-	TraceLoads();
-	if (ProbeName.empty() || !WidgetApi) return false;
-	if (Loaded(ProbePanel, ProbeName)) {
-		ProbeName.clear();
-		ProbeMisses = 0;
-		return false;
-	}
-	// another view replaced it, or the menu closed: no verdict
-	if (ShownPanel < 0 || ProbePanel != std::string(PluginId) + "/" + Panels[static_cast<std::size_t>(ShownPanel)].id || !MenuOpen()) {
-		if (!MenuOpen() || ProbeName != LoadingProbe) ProbeName.clear();
-		return !ProbeName.empty();
-	}
-	if (!ProbeUntil) ProbeUntil = GetTickCount64() + 1000; // views load within a frame or two
-	if (GetTickCount64() < ProbeUntil) return true;
-	{
-		// what the panel shows instead: the view it had before, or nothing
-		const int   shown = ShownPanel;
-		std::string before;
-		(void)shown;
-		before = ProbeName == "Probe0" ? "Probe1" : "Probe0";
-		D2RL::Widgets::WidgetHandle root = D2RL::Widgets::InvalidHandle, widget = D2RL::Widgets::InvalidHandle;
-		const auto panelResult = WidgetApi->findPanel(Context, ProbePanel.c_str(), &root);
-		const auto newResult   = WidgetApi->findWidget(Context, root, ProbeName.c_str(), &widget);
-		const auto oldResult   = WidgetApi->findWidget(Context, root, before.c_str(), &widget);
-		Log(true, "reopened panel %s: findPanel %u, new %s findWidget %u, old %s findWidget %u, ui 0x0C %u", ProbePanel.c_str(), static_cast<unsigned>(panelResult), ProbeName.c_str(),
-		    static_cast<unsigned>(newResult), before.c_str(), static_cast<unsigned>(oldResult), Ui::Last[0x0C]);
-		static int dumps = 0;
-		if (dumps++ < 3) DumpTraces("a reopened panel missed its new layout");
-	}
-	ProbeName.clear();
-	// a lost load now and then (dragging the bar fast): the view is shown again
-	if (++ProbeMisses < 3) {
-		Log(true, "a reopened panel did not show its new layout within 1 s; showing the view again");
-		ShowView();
-		return false;
-	}
-	ReuseWorks    = false;
-	FallbackSince = GetTickCount64();
-	Log(true, "a reopened panel kept its old layout; each view takes a new panel for a minute");
-	ShowView();
-	return false;
+void StopTyping(bool keep);
+void RetryReuse() { Window.RetryReuse(); }
+
+void CloseMenu() {
+	StopTyping(true);
+	Window.Close();
+	ConfirmRow = -1;
+	SetNotice({});
+	Gui::LeftPanel::Closed();
 }
 
 // The Hub's answer came: the list shows it if it is on screen.
@@ -2940,27 +1862,10 @@ void __cdecl Hub::Refresh(const D2RL::PluginContext*, void*) noexcept {
 	if (MenuOpen() && Current == View::List) ShowView();
 }
 
-void __cdecl ProbeTask(const D2RL::PluginContext*, void*) noexcept {
-	if (CheckProbe() && Threads) (void)Threads->runOnUiThread(Context, ProbeTask, nullptr);
-}
-
 // ---- typing ----
-// While a box is active, a low-level keyboard hook on a thread of the
-// plugin's own sends the keys to a hidden Windows EDIT control there (so
-// keyboard layouts, Shift, AltGr and paste work) and keeps them from the
-// game; the window shows the box's text with a caret. Enter keeps the text
-// (a joined plugin's text is saved then), Esc puts it back, a click anywhere
-// else keeps it.
-
-std::atomic<bool>          TypedChanged {}, EnterHit {}, EscHit {};
-std::atomic<std::uint64_t> TypeClickAt {}, TypeHitAt {}; // the last click, the last click on the box
-std::mutex                 TypedLock;
-std::wstring               Typed; // the box's text, as the EDIT control has it
-
-void __cdecl TypedTask(const D2RL::PluginContext*, void*) noexcept;
-void TypedNow() {
-	if (Threads) (void)Threads->runOnUiThread(Context, TypedTask, nullptr);
-}
+// The game's text boxes get no keys in a plugin's panel: D2R GUI's TextInput
+// takes them while a box is active. Enter keeps the text (a joined plugin's
+// text is saved then), Esc puts it back, a click anywhere else keeps it.
 
 // The joined plugin's setting a "s<index>" box edits.
 Setting* DraftSetting(const std::string& key) {
@@ -2997,129 +1902,37 @@ void SetBoxText(const std::string& key, const std::string& text) {
 	else if (std::string* box = TomlText(key)) *box = text;
 }
 
-#ifdef _WIN32
-HWND               Edit {};
-HHOOK              Hook {};
-HANDLE             InputThread {};
-std::atomic<DWORD> InputThreadId {};
-std::uint8_t       Forwarded[256] {};
-constexpr UINT     MsgLoad = WM_APP + 43;
-
-bool GameInFront() {
-	const HWND front = GetForegroundWindow();
-	DWORD      pid   = 0;
-	return front && GetWindowThreadProcessId(front, &pid) && pid == GetCurrentProcessId();
-}
-
-LRESULT CALLBACK KeyHook(int code, WPARAM wParam, LPARAM lParam) {
-	const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
-	if (code < 0 || !key || key->vkCode > 0xFF || (wParam != WM_KEYDOWN && wParam != WM_KEYUP)) return CallNextHookEx(Hook, code, wParam, lParam);
-	const DWORD vk = key->vkCode;
-	if (wParam == WM_KEYUP) {
-		if (!Forwarded[vk]) return CallNextHookEx(Hook, code, wParam, lParam);
-		Forwarded[vk] = 0;
-	} else if (!Typing || !GameInFront()) return CallNextHookEx(Hook, code, wParam, lParam);
-	switch (vk) {
-	case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: case VK_MENU: case VK_LMENU: case VK_RMENU:
-	case VK_LWIN: case VK_RWIN: case VK_CAPITAL: case VK_NUMLOCK: case VK_SCROLL: return CallNextHookEx(Hook, code, wParam, lParam);
-	default: break;
-	}
-	const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0, alt = (key->flags & LLKHF_ALTDOWN) != 0;
-	if (alt && !ctrl) return CallNextHookEx(Hook, code, wParam, lParam); // Alt+Tab, Alt+F4, Alt+Enter
-	if (wParam == WM_KEYDOWN && (vk == VK_RETURN || vk == VK_ESCAPE)) {
-		Forwarded[vk] = 1;
-		if (vk == VK_ESCAPE) Typing = false, EscHit = true;
-		else EnterHit = true;
-		TypedNow();
-		return 1;
-	}
-	if (!Edit) return CallNextHookEx(Hook, code, wParam, lParam);
-	LPARAM message = static_cast<LPARAM>(1 | (static_cast<std::uint64_t>(static_cast<std::uint8_t>(key->scanCode)) << 16) | ((key->flags & LLKHF_EXTENDED) ? 0x01000000ULL : 0));
-	if (wParam == WM_KEYUP) message |= static_cast<LPARAM>(0xC0000000ULL);
-	UINT   id    = static_cast<UINT>(wParam);
-	WPARAM value = vk;
-	if (wParam == WM_KEYDOWN && ctrl && !alt && (vk == 'A' || vk == 'C' || vk == 'V' || vk == 'X' || vk == 'Z')) id = WM_CHAR, value = vk - 'A' + 1;
-	if (!PostMessageW(Edit, id, value, message)) return CallNextHookEx(Hook, code, wParam, lParam);
-	if (wParam == WM_KEYDOWN) Forwarded[vk] = 1;
-	return 1;
-}
-
-// The game window's keyboard layout and key states, so the EDIT control
-// makes the characters the game would.
-void SyncKeyboard() {
-	HWND game = GetForegroundWindow();
-	if (DWORD pid = 0; game && GetWindowThreadProcessId(game, &pid) && pid == GetCurrentProcessId())
-		if (const HKL layout = GetKeyboardLayout(GetWindowThreadProcessId(game, nullptr)); layout && layout != GetKeyboardLayout(0)) ActivateKeyboardLayout(layout, 0);
-	BYTE keys[256] {};
-	if (!GetKeyboardState(keys)) return;
-	for (const int vk : { VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU, VK_RMENU })
-		keys[vk] = (GetAsyncKeyState(vk) & 0x8000) ? 0x80 : 0;
-	for (const int vk : { VK_CAPITAL, VK_NUMLOCK })
-		keys[vk] = static_cast<BYTE>((GetKeyState(vk) & 1) | ((GetAsyncKeyState(vk) & 0x8000) ? 0x80 : 0));
-	SetKeyboardState(keys);
-}
-
-DWORD WINAPI InputMain(void*) {
-	HMODULE self = nullptr;
-	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&KeyHook), &self);
-	Edit = CreateWindowExW(0, L"EDIT", L"", ES_AUTOHSCROLL, 0, 0, 0, 0, HWND_MESSAGE, nullptr, self, nullptr);
-	if (Edit) SendMessageW(Edit, EM_LIMITTEXT, 2000, 0), SetFocus(Edit);
-	Hook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyHook, self, 0);
-	if (!Edit || !Hook) Log(true, "typing could not start (edit %d, hook %d)", Edit != nullptr, Hook != nullptr);
-	MSG message {};
-	PeekMessageW(&message, nullptr, WM_USER, WM_USER, PM_NOREMOVE); // the queue exists before the thread id is known
-	InputThreadId = GetCurrentThreadId();
-	while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-		if (message.message == MsgLoad) { // another box: its text, the caret at its end
-			std::wstring text;
-			{
-				std::lock_guard guard(TypedLock);
-				text = Typed;
-			}
-			if (Edit) SetWindowTextW(Edit, text.c_str()), SendMessageW(Edit, EM_SETSEL, text.size(), text.size());
-			continue;
-		}
-		const bool key = message.message == WM_KEYDOWN || message.message == WM_KEYUP || message.message == WM_CHAR;
-		if (message.message == WM_KEYDOWN || message.message == WM_KEYUP) SyncKeyboard();
-		TranslateMessage(&message);
-		DispatchMessageW(&message);
-		if (key && Edit) {
-			std::wstring buffer(static_cast<std::size_t>(GetWindowTextLengthW(Edit)) + 1, L'\0');
-			buffer.resize(static_cast<std::size_t>(GetWindowTextW(Edit, buffer.data(), static_cast<int>(buffer.size()))));
-			std::lock_guard guard(TypedLock);
-			if (Typed != buffer) Typed = buffer, TypedChanged = true, TypedNow();
-		}
-	}
-	return 0;
-}
-#endif
-
 // UI thread: typing goes to box `key`.
 void StartTyping(const std::string& key) {
-	TypeHitAt = GetTickCount64();
-	if (Typing && TypingKey == key) return;
-	StopTyping(true);
-	const std::string text = BoxText(key);
-	TypingKey              = key;
-	TypingBefore           = text;
-	if (key[0] == 's') ClientDraft = text;
-	{
-		std::lock_guard guard(TypedLock);
-		Typed = Wide(text);
+	if (!(Gui::TextInput::Active() && TypingKey == key)) {
+		StopTyping(true);
+		const std::string text = BoxText(key);
+		TypingKey              = key;
+		TypingBefore           = text;
+		if (key[0] == 's') ClientDraft = text;
 	}
-	TypedChanged = false, EnterHit = false, EscHit = false;
-#ifdef _WIN32
-	if (!InputThread) InputThread = CreateThread(nullptr, 0, InputMain, nullptr, 0, nullptr);
-	std::memset(Forwarded, 0, sizeof(Forwarded));
-	for (int k = 0; k < 50 && !InputThreadId; ++k) Sleep(2);
-	if (const DWORD id = InputThreadId.load()) PostThreadMessageW(id, MsgLoad, 0, 0);
-#endif
-	Typing = true;
+	Gui::TextInput::Start(key, TypingBefore, {
+	    .changed = [](const std::string& text) {
+		    if (TypingKey.empty()) return;
+		    if (!MenuOpen()) return StopTyping(true);
+		    SetBoxText(TypingKey, text);
+		    ShowView();
+	    },
+	    .enter  = [](const std::string&) { StopTyping(true), ShowView(); },
+	    .escape = [] {
+		    StopTyping(false);
+		    if (MenuOpen()) ShowView();
+	    },
+	    .away = [](const std::string&) {
+		    StopTyping(true);
+		    if (MenuOpen()) ShowView();
+	    },
+	});
 }
 
 // UI thread: the box lets the keys go; `keep` false puts its text back.
 void StopTyping(bool keep) {
-	Typing                = false;
+	Gui::TextInput::Stop();
 	const std::string key = std::move(TypingKey);
 	TypingKey.clear();
 	if (key.empty()) return;
@@ -3129,357 +1942,68 @@ void StopTyping(bool keep) {
 	ClientDraft.clear();
 }
 
-void __cdecl TypedTask(const D2RL::PluginContext*, void*) noexcept {
-	if (EscHit.exchange(false)) {
-		StopTyping(false);
-		if (MenuOpen()) ShowView();
-		return;
-	}
-	if (TypingKey.empty()) return;
-	if (!MenuOpen()) return StopTyping(true);
-	const bool changed = TypedChanged.exchange(false);
-	if (changed) {
-		std::wstring typed;
-		{
-			std::lock_guard guard(TypedLock);
-			typed = Typed;
-		}
-		SetBoxText(TypingKey, Narrow(typed));
-	}
-	if (EnterHit.exchange(false)) StopTyping(true);
-	else if (!changed) return;
-	ShowView();
-}
-
-// UI thread, a moment after a click while typing: a click anywhere but on
-// the box (its command came first) lets the keys go.
-void __cdecl ClickTask(const D2RL::PluginContext*, void*) noexcept {
-	const auto click = TypeClickAt.exchange(0);
-	if (!click || TypingKey.empty() || TypeHitAt.load() >= click) return;
-	StopTyping(true);
-	if (MenuOpen()) ShowView();
-}
-
-// ---- scrolling ----
-// No plugin service reports the wheel or the mouse moving, so the game
-// window is subclassed (as Grail On! does): while the menu is open, the wheel
-// over the left of the screen scrolls it, and the left button held on the
-// scroll bar drags it.
+// ---- scrolling, watching ----
 
 int& ScrollOf() { return Current == View::List ? ListScroll : Current == View::Client ? ClientScroll : Toml.scroll; }
 
-// The furthest the shown view scrolls; its row from scroll bar step `step`.
-int StepRow(int step) {
-	const int steps = std::max(2, BarSteps.load());
-	return (BarMax * std::clamp(step, 0, steps - 1) + (steps - 1) / 2) / (steps - 1);
-}
-
-std::atomic<int> WheelSum {}, DragRow { -1 };
-
-void __cdecl WheelTask(const D2RL::PluginContext*, void*) noexcept {
-	const int rows = WheelSum.exchange(0);
-	if (!rows || !MenuOpen()) return;
-	int&      scroll = ScrollOf();
-	const int before = scroll;
-	scroll           = std::clamp(scroll + rows * WheelStep, 0, std::max(0, BarMax.load()));
-	if (scroll != before) ViewOrigin = 'w', ShowView();
-}
-
-void __cdecl DragTask(const D2RL::PluginContext*, void*) noexcept {
-	const int row = DragRow.load();
-	if (row < 0 || !MenuOpen() || ScrollOf() == row) return;
-	ScrollOf() = row;
-	ViewOrigin = 'd';
-	ShowView();
-}
-
-// UI thread, now and then: whether the menu is open, for the window's thread.
-// The game's panels on the left side: the menu closes them when it opens,
-// and closes when one of them opens.
-constexpr const char* LeftPanels[] { "CharacterStatsPanel", "QuestLogPanel",      "PartyPanel",        "WaypointsPanel", "HirelingInventoryPanel", "BankExpansionLayout", "BankOriginalLayout",
-	                                 "VendorPanelLayout",   "HoradricCubeLayout", "TradePanel",        "MessageLogPanel", "ImbueItemsPanel",        "HireMenuPanel" };
-bool LeftShown[std::size(LeftPanels)] {};
-
-// The game's UI state bytes (0xCE500(id) reads them; 1 = inventory, as in
-// Inventory Fill). D2RLoader 1.3.1 may lack getWidgetState, so the left
-// panels are also followed here (the ids below are the game's own list; the
-// older classic numbers in this note were wrong for D2R: 0x0C is Alt's item labels)
-// (2 character, 0x0C shop, 0x0F/0x11 quests, 0x14 waypoints, 0x16 party,
-// 0x17 trade, 0x18 messages, 0x19 stash, 0x1A cube, 0x24 merc). Every change
-// of bytes 0-0x3F is logged, to confirm them.
-namespace Ui {
-constexpr std::uint64_t StateRva = 0xCE500;
-constexpr std::uint8_t  StateStart[] { 0x48, 0x63, 0xC1, 0x48, 0x8D, 0x0D };
-// the states the game itself counts as a left panel when it moves the view (D2R+0xC01D0)
-constexpr int           LeftIds[] { 0x02, 0x0B, 0x0D, 0x0E, 0x0F, 0x13, 0x15, 0x18, 0x19, 0x1E };
-std::uint8_t            Last[0x40] {};
-bool                    Known {};
-using StateFn = std::uint8_t (*)(int) noexcept;
-
-StateFn State() {
-	static int ok = -1;
-	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
-	if (ok < 0) {
-		ok = base && Chat::Readable(base + StateRva, sizeof(StateStart)) && std::memcmp(reinterpret_cast<const void*>(base + StateRva), StateStart, sizeof(StateStart)) == 0;
-		Log(!ok, ok ? "ui states: read at D2R+0xCE500" : "ui states: not where this build expects them; left panels followed by their widgets only");
-		Log(false, "widget states: %s", WidgetApi && D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceGetWidgetStateFieldEnd) && WidgetApi->getWidgetState ? "available" : "missing in this D2RLoader");
-	}
-	return ok ? reinterpret_cast<StateFn>(base + StateRva) : nullptr;
-}
-
-bool LeftOpen(const std::uint8_t* states) {
-	for (const int id : LeftIds)
-		if (states[id]) return true;
-	return false;
-}
-
-// Reads the bytes; true when a left panel opened since the last read.
-bool Update() {
-	const auto read = State();
-	if (!read) return false;
-	std::uint8_t now[0x40] {};
-	for (int id = 0; id < 0x40; ++id) now[id] = read(id);
-	bool opened = false;
-	if (Known)
-		for (int id = 0; id < 0x40; ++id)
-			if (now[id] != Last[id]) {
-				Log(false, "ui state 0x%02X: %u -> %u%s", id, Last[id], now[id], MenuVisible ? " (menu open)" : "");
-				if (!Last[id] && now[id] && std::find(std::begin(LeftIds), std::end(LeftIds), id) != std::end(LeftIds)) opened = true;
-			}
-	std::memcpy(Last, now, sizeof(now));
-	Known = true;
-	return opened;
-}
-} // namespace Ui
-
-bool PanelVisible(const char* name) {
-	if (!WidgetApi || !D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceGetWidgetStateFieldEnd) || !WidgetApi->getWidgetState) return false;
-	D2RL::Widgets::WidgetHandle panel = D2RL::Widgets::InvalidHandle;
-	D2RL::Widgets::State        state {};
-	return WidgetApi->findPanel(Context, name, &panel) == D2RL::Widgets::Result::Success && WidgetApi->getWidgetState(Context, panel, &state) == D2RL::Widgets::Result::Success && state.visible;
-}
-
-// UI thread: the game's left panels closed, before the menu opens.
-
-// ---- the camera ----
-// A game panel on the left moves the view a quarter of the screen to the
-// right: the game keeps a panel mode (0 none, 1 right, 2 left, 3 both) and
-// sets it with D2R+0xB9C20(mode), which moves its viewport. While the menu is
-// open it adds the left side the same way (again after the game sets the mode
-// for another panel), and takes it back once the menu is closed, unless one
-// of the game's left panels has it now.
-namespace Camera {
-constexpr std::uint64_t SetRva = 0xB9C20;
-constexpr std::uint8_t  Start[] { 0x48, 0x83, 0xEC, 0x38, 0x44, 0x8B, 0x0D }; // sub rsp, 38h; mov r9d, [width]
-constexpr std::uint8_t  Store[] { 0x89, 0x0D };                               // at +0x0F: mov [mode], ecx
-using SetFn = void (*)(int) noexcept;
-SetFn             Set {};
-const volatile int* Mode {};
-bool              Ours {};   // the left side is the menu's
-int               Closed {}; // watches in a row with the menu closed
-
-bool Find() {
-	static int ok = -1;
-	if (ok < 0) {
-		const auto base = static_cast<std::uintptr_t>(Context->exeBase);
-		ok              = base && Chat::Readable(base + SetRva, 0x15) && std::memcmp(reinterpret_cast<const void*>(base + SetRva), Start, sizeof(Start)) == 0
-		  && std::memcmp(reinterpret_cast<const void*>(base + SetRva + 0x0F), Store, sizeof(Store)) == 0;
-		if (ok) {
-			std::int32_t disp = 0;
-			std::memcpy(&disp, reinterpret_cast<const void*>(base + SetRva + 0x11), sizeof(disp));
-			Set  = reinterpret_cast<SetFn>(base + SetRva);
-			Mode = reinterpret_cast<const volatile int*>(base + SetRva + 0x15 + disp);
-			ok   = Chat::Readable(reinterpret_cast<std::uintptr_t>(Mode), sizeof(int));
-		}
-		Log(!ok, ok ? "camera: panel mode set at D2R+0xB9C20" : "camera: the panel mode is not where this build expects it; the view does not move for the menu");
-	}
-	return ok > 0;
-}
-
-// UI thread, the menu open.
-void Hold() {
-	Closed = 0;
-	if (!Chat::InGame || !Find()) return;
-	const int mode = *Mode;
-	if (mode < 0 || mode > 3 || (mode & 2)) return;
-	Set(mode | 2);
-	Ours = true;
-	static int sets = 0;
-	if (++sets % 25 == 0) Log(false, "camera: the view moved for the menu %d times", sets);
-}
-
-// UI thread, the menu closed; `now` when it surely is (not between views).
-void Release(bool now) {
-	if (!Ours || (!now && ++Closed < 2)) return;
-	Ours = false;
-	if (!Chat::InGame || !Find()) return;
-	if (Ui::Known && Ui::LeftOpen(Ui::Last)) return; // a game panel took the left side
-	const int mode = *Mode;
-	if (mode >= 0 && mode <= 3 && (mode & 2)) Set(mode & 1);
-}
-} // namespace Camera
-
-void CloseLeftPanels() {
-	const bool stateOpen = Ui::Update(), anyLeft = Ui::Known && Ui::LeftOpen(Ui::Last);
-	(void)stateOpen;
-	for (std::size_t k = 0; k < std::size(LeftPanels); ++k) {
-		// as seen now: only a panel opening from here on closes the menu
-		LeftShown[k] = PanelVisible(LeftPanels[k]);
-		if (!WidgetApi || !(LeftShown[k] || anyLeft)) continue;
-		const D2RL::Widgets::UiAction close { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "ClosePanel", .text = LeftPanels[k] };
-		(void)WidgetApi->dispatchUiAction(Context, &close);
-	}
-}
-
-void __cdecl WatchTask(const D2RL::PluginContext*, void*) noexcept {
-	TraceLoads();
+// UI thread, every 250 ms once the menu has opened: a game left panel opening
+// closes the menu; the view moves for the menu while it is open.
+void Watch() {
 	MenuVisible = MenuOpen();
 	if (!MenuVisible && !TypingKey.empty()) StopTyping(true);
-	// a left panel that opens while the menu is open closes the menu
-	bool opened = Ui::Update() && MenuVisible;
-	for (std::size_t k = 0; k < std::size(LeftPanels); ++k) {
-		const bool shown = MenuVisible && PanelVisible(LeftPanels[k]);
-		opened           = opened || (shown && !LeftShown[k]);
-		LeftShown[k]     = shown;
-	}
-	if (opened) {
+	if (Gui::LeftPanel::Watch(MenuVisible, Window.Busy())) {
 		CloseMenu();
 		MenuVisible = false;
 	}
-	if (MenuVisible) Camera::Hold();
-	// closed by the game (Escape): at once unless a new view is on its way
-	else Camera::Release(!ViewWanted && !ViewQueued && GetTickCount64() - LoadingSince > 400);
 }
 
-#ifdef _WIN32
-HWND                GameWindow {};
-WNDPROC             GameProc {};
-std::atomic<bool>   BarLearned {};
-std::atomic<double> BarOffsetX {}, BarOffsetY {};
-bool                Dragging {}; // window thread
-
-double UiScale() {
-	RECT client {};
-	return GameWindow && GetClientRect(GameWindow, &client) && client.bottom > 0 ? client.bottom / 2160.0 : 0;
-}
-
-// Where the panel is in the window: window = panel * scale + offset. The
-// game draws its UI at the window's height / 2160, the panel hanging from
-// $LeftPanelAnchor (x 0, y 39.7% of the height). A click on a scroll step
-// puts the offset where the click was.
-std::pair<double, double> PanelOffset() {
-	if (BarLearned) return { BarOffsetX, BarOffsetY };
-	RECT client {};
-	if (!GameWindow || !GetClientRect(GameWindow, &client)) return {};
-	const double scale = client.bottom / 2160.0;
-	return { PanelX * scale, client.bottom * 0.397 + PanelY * scale };
-}
-
-void LearnBar(int step) {
-	POINT        cursor {};
-	const double scale = UiScale();
-	if (!scale || !GetCursorPos(&cursor) || !ScreenToClient(GameWindow, &cursor)) return;
-	BarOffsetX = cursor.x - (BarLeft + ScrollWidth / 2.0) * scale;
-	BarOffsetY = cursor.y - (BarTop + (step + 0.5) * StepHeight) * scale;
-	BarLearned = true;
-}
-
-// The step under a window point, or -1 off the bar (with `loose`, any
-// height counts: a drag goes on above and below the bar).
-int StepAt(POINT point, bool loose) {
-	const double scale = UiScale();
-	if (!scale) return -1;
-	const auto [ox, oy] = PanelOffset();
-	const int    steps  = BarSteps;
-	const double x = (point.x - ox) / scale, y = (point.y - oy) / scale - BarTop;
-	if (!loose && (x < BarLeft - 12 || x > BarLeft + ScrollWidth + 12 || y < 0 || y >= steps * StepHeight)) return -1;
-	return std::clamp(static_cast<int>(std::floor(y / StepHeight)), 0, steps - 1);
-}
-
-LRESULT CALLBACK MenuProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-	if (message == WM_MOUSEWHEEL && MenuVisible) {
-		POINT point { static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) };
-		RECT  client {};
-		if (ScreenToClient(window, &point) && GetClientRect(window, &client) && point.x < client.right * 45 / 100) {
-			if (WheelSum.fetch_add(static_cast<short>(HIWORD(wParam)) > 0 ? -1 : 1) == 0 && Threads) (void)Threads->runOnUiThread(Context, WheelTask, nullptr);
-			return 0;
-		}
-	}
-	const POINT point { static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) };
-	if (message == WM_LBUTTONDOWN && MenuVisible && BarMax > 0 && StepAt(point, false) >= 0) Dragging = true, DragRow = -1;
-	else if (message == WM_MOUSEMOVE && Dragging) {
-		if ((wParam & MK_LBUTTON) && MenuVisible && BarMax > 0) {
-			const int step = StepAt(point, true);
-			if (step >= 0 && DragRow.exchange(StepRow(step)) != StepRow(step) && Threads) (void)Threads->runOnUiThread(Context, DragTask, nullptr);
-		} else Dragging = false;
-	} else if (message == WM_LBUTTONUP) Dragging = false;
-	if ((message == WM_LBUTTONUP || message == WM_RBUTTONUP) && Typing) {
-		TypeClickAt = GetTickCount64();
-		std::thread([] {
-			Sleep(150);
-			if (Threads) (void)Threads->runOnUiThread(Context, ClickTask, nullptr);
-		}).detach();
-	}
-	return CallWindowProcW(GameProc, window, message, wParam, lParam);
-}
-
-BOOL CALLBACK FindGameWindow(HWND window, LPARAM found) {
-	DWORD process = 0;
-	GetWindowThreadProcessId(window, &process);
-	if (process != GetCurrentProcessId() || !IsWindowVisible(window) || GetWindow(window, GW_OWNER)) return TRUE;
-	RECT rect {}, best {};
-	auto* result = reinterpret_cast<HWND*>(found);
-	GetWindowRect(window, &rect);
-	if (*result) GetWindowRect(*result, &best);
-	if (!*result || (rect.right - rect.left) * (rect.bottom - rect.top) > (best.right - best.left) * (best.bottom - best.top)) *result = window;
-	return TRUE;
-}
-
-// Once, when the menu first opens: the mouse watched, and a thread that
-// asks the UI thread now and then whether the menu is still open.
+// Once, when the menu first opens: the wheel over the left of the screen
+// scrolls it, the scroll bar drags, the menu is watched.
 void WatchMouse() {
 	static bool started = false;
 	if (started) return;
 	started = true;
-	HWND window {};
-	EnumWindows(FindGameWindow, reinterpret_cast<LPARAM>(&window));
-	if (window) GameProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(MenuProc)));
-	if (GameProc) GameWindow = window;
-	else Log(true, "could not watch the mouse wheel (error %lu): use the scroll bar", GetLastError());
-	std::thread([] {
-		for (;;) {
-			Sleep(250);
-			if (Threads) (void)Threads->runOnUiThread(Context, WatchTask, nullptr);
-		}
-	}).detach();
+	Gui::WindowHook::Start({
+	    .active = [] { return MenuVisible.load(); },
+	    .wheel  = [](int notches) {
+            if (!MenuOpen()) return;
+            int&      scroll = ScrollOf();
+            const int before = scroll;
+            scroll           = std::clamp(scroll + notches * WheelStep, 0, std::max(0, Bar.Max()));
+            if (scroll != before) ShowView();
+	    },
+	    .wheelRight = 0.45,
+	    .watch      = Watch,
+	});
+	Bar.OnScroll([](int scroll) {
+		if (!MenuOpen() || ScrollOf() == scroll) return;
+		ScrollOf() = scroll;
+		ShowView();
+	});
+	Bar.Attach();
 }
-#else
-void LearnBar(int) {}
-void WatchMouse() {}
-#endif
 
 void Toggle() {
 	if (MenuOpen()) CloseMenu();
 	else {
 		SetNotice({});
-		Font::Refresh();
+		RefreshText();
 		Current = View::List;
 		WatchMouse();
-		CloseLeftPanels();
+		Gui::LeftPanel::Opening();
 		ShowView();
-		Camera::Hold(); // at once, not at the next watch
 	}
 	MenuVisible = MenuOpen();
 }
 
 void __cdecl ToggleTask(const D2RL::PluginContext*, void*) noexcept { Toggle(); }
 
+
 // ---- clicks ----
 
-std::string Pending;
 
 void OpenEntry(int index) {
-	Font::Refresh();
+	RefreshText();
 	const auto list = Entries();
 	if (index < 0 || index >= static_cast<int>(list.size())) return;
 	const auto& e = list[static_cast<std::size_t>(index)];
@@ -3647,12 +2171,7 @@ void RunCommand(const std::string& command) {
 		StartTyping(command.substr(4));
 		return ShowView();
 	}
-	if (command.rfind("step", 0) == 0) {
-		const int step = std::atoi(command.c_str() + 4);
-		LearnBar(step);
-		ScrollOf() = StepRow(step);
-		return ShowView();
-	}
+	if (Bar.Handle(command)) return; // a scroll bar step
 	StopTyping(true);
 	if (command == "close") {
 		CloseMenu();
@@ -3664,28 +2183,6 @@ void RunCommand(const std::string& command) {
 	else RunTomlCommand(command);
 }
 
-void __cdecl CommandTask(const D2RL::PluginContext*, void*) noexcept {
-	const std::string command = std::move(Pending);
-	Pending.clear();
-	RunCommand(command);
-}
-
-auto OnUiMessage(const D2RL::PluginContext*, const D2RL::SharedEvents::UiMessageEvent* event, void*) noexcept -> D2RL::SharedEvents::UiMessageAction {
-	if (!event || !event->text || !event->target || std::strcmp(event->target, "PanelManager") != 0) return D2RL::SharedEvents::UiMessageAction::Continue;
-	const std::size_t prefix = std::strlen(CommandPrefix);
-	if (std::strncmp(event->text, CommandPrefix, prefix) != 0) return D2RL::SharedEvents::UiMessageAction::Continue;
-	// D2R reports a button's message twice, about a millisecond apart.
-	static std::string last;
-	static ULONGLONG   lastMs {};
-	const ULONGLONG    now = GetTickCount64();
-	if (last == event->text && now - lastMs < 150) return D2RL::SharedEvents::UiMessageAction::Consume;
-	last   = event->text;
-	lastMs = now;
-	if (!Pending.empty()) return D2RL::SharedEvents::UiMessageAction::Consume; // one at a time
-	Pending = event->text + prefix;
-	if (!Threads || Threads->runOnUiThread(Context, CommandTask, nullptr) != D2RL::Threads::Result::Success) Pending.clear();
-	return D2RL::SharedEvents::UiMessageAction::Consume;
-}
 
 // ---- opening ----
 
@@ -3707,240 +2204,16 @@ auto PluginsCommand(D2R::Game::Client*, const D2RL::ConsoleCommandContext* comma
 
 // ---- after every plugin has loaded ----
 
-// The lobby's refresh button (Grail On!'s reset): its sprite file and frames,
-// found in the lobby panels' layouts. Read on the game thread.
-
-void FindRefreshButton() {
-	RefreshArt = {};
-	std::string trouble;
-	const std::string profile = ArchiveFile("data/global/ui/layouts/_profilehd.json", trouble);
-	const auto stringAfter = [](const std::string& text, std::size_t from, const char* key, std::size_t limit) -> std::string {
-		const auto at = text.find(std::string("\"") + key + "\"", from);
-		if (at == std::string::npos || at > limit) return {};
-		const auto open  = text.find('"', text.find(':', at) + 1);
-		const auto close = open == std::string::npos ? open : text.find('"', open + 1);
-		return close == std::string::npos ? std::string() : text.substr(open + 1, close - open - 1);
-	};
-	const auto numberAfter = [](const std::string& text, std::size_t from, const char* key, std::size_t limit, int fallback) {
-		const auto at = text.find(std::string("\"") + key + "\"", from);
-		if (at == std::string::npos || at > limit) return fallback;
-		return std::atoi(text.c_str() + text.find(':', at) + 1);
-	};
-	for (const char* panel : { "joingamepanelhd", "gamelistpanelhd", "ladderpanelhd", "friendslistpanelhd", "consolelobbypanelhd", "createGamepanelhd" }) {
-		const std::string path   = std::string("data/global/ui/layouts/") + panel + ".json";
-		const std::string layout = ArchiveFile(path.c_str(), trouble);
-		if (layout.empty()) continue;
-		for (std::size_t at = 0; (at = layout.find("\"name\"", at)) != std::string::npos; ++at) {
-			const auto  value = stringAfter(layout, at, "name", at + 8);
-			std::string lower = value;
-			for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-			if (lower.find("refresh") == std::string::npos) continue;
-			const auto  next     = layout.find("\"type\"", at + 8);
-			const auto  limit    = next == std::string::npos ? layout.size() : next;
-			std::string filename = stringAfter(layout, at, "filename", limit);
-			if (!filename.empty() && filename[0] == '$') filename = stringAfter(profile, 0, filename.c_str() + 1, profile.size());
-			if (filename.empty()) continue;
-			std::string file = "data/hd/global/ui/";
-			for (std::size_t k = 0; k < filename.size(); ++k) {
-				if (filename[k] == '\\') {
-					file += '/';
-					if (k + 1 < filename.size() && filename[k + 1] == '\\') ++k;
-				} else file += static_cast<char>(std::tolower(static_cast<unsigned char>(filename[k])));
-			}
-			file += ".sprite";
-			RefreshArt.file    = ArchiveFile(file.c_str(), trouble);
-			RefreshArt.normal  = numberAfter(layout, at, "normalFrame", limit, 0);
-			RefreshArt.hovered = numberAfter(layout, at, "hoveredFrame", limit, RefreshArt.normal);
-			RefreshArt.pressed = numberAfter(layout, at, "pressedFrame", limit, RefreshArt.normal);
-			Log(false, "refresh button %s in %s: %s (%s), frames %d/%d/%d", value.c_str(), panel, file.c_str(), RefreshArt.file.empty() ? "not read" : "read", RefreshArt.normal, RefreshArt.hovered,
-			    RefreshArt.pressed);
-			if (!RefreshArt.file.empty()) return;
-		}
-	}
-	Log(false, "the lobby's refresh button was not found; the reset button is the plugin's own");
-}
-
-// ---- the game's font: its size, read from the font file the game loads ----
-
-namespace Font {
-
-bool   Measured {};
-double LineEms {};
-
-struct Metrics {
-	bool   ok {};
-	double line {};    // line height, in ems
-	double comment {}; // mean advance of comment text, in ems a character
-	double key {};     // mean advance of a TOML key, in ems a character
-	double advance[95] {}; // printable ASCII, in ems
-	int    em {}, ascent {}, descent {}, gap {};
-};
-
-std::uint16_t U16(const std::string& b, std::size_t at) { return at + 2 <= b.size() ? static_cast<std::uint16_t>((static_cast<unsigned char>(b[at]) << 8) | static_cast<unsigned char>(b[at + 1])) : 0; }
-std::uint32_t U32(const std::string& b, std::size_t at) { return (static_cast<std::uint32_t>(U16(b, at)) << 16) | U16(b, at + 2); }
-
-Metrics Read(const std::string& b) {
-	Metrics m;
-	if (b.size() < 12) return m;
-	std::size_t head = 0, hhea = 0, hmtx = 0, cmap = 0;
-	const int   tables = U16(b, 4);
-	for (int k = 0; k < tables; ++k) {
-		const std::size_t at = 12 + static_cast<std::size_t>(k) * 16;
-		if (at + 16 > b.size()) return m;
-		const std::string tag = b.substr(at, 4);
-		const std::size_t off = U32(b, at + 8);
-		if (tag == "head") head = off;
-		else if (tag == "hhea") hhea = off;
-		else if (tag == "hmtx") hmtx = off;
-		else if (tag == "cmap") cmap = off;
-	}
-	if (!head || !hhea || !hmtx || !cmap || hhea + 36 > b.size() || head + 20 > b.size()) return m;
-	m.em      = U16(b, head + 18);
-	m.ascent  = static_cast<std::int16_t>(U16(b, hhea + 4));
-	m.descent = static_cast<std::int16_t>(U16(b, hhea + 6));
-	m.gap     = static_cast<std::int16_t>(U16(b, hhea + 8));
-	const int metrics = U16(b, hhea + 34);
-	if (m.em < 16 || metrics < 1) return m;
-	// the Unicode character map: format 4 (BMP) or 12
-	std::size_t sub = 0;
-	int         format = 0;
-	for (int k = 0, count = U16(b, cmap + 2); k < count; ++k) {
-		const std::size_t at = cmap + 4 + static_cast<std::size_t>(k) * 8;
-		const int platform = U16(b, at), encoding = U16(b, at + 2);
-		const std::size_t off = cmap + U32(b, at + 4);
-		const int         f   = U16(b, off);
-		if ((platform == 3 && (encoding == 1 || encoding == 10)) || platform == 0) {
-			if (f == 12 || (f == 4 && format != 12)) sub = off, format = f;
-		}
-	}
-	if (!sub) return m;
-	const auto glyph = [&](std::uint32_t c) -> int {
-		if (format == 4) {
-			const int segs = U16(b, sub + 6) / 2;
-			const std::size_t ends = sub + 14, starts = ends + segs * 2 + 2, deltas = starts + segs * 2, ranges = deltas + segs * 2;
-			for (int k = 0; k < segs; ++k) {
-				if (c > U16(b, ends + k * 2)) continue;
-				const std::uint32_t start = U16(b, starts + k * 2);
-				if (c < start) return 0;
-				const int delta = U16(b, deltas + k * 2), range = U16(b, ranges + k * 2);
-				if (!range) return (c + delta) & 0xFFFF;
-				const int g = U16(b, ranges + k * 2 + range + (c - start) * 2);
-				return g ? (g + delta) & 0xFFFF : 0;
-			}
-			return 0;
-		}
-		const std::uint32_t groups = U32(b, sub + 12);
-		for (std::uint32_t k = 0; k < groups && sub + 16 + (k + 1) * 12 <= b.size(); ++k) {
-			const std::size_t at = sub + 16 + k * 12;
-			if (c >= U32(b, at) && c <= U32(b, at + 4)) return static_cast<int>(U32(b, at + 8) + (c - U32(b, at)));
-		}
-		return 0;
-	};
-	const auto advance = [&](char c) { const int g = std::min(glyph(static_cast<unsigned char>(c)), metrics - 1); return U16(b, hmtx + static_cast<std::size_t>(g) * 4); };
-	const auto mean    = [&](std::string_view text) {
-        double sum = 0;
-        for (const char c : text) sum += advance(c);
-        return sum / static_cast<double>(text.size()) / m.em;
-	};
-	for (int c = 32; c < 127; ++c) m.advance[c - 32] = static_cast<double>(advance(static_cast<char>(c))) / m.em;
-	m.line    = static_cast<double>(m.ascent - m.descent + m.gap) / m.em;
-	m.comment = mean("Master switch. false disables the Controls action, button, resources and deposit logic. A non-empty list narrows the candidates to these item codes.");
-	m.key     = mean("inventory_button_enabled include_item_codes show_tag position_x max_items");
-	m.ok      = m.line > 0.5 && m.line < 4 && m.comment > 0.1 && m.comment < 2 && m.key > 0.1 && m.key < 2;
-	return m;
-}
-
-// The text sizes of the two PC profiles: HD, and LV, which the game uses
-// when its Low Vision Mode option is on. A mod may change either.
-int ProfileSmall[2] { 22, 28 }, ProfileMedium[2] { 26, 32 };
-
-void ReadSizes() {
-	const char* paths[2] { "data/global/ui/layouts/_profilehd.json", "data/global/ui/layouts/_profilelv.json" };
-	for (int k = 0; k < 2; ++k) {
-		std::string       trouble;
-		const std::string text = ArchiveFile(paths[k], trouble);
-		const auto        size = [&](const char* key, int& out) {
-            const auto at = text.find(std::string("\"") + key + "\"");
-            if (at == std::string::npos) return;
-            const int value = std::atoi(text.c_str() + text.find(':', at) + 1);
-            if (value >= 8 && value <= 120) out = value;
-		};
-		size("SmallFontSize", ProfileSmall[k]);
-		size("MediumFontSize", ProfileMedium[k]);
-		Log(false, "%s: %s, Small %d, Medium %d", paths[k], text.empty() ? trouble.c_str() : "read", ProfileSmall[k], ProfileMedium[k]);
-	}
-}
-
-// The game's Low Vision Mode setting (D2R 3.3.94995): its getter, and the
-// call that reads a setting's value.
-namespace LowVision {
-constexpr std::uint64_t Get = 0xE1920, Value = 0xD2E490;
-constexpr std::uint8_t  GetBytes[] { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x50, 0x65, 0x48, 0x8B, 0x04, 0x25, 0x58 };
-constexpr std::uint8_t  ValueBytes[] { 0x40, 0x53, 0x56, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x80, 0x79, 0x08, 0x00 };
-
-bool On() {
-	const auto base = static_cast<std::uintptr_t>(Context ? Context->exeBase : 0);
-	if (!base || std::memcmp(reinterpret_cast<const void*>(base + Get), GetBytes, sizeof(GetBytes)) != 0
-	    || std::memcmp(reinterpret_cast<const void*>(base + Value), ValueBytes, sizeof(ValueBytes)) != 0)
-		return false;
-	void* setting = reinterpret_cast<void* (*)() noexcept>(base + Get)();
-	return setting && reinterpret_cast<int (*)(void*) noexcept>(base + Value)(setting) != 0;
-}
-} // namespace LowVision
-
-// Sizes text for the profile in use: an em of Small and Medium text in layout
-// units, measured with the HD profile's 22 and 26.
-void Refresh() {
-	static int shown = -1;
-	const int  lv    = LowVision::On() ? 1 : 0;
-	SmallEm          = 30.45 * ProfileSmall[lv] / 22;
-	MediumEm         = 33.9 * ProfileMedium[lv] / 26;
-	if (Measured) {
-		NoteLine  = std::max(34, static_cast<int>(std::ceil(SmallEm * LineEms)) + 1);
-		LabelLine = std::max(50, static_cast<int>(std::ceil(MediumEm * LineEms)) + 8);
-	}
-	if (shown != lv) Log(false, "text: %s profile, comment line %d, key line %d, %.1f and %.1f units an em", lv ? "Low Vision" : "HD", NoteLine, LabelLine, SmallEm, MediumEm), shown = lv;
-}
-
-// Reads the fonts the game draws with (a font mod's, when one is installed)
-// and sizes the comment and key text from the Latin one.
-void Measure() {
-	ReadSizes();
-	for (const char* path : { "data/hd/ui/fonts/ExocetBlizzardOT-Medium.otf", "data/hd/ui/fonts/BlizzardGlobal-V5_81.ttf" }) {
-		std::string       trouble;
-		const std::string file = ArchiveFile(path, trouble);
-		const Metrics     m    = file.empty() ? Metrics {} : Read(file);
-		if (!m.ok) {
-			Log(true, "font %s not measured: %s", path, file.empty() ? trouble.c_str() : "its tables could not be read");
-			continue;
-		}
-		Log(false, "font %s: %zu bytes, %d units an em, ascent %d, descent %d, gap %d: line %.3f em, comment %.3f em, key %.3f em", path, file.size(), m.em, m.ascent, m.descent, m.gap, m.line,
-		    m.comment, m.key);
-		if (std::strstr(path, "Exocet") == nullptr) continue; // the menu's text is drawn in the Latin font
-		std::copy(std::begin(m.advance), std::end(m.advance), Advance);
-		AdvanceMean = m.comment;
-		LineEms     = m.line;
-		Measured    = true;
-	}
-	Refresh();
-}
-
-} // namespace Font
-
 void __cdecl AfterAllLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
 	static bool done = false;
 	if (done) return;
 	done = true;
 	FindRunningPlugins();
-	Font::Measure();
+	Gui::Font::Measure();
+	RefreshText();
 	Hub::Start();
-	for (int k = 0; k < ArtCount; ++k) {
-		std::string trouble;
-		ArtFiles[k] = ArchiveFile(ArtPaths[k], trouble);
-		if (ArtFiles[k].empty()) Log(true, "game art %s not read: %s", ArtPaths[k], trouble.c_str());
-	}
-	FindRefreshButton();
-	if (Threads) (void)Threads->runOnUiThread(Context, MakeArt, nullptr);
+	Gui::Kit::Read(); // the game's art for the window
+	Gui::RunOnUi([] { (void)Gui::CharacterWindow::Cover(), (void)Gui::CharacterWindow::BarCover(); }); // the covers made before the first open
 	Log(false, "every plugin has loaded: %zu in the menu, %zu with their own window", Clients.size(), Windows.size());
 }
 
@@ -3992,47 +2265,14 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "I Hate TOMLs %s: inactive, a service it needs is missing", PluginVersion);
 		return true;
 	}
-	// (Keys reach text boxes through the plugin's own keyboard hook.)
+	// The window: D2R GUI's panel pool (each view a new layout on one of
+	// PoolSize panels registered now), its button clicks, its art.
 	// A window of its own: GameplayLeftSlot would open the inventory with it.
-	const auto flags = D2RL::Panels::PanelFlags::CloseOnEscape;
-	for (int i = 1; i <= PoolSize; ++i) {
-		ViewPanel view { .id = "Menu" + std::to_string(i) };
-		// The game only finds a panel's layout if one was registered at load
-		// (as Grail On! does); this first one is replaced before each open.
-		{
-			static std::vector<std::string> kept;
-			kept.push_back(R"({"type": "Panel", "name": ")" + std::string(PluginId) + "/" + view.id + R"(", "fields": {"priority": 10}, "children": []})");
-			const std::string path = "data/global/ui/layouts/i-hate-tomls/" + view.id + "hd.json";
-			const D2RL::Resources::ResourceRegistration resource {
-				.structSize = D2RL::Resources::ResourceRegistrationSize,
-				.path       = path.c_str(),
-				.bytes      = kept.back().data(),
-				.byteCount  = kept.back().size(),
-			};
-			if (const auto r = ResourceApi->registerResource(context, &resource, &view.layout); r != D2RL::Resources::Result::Success && i == 1)
-				Log(true, "first layout for %s refused (result %u)", view.id.c_str(), static_cast<unsigned>(r));
-		}
-		const D2RL::Panels::PanelRegistration registration {
-			.structSize = D2RL::Panels::PanelRegistrationSize,
-			.flags      = flags,
-			.localId    = view.id.c_str(),
-		};
-		const auto result = PanelApi->registerPanel(context, &registration, &view.panel);
-		if (result != D2RL::Panels::Result::Success) {
-			if (Panels.size() < 2) Log(true, "panel %s refused (result %u)", view.id.c_str(), static_cast<unsigned>(result));
-			break;
-		}
-		Panels.push_back(std::move(view));
-	}
-	if (Panels.size() < 2) Log(true, "only %zu panels could be registered", Panels.size());
-
-	const D2RL::SharedEvents::UiMessageListener listener {
-		.structSize = D2RL::SharedEvents::UiMessageListenerSize,
-		.priority   = 100,
-		.callback   = OnUiMessage,
-	};
-	D2RL::SharedEvents::ListenerHandle listenerHandle = D2RL::SharedEvents::InvalidHandle;
-	if (EventApi->registerUiMessageListener(context, &listener, &listenerHandle) != D2RL::SharedEvents::Result::Success) Log(true, "could not listen to button clicks");
+	(void)Gui::Init(context, PluginId);
+	Gui::Api().lowEndBilinear = true;
+	Window.Register(ViewLayout, "Menu", PoolSize, D2RL::Panels::PanelFlags::CloseOnEscape);
+	Window.OnShown([] { MenuVisible = true, WatchMouse(); });
+	Gui::Commands::Listen(RunCommand);
 
 	if (const auto* lifecycle = Query<D2RL::LifecycleService>("lifecycle")) {
 		const D2RL::Lifecycle::DataTablesLoadedListener loaded { .structSize = sizeof(D2RL::Lifecycle::DataTablesLoadedListener), .callback = AfterAllLoaded };
@@ -4058,8 +2298,11 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		if (input->registerAction(context, &action, &handle) != D2RL::Input::Result::Success) Log(true, "could not add Open I Hate TOMLs to the Controls menu");
 	}
 	(void)context->RegisterConsoleCommand("pluginmenu", PluginsCommand, "Opens or closes I Hate TOMLs (the plugin settings window).");
-	Log(false, "I Hate TOMLs %s: ready on D2R %s, %zu panels", PluginVersion, context->buildVersion ? context->buildVersion : "?", Panels.size());
+	Log(false, "I Hate TOMLs %s: ready on D2R %s, %s", PluginVersion, context->buildVersion ? context->buildVersion : "?", Window.Ready() ? "window ready" : "no window");
 	return true;
 }
 
-D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {}
+D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	D2RGui::TextInput::Shutdown();
+	D2RGui::WindowHook::Stop();
+}

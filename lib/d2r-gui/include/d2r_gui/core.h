@@ -21,7 +21,7 @@ struct Services {
 	const D2RL::ResourceService*    resources {};
 	const D2RL::SharedEventService* events {};
 	std::string                     pluginId; // "my-plugin": sprite folder, panel names, command prefix
-	std::string                     logTag;   // put before console messages
+	bool                            lowEndBilinear {}; // .lowend sprites halved bilinear (I Hate TOMLs) instead of 2x2 average (Grail On!)
 };
 
 inline Services& Api() {

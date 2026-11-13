@@ -40,7 +40,7 @@ inline std::string SpriteName(const std::string& name, bool json = true) {
 // A sprite of the plugin's own (frames side by side), and its half-size
 // .lowend copy. A sprite registered again under the same name replaces the
 // last one (its old registration is dropped first).
-inline bool RegisterSprite(const std::string& name, const std::vector<Picture>& frames, LowEnd low = LowEnd::Box) {
+inline bool RegisterSprite(const std::string& name, const std::vector<Picture>& frames, LowEnd low) {
 	struct Kept {
 		std::string                         name;
 		D2RL::Resources::RegistrationHandle full = D2RL::Resources::InvalidHandle, half = D2RL::Resources::InvalidHandle;
@@ -59,5 +59,8 @@ inline bool RegisterSprite(const std::string& name, const std::vector<Picture>& 
 	const std::string path = "data/hd/global/ui/d2rloader/" + api.pluginId + "/" + name;
 	return RegisterResource(path + ".sprite", WriteSprite(frames), &slot->full) && RegisterResource(path + ".lowend.sprite", WriteSprite(half), &slot->half);
 }
+
+// As above, the .lowend copy made the way Init's plugin chose (Services::lowEndBilinear).
+inline bool RegisterSprite(const std::string& name, const std::vector<Picture>& frames) { return RegisterSprite(name, frames, Api().lowEndBilinear ? LowEnd::Bilinear : LowEnd::Box); }
 
 } // namespace D2RGui

@@ -84,7 +84,7 @@ std::string Build(const std::string& panelName, const std::string& probe) {
 	c += Gui::Check("Odd", Right - 60, y + 7, ShowOdd, "odd", "Shows or hides the odd rows");
 	y += OptionHeight;
 	c += Gui::Text("NumberLabel", Left, y, 500, OptionHeight, "A number", Gui::Style::Label);
-	c += Gui::Stepper("Number", Right - 400, y, 320, OptionHeight, std::to_string(Number), "number", "Click the arrows");
+	c += Gui::Stepper("Number", Right - 480, y, 400, OptionHeight, std::to_string(Number), "number-", "number+", "Click the arrows");
 	c += Gui::Button("Reset", Right - 60, y + 7, Gui::Kit::Reset(56), { 0, 2, 1 }, "reset", "Back to 10");
 	y += OptionHeight;
 	c += Gui::Text("ChoiceLabel", Left, y, 500, OptionHeight, "A choice", Gui::Style::Label);
@@ -110,7 +110,7 @@ std::string Build(const std::string& panelName, const std::string& probe) {
 	c += Gui::Clip("List", 0, ListTop, BarLeft - 6, ListRoom, inside);
 	c += Bar.Layout(ListTop, ListRoom, total, Scroll);
 
-	if (DropOpen) c += Gui::DropDown::List("ChoiceList", dropX, dropY + BoxHeight, 420, Choices, Choice, "pick");
+	if (DropOpen) c += Gui::DropDown::List("ChoiceList", dropX, dropY + BoxHeight, 420, 52, Choices, Choice, "pick:", "drop", PanelWidth, PanelHeight);
 	return Gui::Panel(panelName, PanelX, PanelY, PanelWidth, PanelHeight, c, 10, R"(, "anchor": "$LeftPanelAnchor")");
 }
 

@@ -105,8 +105,15 @@ public:
 	void Close() {
 		CloseAll();
 		wanted_ = false;
-		RetryReuse();
+		RetryReuseImpl();
 	}
+
+	// After a lost layout, each view takes a fresh panel for a minute; leaving
+	// a page tries reopening panels again sooner (one miss gives it up again).
+	void RetryReuse() { RetryReuseImpl(); }
+
+	// The pool has its panels (Register worked).
+	bool Ready() const { return slots_.size() >= 2; }
 
 	bool IsOpen() const { return shown_ >= 0 && PanelOpen(slots_[static_cast<std::size_t>(shown_)].panel); }
 
@@ -159,7 +166,7 @@ private:
 		(void)api.widgets->dispatchUiAction(api.context, &unload);
 	}
 
-	void RetryReuse() {
+	void RetryReuseImpl() {
 		if (reuse_) return;
 		reuse_         = true;
 		misses_        = 1; // one miss gives it up again
@@ -169,7 +176,7 @@ private:
 
 	int Next() {
 		const int count = static_cast<int>(slots_.size());
-		if (!reuse_ && fallbackSince_ && GetTickCount64() - fallbackSince_ > 60000) RetryReuse();
+		if (!reuse_ && fallbackSince_ && GetTickCount64() - fallbackSince_ > 60000) RetryReuseImpl();
 		if (reuse_) return shown_ == 0 ? 1 : 0;
 		for (int i = 0; i < count; ++i)
 			if (i != shown_ && !slots_[static_cast<std::size_t>(i)].opened) return i;

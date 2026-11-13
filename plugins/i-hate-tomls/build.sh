@@ -9,7 +9,8 @@ if [ ! -d "$sdk" ]; then
 fi
 out=$here/build
 mkdir -p "$out"
-cc() { x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s -I"$sdk/include" "$@"; }
+gui=$here/../../lib/d2r-gui/include
+cc() { x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -shared -static -s -I"$sdk/include" -I"$gui" "$@"; }
 x86_64-w64-mingw32-windres -I"$sdk/include" "$here/src/plugin.rc" -O coff -o "$out/plugin.res"
 cc "$here/src/plugin.cpp" "$out/plugin.res" -o "$out/aaa-i-hate-tomls.dll" -lwinhttp -lshell32
 x86_64-w64-mingw32-windres -I"$sdk/include" -I"$here/demo" "$here/demo/demo.rc" -O coff -o "$out/demo.res"

@@ -241,6 +241,11 @@ inline std::string Thumb(int width, int height) {
 	return Detail::Once("thumb" + std::to_string(width) + "x" + std::to_string(height), [&] { return std::vector<Picture> { ScrollThumb(width, height) }; });
 }
 
+// A round gem in a gold setting, `size` wide (named by the caller: one per colour).
+inline std::string Gem(const std::string& name, const int color[3], int size = 40) {
+	return Detail::Once("gem" + name + std::to_string(size), [&] { return std::vector<Picture> { D2RGui::Gem(color, size) }; });
+}
+
 // A gold rule `width` wide.
 inline std::string Rule(int width) {
 	return Detail::Once("rule" + std::to_string(width), [&] { return std::vector<Picture> { GoldRule(width) }; });
