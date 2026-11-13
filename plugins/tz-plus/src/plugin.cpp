@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.1";
+constexpr const char* PluginVersion = "0.0.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -114,7 +114,7 @@ constexpr int ModCount = static_cast<int>(sizeof(Mods) / sizeof(Mods[0]));
 
 // Stats
 constexpr int StatHp = 6, StatMaxHp = 7, StatLevel = 12, StatDefense = 31, StatPhysRes = 36, StatMagicRes = 37, StatFireRes = 39, StatLightRes = 41,
-              StatColdRes = 43, StatLifeSteal = 60, StatRegen = 74, StatGoldFind = 79, StatMagicFind = 80;
+              StatColdRes = 43, StatLifeSteal = 60, StatVelocity = 67, StatAttackRate = 68, StatRegen = 74, StatGoldFind = 79, StatMagicFind = 80;
 
 // Per tier values (index = tier - 1).
 constexpr int OwnResist[3]   { 50, 75, 100 }; // Fire/Lightning/Cold Enchanted
@@ -133,6 +133,8 @@ constexpr int StrongDamage[3] { 75, 114, 152 }; // row 14: Hell +49% / +75% / +1
 constexpr int StrongAr[3]     { 50, 76, 114 };  // row 12: Hell +33% / +50% / +75% attack rating
 constexpr int ElemScale[3]    { 100, 150, 200 }; // rows 16-21: 33-50% / 50-75% / 66-100% of base damage
 constexpr int CursePct[3]     { 25, 50, 75 };
+constexpr int FastMove[3]     { 0, 33, 66 };  // % run/walk speed on top of the game's Extra Fast
+constexpr int FastAttack[3]   { 0, 0, 20 };   // % attack speed
 
 constexpr int GoldPerPoint = 25, MagicPerPoint = 15, XpPerPoint = 5;
 
@@ -163,6 +165,8 @@ constexpr std::uint64_t DescRva = 0x35B4F0;
 constexpr Code DescBytes { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x44, 0x89, 0x44, 0x24, 0x18, 0x55, 0x56, 0x57, 0x48, 0x8B, 0xEC };
 constexpr std::uint64_t MonInitCallRva = 0x543789;
 constexpr std::uint64_t MonInitRva     = 0x49A7E0;
+constexpr std::uint64_t TerrorCheckCallRva = 0x54375B; // call 0x3AF200
+constexpr std::uint64_t LevelUpCallRva     = 0x543775; // call 0x49AEB0
 constexpr std::uint64_t ConfigAtRva    = 0x35DB10;
 constexpr std::uint64_t UModTableRva   = 0x2395FE0;
 
@@ -186,6 +190,10 @@ constexpr Check Calls[] {
 	{ 0x543A40, { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83 } }, // SetLevelInfo
 	{ 0x3AEFF0, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83 } }, // BossKind
 	{ 0x35DB10, { 0x40, 0x53, 0x57, 0x41, 0x57, 0x48, 0x83, 0xEC } }, // ConfigAt
+	{ 0x34B440, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B } }, // UnitRoom
+	{ 0x34B240, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B } }, // UnitGame
+	{ 0x3AF200, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B } }, // TerrorCheck
+	{ 0x49AEB0, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74 } }, // LevelUp
 };
 constexpr std::uint64_t GetStatRva = 0x2F5020, SetStatRva = 0x2F7D10; // jmp qword ptr [rip+x]
 
@@ -199,6 +207,8 @@ using UModAllowedFn   = std::int32_t (*)(void* unit, void* record, std::int32_t 
 using UModStartFn     = void (*)(void* unit, std::int32_t mod, std::int32_t unique) noexcept;
 using AddSkillFn      = void* (*)(void* unit, std::int32_t skill, std::int32_t level, std::int32_t one) noexcept;
 using UseSkillFn      = void (*)(void* unit, std::int32_t hand, std::int32_t skill, std::int32_t minusOne) noexcept;
+using UnitRoomFn      = void* (*)(void* unit) noexcept;
+using UnitGameFn      = void* (*)(void* unit) noexcept;
 using RoomLevelFn     = std::int32_t (*)(void* room) noexcept;
 using LevelTzFn       = bool (*)(void* game, std::int32_t level) noexcept;
 using FindUnitFn      = void* (*)(void* game, std::int32_t type, std::uint32_t id) noexcept;
@@ -438,7 +448,7 @@ void SetConstants(const GameMods& g, std::uint8_t mode) noexcept {
 	SetRow(mode, RowMinionStrong, strong ? StrongDamage[strong - 1] : Original(mode, RowMinionStrong));
 	SetRow(mode, RowMinionAr, strong ? StrongAr[strong - 1] : Original(mode, RowMinionAr));
 	int elem = 0;
-	for (const int id : { 9, 17, 18, 25 }) elem = std::max(elem, TierOf(g, id));
+	for (const int id : { 9, 17, 18, 23, 25 }) elem = std::max(elem, TierOf(g, id));
 	for (const int row : { RowMinionElemMin + g.difficulty, RowMinionElemMax + g.difficulty }) {
 		const std::int32_t base = Original(mode, row);
 		SetRow(mode, row, elem ? base * ElemScale[elem - 1] / 100 : base);
@@ -566,13 +576,18 @@ void* ClientUnitOf(const std::uint8_t* client) noexcept {
 	return At<FindUnitFn>(0x48FE80)(game, Field<std::int32_t>(client, ClientUnitType), Field<std::uint32_t>(client, ClientUnitId));
 }
 
-void GiveRewards(std::uint8_t* game, const GameMods& g) noexcept {
+// level < 0: every player. Else only the players in that level.
+void GiveRewards(std::uint8_t* game, const GameMods& g, bool on, int level = -1) noexcept {
 	int players = 0;
 	for (auto* client = Field<std::uint8_t*>(game, GameClients); client && players < 64; client = Field<std::uint8_t*>(client, ClientNext), ++players) {
 		void* unit = ClientUnitOf(client);
 		if (!unit) continue;
-		SetStat(unit, StatGoldFind, g.gold);
-		SetStat(unit, StatMagicFind, g.magic);
+		if (level >= 0) {
+			void* room = At<UnitRoomFn>(0x34B440)(unit);
+			if (!room || At<RoomLevelFn>(0x2EFC10)(room) != level) continue;
+		}
+		SetStat(unit, StatGoldFind, on ? g.gold : 0);
+		SetStat(unit, StatMagicFind, on ? g.magic : 0);
 	}
 }
 
@@ -601,7 +616,8 @@ std::uint64_t HookApply(std::uint8_t* game, std::uint8_t* zone, std::uint8_t fla
 	Applying.thread.store(GetCurrentThreadId());
 	const std::uint64_t result = Apply(game, static_cast<std::uint8_t*>(ours ? ours : zone), flag);
 	Applying.thread.store(0);
-	GiveRewards(game, *g);
+	// Hell: every level counts. Nightmare: set as the players reach a level (see HookMonInit).
+	GiveRewards(game, *g, difficulty == 2);
 	return result;
 }
 
@@ -642,6 +658,10 @@ void ApplyUMod(void* unit, std::uint8_t mode, int id, int tier, bool elite) noex
 	case 8:
 		for (int i = 0; i < 3; ++i) SetStat(unit, Resists[i], before[i] + MagicRes[t]);
 		break;
+	case 6:
+		if (FastMove[t]) SetStat(unit, StatVelocity, GetStat(unit, StatVelocity) + FastMove[t]);
+		if (FastAttack[t]) SetStat(unit, StatAttackRate, GetStat(unit, StatAttackRate) + FastAttack[t]);
+		break;
 	case 28:
 		SetStat(unit, StatDefense, before[5] * StoneDefense[t] / 100);
 		SetStat(unit, StatPhysRes, before[4] + StonePhys[t]);
@@ -670,17 +690,45 @@ void CapLevel(void* unit) noexcept {
 	SetStat(unit, StatLevel, 99);
 }
 
-std::uint64_t HookMonInit(std::uint8_t* game, std::uint8_t* unit, void* room, std::uint16_t flags) noexcept {
-	const std::uint64_t result = MonInit(game, unit, room, flags);
-	if (!game || !unit || !room || !Config.enabled.load(std::memory_order_relaxed)) return result;
+int  Traced = 0; // monsters logged so far (the first few of each game, to check the mods land)
+const std::uint8_t* TracedGame {};
+
+void Trace(const char* format, ...) noexcept {
+	char    line[512] {};
+	va_list args;
+	va_start(args, format);
+	std::vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	Log(false, "%s", line);
+}
+
+// Every monster, once, at the end of its creation (where the game checks for its terror zone mod).
+void AddMods(std::uint8_t* game, void* unit) noexcept {
+	if (!game || !unit || !Config.enabled.load(std::memory_order_relaxed)) return;
 	GameMods* g = ModsOf(game);
-	if (!g) return result;
+	if (!g) return;
+	void* room = At<UnitRoomFn>(0x34B440)(unit);
+	if (!room) return;
 	const int level = At<RoomLevelFn>(0x2EFC10)(room);
-	if (level <= 0 || !At<LevelTzFn>(0x489B70)(game, level)) return result;
+	if (level <= 0) return;
+	const bool terrorized = At<LevelTzFn>(0x489B70)(game, level);
+	// Nightmare: only one act is terrorized, so the rewards follow the level the players are in
+	// (monsters, town people included, are created as a player reaches a level).
+	if (g->difficulty == 1) GiveRewards(game, *g, terrorized, level);
+	static int quiet = 0; // monsters outside terror zones logged so far
+	if (TracedGame != game) TracedGame = game, Traced = 0, quiet = 0;
+	const bool trace = Traced < 25;
+	if (!terrorized) {
+		if (quiet < 5) ++quiet, Trace("monster in level %d: not terrorized, no mods", level);
+		return;
+	}
+	auto*              data  = Field<std::uint8_t*>(unit, 0x10); // MonsterData
+	const std::uint16_t type = data ? Field<std::uint16_t>(data, 0x1A) : 0;
 	const std::uint8_t mode  = Field<std::uint8_t>(game, GameMode);
 	const bool         boss  = At<BossKindFn>(0x3AEFF0)(nullptr, unit) != 0;
-	const bool         elite = boss || (flags & 0x300) != 0 || At<IsSpecialFn>(0x38E0E0)(unit, true);
+	const bool         elite = boss || (type & 0x61E) != 0 || At<IsSpecialFn>(0x38E0E0)(unit, true);
 	const int          top   = Ranges[g->difficulty].maxTier;
+	const int          cold0 = trace ? GetStat(unit, StatColdRes) : 0, fire0 = trace ? GetStat(unit, StatFireRes) : 0;
 	for (int i = 0; i < g->count; ++i) {
 		const Mod& mod  = Mods[g->mods[i].mod];
 		const int  tier = elite ? std::min(g->mods[i].tier + 1, top) : g->mods[i].tier;
@@ -705,6 +753,35 @@ std::uint64_t HookMonInit(std::uint8_t* game, std::uint8_t* unit, void* room, st
 	}
 	CapLevel(unit);
 	g->monsters.fetch_add(1, std::memory_order_relaxed);
+	if (trace) {
+		++Traced;
+		std::string mods;
+		if (const std::uint8_t* list = At<UModListFn>(0x38E310)(unit))
+			for (int i = 0; i < 9; ++i)
+				if (list[i]) mods += (mods.empty() ? "" : ",") + std::to_string(list[i]);
+		Trace("monster in level %d (mlvl %d, %s, type 0x%X): mods [%s], cold res %d -> %d, fire res %d -> %d", level, GetStat(unit, StatLevel),
+		      boss ? "boss" : elite ? "elite" : "normal", type, mods.c_str(), cold0, GetStat(unit, StatColdRes), fire0, GetStat(unit, StatFireRes));
+	}
+}
+
+using TerrorCheckFn = bool (*)(void* unit) noexcept;
+using LevelUpFn     = std::uint64_t (*)(void* unit, void* info, std::uint16_t flags) noexcept;
+
+// 0x54375B: call 0x3AF200 (monster has the terror state?), reached by every monster.
+bool HookTerrorCheck(void* unit) noexcept {
+	AddMods(static_cast<std::uint8_t*>(At<UnitGameFn>(0x34B240)(unit)), unit);
+	return At<TerrorCheckFn>(0x3AF200)(unit);
+}
+
+// 0x543789: the game's terror zone mod (its +3 level for bosses). 0x543775: the other branch.
+std::uint64_t HookMonInit(std::uint8_t* game, std::uint8_t* unit, void* room, std::uint16_t flags) noexcept {
+	const std::uint64_t result = MonInit(game, unit, room, flags);
+	if (unit && ModsOf(game)) CapLevel(unit);
+	return result;
+}
+std::uint64_t HookLevelUp(void* unit, void* info, std::uint16_t flags) noexcept {
+	const std::uint64_t result = At<LevelUpFn>(0x49AEB0)(unit, info, flags);
+	if (unit && ModsOf(static_cast<std::uint8_t*>(At<UnitGameFn>(0x34B240)(unit)))) CapLevel(unit);
 	return result;
 }
 
@@ -726,25 +803,32 @@ void* AllocNear(std::uintptr_t target, std::size_t size) noexcept {
 	return nullptr;
 }
 
-bool PatchMonInitCall() noexcept {
-	const std::uintptr_t site = Base + MonInitCallRva;
-	auto*                stub = static_cast<std::uint8_t*>(AllocNear(site, 4096));
-	if (!stub) return false;
-	const auto           target = reinterpret_cast<std::uint64_t>(&HookMonInit);
-	const std::uint8_t   jump[6] { 0xFF, 0x25, 0, 0, 0, 0 }; // jmp [rip]
+std::uint8_t* StubPage {};
+std::size_t   StubUsed = 0;
+
+// Redirects "call target" at site to hook (through a jump near the game code).
+bool PatchCall(std::uint64_t siteRva, std::uint64_t targetRva, const void* hook) noexcept {
+	const std::uintptr_t site = Base + siteRva;
+	if (!StubPage) StubPage = static_cast<std::uint8_t*>(AllocNear(site, 4096));
+	if (!StubPage || StubUsed + 16 > 4096) return false;
+	std::uint8_t* stub = StubPage + StubUsed;
+	StubUsed += 16;
+	const auto         target = reinterpret_cast<std::uint64_t>(hook);
+	const std::uint8_t jump[6] { 0xFF, 0x25, 0, 0, 0, 0 }; // jmp [rip]
+	DWORD old = 0;
+	if (!VirtualProtect(StubPage, 4096, PAGE_READWRITE, &old)) return false;
 	std::memcpy(stub, jump, 6);
 	std::memcpy(stub + 6, &target, 8);
-	DWORD old = 0;
-	if (!VirtualProtect(stub, 4096, PAGE_EXECUTE_READ, &old)) return false;
-	FlushInstructionCache(GetCurrentProcess(), stub, 4096);
-	const auto from = static_cast<std::int64_t>(MonInitRva) - static_cast<std::int64_t>(MonInitCallRva + 5);
+	if (!VirtualProtect(StubPage, 4096, PAGE_EXECUTE_READ, &old)) return false;
+	FlushInstructionCache(GetCurrentProcess(), StubPage, 4096);
+	const auto from = static_cast<std::int64_t>(targetRva) - static_cast<std::int64_t>(siteRva + 5);
 	const auto to   = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(stub)) - static_cast<std::int64_t>(site + 5);
 	if (to < INT32_MIN || to > INT32_MAX) return false;
 	std::uint8_t expected[5] { 0xE8 }, call[5] { 0xE8 };
 	const auto   from32 = static_cast<std::int32_t>(from), to32 = static_cast<std::int32_t>(to);
 	std::memcpy(expected + 1, &from32, 4);
 	std::memcpy(call + 1, &to32, 4);
-	return Context->PatchBytes(MonInitCallRva, expected, 5, call, 5);
+	return Context->PatchBytes(siteRva, expected, 5, call, 5);
 }
 
 bool Locate() noexcept {
@@ -942,7 +1026,11 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "TZ Plus %s: inactive, could not hook D2R+0x%llX (another plugin may hook it)", PluginVersion, static_cast<unsigned long long>(ApplyRva));
 		return true;
 	}
-	if (!PatchMonInitCall()) Log(true, "TZ Plus %s: monster mods off, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(MonInitCallRva));
+	if (!PatchCall(TerrorCheckCallRva, 0x3AF200, reinterpret_cast<const void*>(&HookTerrorCheck)))
+		Log(true, "TZ Plus %s: monster mods off, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(TerrorCheckCallRva));
+	if (!PatchCall(MonInitCallRva, MonInitRva, reinterpret_cast<const void*>(&HookMonInit)) ||
+	    !PatchCall(LevelUpCallRva, 0x49AEB0, reinterpret_cast<const void*>(&HookLevelUp)))
+		Log(true, "TZ Plus %s: level 99 cap partly off, could not patch the monster level calls", PluginVersion);
 	Log(false, "TZ Plus %s: %s (Nightmare %s, Hell %s)", PluginVersion, Config.enabled ? "active" : "turned off", Config.nightmare ? "on" : "off",
 	    Config.hell ? "on" : "off");
 	return true;
