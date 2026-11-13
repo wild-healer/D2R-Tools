@@ -46,6 +46,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <initializer_list>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -55,7 +56,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.4";
+constexpr const char* PluginVersion = "0.0.5";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -272,7 +273,7 @@ void SetStat(void* unit, int stat, std::int32_t value) noexcept {
 
 // ---- game offsets ----
 
-constexpr std::uintptr_t GameClients = 0xF0, GameRefLevel = 0x102, GameDifficulty = 0x104, GameMode = 0x106, GameSeed = 0x1A8, GameUMod = 0x1A5C8,
+constexpr std::uintptr_t GameClients = 0x138, GameRefLevel = 0x102, GameDifficulty = 0x104, GameMode = 0x106, GameSeed = 0x1A8, GameUMod = 0x1A5C8,
                          GameUModRolled = 0x1A5CC;
 constexpr std::uintptr_t ClientNext = 0x628, ClientFlags = 0x4E0, ClientUnit = 0x278, ClientGame = 0x2B0, ClientUnitType = 0x26C, ClientUnitId = 0x270;
 constexpr std::uintptr_t ConfigStart = 0x00, ConfigZoneMin = 0x10, ConfigBreakMin = 0x14, ConfigZones = 0x250, ConfigZoneCount = 0x258;
@@ -579,8 +580,8 @@ void* ClientUnitOf(const std::uint8_t* client) noexcept {
 }
 
 // level < 0: every player. Else only the players in that level.
-void GiveRewards(std::uint8_t* game, const GameMods& g, bool on, int level = -1) noexcept {
-	int players = 0;
+int GiveRewards(std::uint8_t* game, const GameMods& g, bool on, int level = -1) noexcept {
+	int players = 0, given = 0;
 	for (auto* client = Field<std::uint8_t*>(game, GameClients); client && players < 64; client = Field<std::uint8_t*>(client, ClientNext), ++players) {
 		void* unit = ClientUnitOf(client);
 		if (!unit) continue;
@@ -588,9 +589,12 @@ void GiveRewards(std::uint8_t* game, const GameMods& g, bool on, int level = -1)
 			void* room = At<UnitRoomFn>(0x34B440)(unit);
 			if (!room || At<RoomLevelFn>(0x2EFC10)(room) != level) continue;
 		}
-		SetStat(unit, StatGoldFind, on ? g.gold : 0);
-		SetStat(unit, StatMagicFind, on ? g.magic : 0);
+		const std::int32_t gold = on ? g.gold : 0, magic = on ? g.magic : 0;
+		if (GetStat(unit, StatGoldFind) != gold) SetStat(unit, StatGoldFind, gold);
+		if (GetStat(unit, StatMagicFind) != magic) SetStat(unit, StatMagicFind, magic);
+		++given;
 	}
+	return given;
 }
 
 // ---- applying a zone to a game ----
@@ -619,7 +623,8 @@ std::uint64_t HookApply(std::uint8_t* game, std::uint8_t* zone, std::uint8_t fla
 	Applying.thread.store(GetCurrentThreadId());
 	const std::uint64_t result = Apply(game, static_cast<std::uint8_t*>(ours ? ours : zone), flag);
 	Applying.thread.store(0);
-	// Hell: every level counts. Nightmare: set as the players reach a level (see HookMonInit).
+	// Hell: every level counts. Nightmare: set as the players reach a level (see AddMods).
+	// At game creation the player may not be in yet: AddMods gives them again.
 	GiveRewards(game, *g, difficulty == 2);
 	return result;
 }
@@ -706,18 +711,37 @@ void Trace(const char* format, ...) noexcept {
 }
 
 // Every monster, once, at the end of its creation (where the game checks for its terror zone mod).
-void AddMods(std::uint8_t* game, void* unit) noexcept {
+void AddMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	if (!game || !unit || !Config.enabled.load(std::memory_order_relaxed)) return;
+	static int entries = 0; // first calls logged, to see where it stops
+	const bool first = entries < 3;
+	if (first) ++entries;
 	GameMods* g = ModsOf(game);
-	if (!g) return;
-	void* room = At<UnitRoomFn>(0x34B440)(unit);
-	if (!room) return;
-	const int level = At<RoomLevelFn>(0x2EFC10)(room);
-	if (level <= 0) return;
+	if (!g) {
+		// Not the game pointer we saw in Apply: one game at a time here, so take the last one of that difficulty.
+		AcquireSRWLockExclusive(&Lock);
+		if (Last && Last->difficulty == Field<std::uint8_t>(game, GameDifficulty)) {
+			if (first) Log(false, "monster init: game %p not seen in Apply (that was %p), using its mods", game, Last->game);
+			Last->game = game;
+			g          = Last;
+		}
+		ReleaseSRWLockExclusive(&Lock);
+	}
+	if (!g) {
+		if (first) Log(false, "monster init: no TZ Plus game for %p (difficulty %d)", game, Field<std::uint8_t>(game, GameDifficulty));
+		return;
+	}
+	if (!room) room = At<UnitRoomFn>(0x34B440)(unit);
+	const int level = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
+	if (level <= 0) {
+		if (first) Log(false, "monster init: no level (room %p)", room);
+		return;
+	}
 	const bool terrorized = At<LevelTzFn>(0x489B70)(game, level);
-	// Nightmare: only one act is terrorized, so the rewards follow the level the players are in
+	// Hell: game-wide. Nightmare: only one act is terrorized, so the rewards follow the level the players are in
 	// (monsters, town people included, are created as a player reaches a level).
-	if (g->difficulty == 1) GiveRewards(game, *g, terrorized, level);
+	const int players = GiveRewards(game, *g, g->difficulty == 2 || terrorized, g->difficulty == 2 ? -1 : level);
+	if (first) Log(false, "monster init: level %d, terrorized %d, rewards on %d player(s)", level, terrorized ? 1 : 0, players);
 	static int quiet = 0; // monsters outside terror zones logged so far
 	if (TracedGame != game) TracedGame = game, Traced = 0, quiet = 0;
 	const bool trace = Traced < 25;
@@ -771,9 +795,9 @@ using TerrorCheckFn = bool (*)(void* unit) noexcept;
 using LevelUpFn     = std::uint64_t (*)(void* unit, void* info, std::uint16_t flags) noexcept;
 
 // 0x54375B: call 0x3AF200 (monster has the terror state?), reached by every monster.
-// The stub passes the game too (r14 there, see PatchCall).
-bool HookTerrorCheck(void* unit, std::uint8_t* game) noexcept {
-	AddMods(game, unit);
+// The stub passes the game (r14) and the room (the init's 2nd argument, saved at [rsp+0x30]).
+bool HookTerrorCheck(void* unit, std::uint8_t* game, void* room) noexcept {
+	AddMods(game, unit, room);
 	return At<TerrorCheckFn>(0x3AF200)(unit);
 }
 
@@ -811,19 +835,19 @@ std::uint8_t* StubPage {};
 std::size_t   StubUsed = 0;
 
 // Redirects "call target" at site to hook (through a jump near the game code).
-bool PatchCall(std::uint64_t siteRva, std::uint64_t targetRva, const void* hook, bool gameInRdx = false) noexcept {
+// prefix: instructions run first (to pass more arguments), at most 16 bytes.
+bool PatchCall(std::uint64_t siteRva, std::uint64_t targetRva, const void* hook, std::initializer_list<std::uint8_t> prefix = {}) noexcept {
 	const std::uintptr_t site = Base + siteRva;
 	if (!StubPage) StubPage = static_cast<std::uint8_t*>(AllocNear(site, 4096));
-	if (!StubPage || StubUsed + 32 > 4096) return false;
+	if (prefix.size() > 16 || !StubPage || StubUsed + 32 > 4096) return false;
 	std::uint8_t* stub = StubPage + StubUsed;
 	StubUsed += 32;
 	const auto         target = reinterpret_cast<std::uint64_t>(hook);
 	const std::uint8_t jump[6] { 0xFF, 0x25, 0, 0, 0, 0 }; // jmp [rip]
-	const std::uint8_t gameArg[3] { 0x4C, 0x89, 0xF2 };      // mov rdx, r14
 	DWORD old = 0;
 	if (!VirtualProtect(StubPage, 4096, PAGE_READWRITE, &old)) return false;
 	std::size_t at = 0;
-	if (gameInRdx) std::memcpy(stub, gameArg, 3), at = 3;
+	for (const std::uint8_t byte : prefix) stub[at++] = byte;
 	std::memcpy(stub + at, jump, 6);
 	std::memcpy(stub + at + 6, &target, 8);
 	if (!VirtualProtect(StubPage, 4096, PAGE_EXECUTE_READ, &old)) return false;
@@ -1006,6 +1030,7 @@ bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint3
 const D2RL::LifecycleService* Lifecycle {};
 std::atomic<bool>             InGame { false };
 std::atomic<int>              CurrentLevel { -1 };
+void ShowRewards(int level) noexcept;
 
 void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
 	using EventKind = D2RL::Lifecycle::GameplayEventKind;
@@ -1020,7 +1045,7 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 		ReleaseSRWLockExclusive(&Lock);
 		break;
 	}
-	case EventKind::LevelChanged: CurrentLevel = event->currentValue; break;
+	case EventKind::LevelChanged: CurrentLevel = event->currentValue, ShowRewards(CurrentLevel); break;
 	default: break;
 	}
 }
@@ -1035,10 +1060,10 @@ void AppendText(void* text, const std::string& line) noexcept {
 	At<AppendCharFn>(AppendCharRva)(text, '\n');
 }
 
-void* HookMapLine(void* text, char c) noexcept {
-	void* const result = At<AppendCharFn>(AppendCharRva)(text, c);
-	if (!text || !Config.show || !Config.enabled || !InGame) return result;
+// Our lines: one per mod, then the rewards.
+std::vector<std::string> ModLines() noexcept {
 	std::vector<std::string> lines;
+	if (!Config.show || !Config.enabled || !InGame) return lines;
 	AcquireSRWLockShared(&Lock);
 	if (const GameMods* g = Last; g && g->count > 0) {
 		for (int i = 0; i < g->count; ++i) lines.push_back(std::string(Mods[g->mods[i].mod].name) + " " + Roman(g->mods[i].tier));
@@ -1047,8 +1072,51 @@ void* HookMapLine(void* text, char c) noexcept {
 		lines.push_back(rewards);
 	}
 	ReleaseSRWLockShared(&Lock);
-	for (const std::string& line : lines) AppendText(text, line);
+	return lines;
+}
+
+// The game sets the rewards on the server's player; the client's copy of the player (what Advanced Stats reads)
+// does not get these stats, so we set them there too.
+using LocalIndexFn    = int (*)() noexcept;
+using PlayerByIndexFn = void* (*)(int index) noexcept;
+using InZoneListFn    = bool (*)(int level) noexcept; // the client's terror zone list
+constexpr std::uint64_t InZoneListRva = 0x90D20;
+
+void ShowRewards(int level) noexcept {
+	if (!Config.enabled || !InGame) return;
+	const int index = At<LocalIndexFn>(0x8B2D0)();
+	if (index < 0 || index >= 8) return;
+	void* player = At<PlayerByIndexFn>(0x9A480)(index);
+	if (!player) return;
+	int difficulty = 0, gold = 0, magic = 0;
+	AcquireSRWLockShared(&Lock);
+	if (const GameMods* g = Last) difficulty = g->difficulty, gold = g->gold, magic = g->magic;
+	ReleaseSRWLockShared(&Lock);
+	if (!difficulty) return;
+	const bool on = difficulty == 2 || (level > 0 && At<InZoneListFn>(InZoneListRva)(level));
+	if (GetStat(player, StatGoldFind) != (on ? gold : 0)) SetStat(player, StatGoldFind, on ? gold : 0);
+	if (GetStat(player, StatMagicFind) != (on ? magic : 0)) SetStat(player, StatMagicFind, on ? magic : 0);
+}
+
+void* HookMapLine(void* text, char c) noexcept {
+	void* const result = At<AppendCharFn>(AppendCharRva)(text, c);
+	ShowRewards(CurrentLevel);
+	if (!text) return result;
+	for (const std::string& line : ModLines()) AppendText(text, line);
 	return result;
+}
+
+// Outside terror zones the map text goes to D2R+0x147542D: call InZoneList(level), the stub passes the text (r12).
+// Towns get our lines there.
+constexpr std::uint64_t TownCheckCallRva = 0x147542D;
+
+bool HookTownCheck(int level, void* text) noexcept {
+	const bool listed = At<InZoneListFn>(InZoneListRva)(level);
+	ShowRewards(level);
+	const bool town = level == 1 || level == 40 || level == 75 || level == 103 || level == 109;
+	if (!listed && town && text)
+		for (const std::string& line : ModLines()) AppendText(text, line);
+	return listed;
 }
 
 template <typename Service>
@@ -1120,13 +1188,16 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "TZ Plus %s: inactive, could not hook D2R+0x%llX (another plugin may hook it)", PluginVersion, static_cast<unsigned long long>(ApplyRva));
 		return true;
 	}
-	if (!PatchCall(TerrorCheckCallRva, 0x3AF200, reinterpret_cast<const void*>(&HookTerrorCheck), true))
+	// mov rdx, r14 (game); mov r8, [rsp+0x38] (room: the init's [rsp+0x30], past our return address)
+	if (!PatchCall(TerrorCheckCallRva, 0x3AF200, reinterpret_cast<const void*>(&HookTerrorCheck), { 0x4C, 0x89, 0xF2, 0x4C, 0x8B, 0x44, 0x24, 0x38 }))
 		Log(true, "TZ Plus %s: monster mods off, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(TerrorCheckCallRva));
 	if (!PatchCall(MonInitCallRva, MonInitRva, reinterpret_cast<const void*>(&HookMonInit)) ||
 	    !PatchCall(LevelUpCallRva, 0x49AEB0, reinterpret_cast<const void*>(&HookLevelUp)))
 		Log(true, "TZ Plus %s: level 99 cap partly off, could not patch the monster level calls", PluginVersion);
 	if (!PatchCall(MapLineCallRva, AppendCharRva, reinterpret_cast<const void*>(&HookMapLine)))
 		Log(true, "TZ Plus %s: the mods are not shown on the map, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(MapLineCallRva));
+	if (!PatchCall(TownCheckCallRva, InZoneListRva, reinterpret_cast<const void*>(&HookTownCheck), { 0x4C, 0x89, 0xE2 })) // mov rdx, r12
+		Log(true, "TZ Plus %s: the mods are not shown on the town map, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(TownCheckCallRva));
 	Log(false, "TZ Plus %s: %s (Nightmare %s, Hell %s)", PluginVersion, Config.enabled ? "active" : "turned off", Config.nightmare ? "on" : "off",
 	    Config.hell ? "on" : "off");
 	return true;
