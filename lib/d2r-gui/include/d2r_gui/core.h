@@ -22,6 +22,7 @@ struct Services {
 	const D2RL::SharedEventService* events {};
 	std::string                     pluginId; // "my-plugin": sprite folder, panel names, command prefix
 	bool                            lowEndBilinear {}; // .lowend sprites halved bilinear (I Hate TOMLs) instead of 2x2 average (Grail On!)
+	bool                            plainText {};      // texts go into layouts as they are (the plugin translates and cleans them itself), not through GameText
 };
 
 inline Services& Api() {

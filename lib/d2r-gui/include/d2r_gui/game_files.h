@@ -56,6 +56,96 @@ inline std::string ArchiveFile(const char* path, std::string* trouble = nullptr)
 	return bytes;
 }
 
+// The game's own loader for its json files, used when the archive call
+// fails: its resource manager (0x9F3540) loads the file (0x9F3DA0, what
+// Fog's JSON loader 0xA0ACA0 calls), so the active mod's copy wins. The
+// result is a shared pointer {resource, control}; the resource holds {u32
+// state (3 = loaded), data at +8, size at +0x10}. D2R 3.3.93787 / 3.3.94995,
+// checked before use.
+namespace Loader {
+inline constexpr std::uint64_t Manager = 0x9F3540, Load = 0x9F3DA0;
+inline constexpr std::uint8_t  ManagerBytes[] { 0x48, 0x83, 0xEC, 0x38, 0x65, 0x48, 0x8B, 0x04, 0x25, 0x58, 0x00, 0x00, 0x00 };
+inline constexpr std::uint8_t  LoadBytes[] { 0x40, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48, 0x8B, 0xFA, 0x48, 0x8D, 0x54, 0x24, 0x20 };
+struct SharedRef {
+	unsigned char* object {};
+	unsigned char* control {}; // vtable, strong count at +8, weak count at +0xC
+};
+// The load request, as Fog's JSON loader builds it on its stack: the path as
+// the game's string (text, length, capacity with the "not owned" bit) with its
+// inline buffer at +0x18, a byte 0x64 at +0xB8, then two empty callbacks
+// (tagged 1) at +0xC0 and +0x108.
+struct alignas(16) Request {
+	unsigned char bytes[0x180] {};
+};
+using ManagerFn = void* (*)() noexcept;
+using LoadFn    = SharedRef* (*)(void* manager, SharedRef* out, Request* request, int flags) noexcept;
+using ReleaseFn = void (*)(void* control) noexcept;
+template <typename T>
+T At(const unsigned char* at, std::size_t offset) {
+	T value {};
+	std::memcpy(&value, at + offset, sizeof(T));
+	return value;
+}
+} // namespace Loader
+
+// Game thread. The file through the game's resource loader, or empty
+// (`trouble` gets why).
+inline std::string LoadedFile(const char* path, std::string* trouble = nullptr) {
+	using namespace Loader;
+	const auto base = ExeBase();
+	const auto fail = [&](const char* why) {
+		if (trouble) *trouble += std::string("; game loader: ") + why;
+		return std::string();
+	};
+	if (!base || !Readable(base + Manager, sizeof(ManagerBytes)) || !Readable(base + Load, sizeof(LoadBytes)) || std::memcmp(reinterpret_cast<const void*>(base + Manager), ManagerBytes, sizeof(ManagerBytes)) != 0
+	    || std::memcmp(reinterpret_cast<const void*>(base + Load), LoadBytes, sizeof(LoadBytes)) != 0)
+		return fail("the game's file loader is not the expected one");
+	void* manager = reinterpret_cast<ManagerFn>(base + Manager)();
+	if (!manager) return fail("no file manager yet");
+	const std::size_t length = std::strlen(path);
+	if (length >= 0x9A) return fail("the path is too long");
+	Request    request;
+	const auto put = [&](std::size_t offset, std::uint64_t value) { std::memcpy(request.bytes + offset, &value, sizeof(value)); };
+	std::memcpy(request.bytes + 0x18, path, length);
+	put(0, reinterpret_cast<std::uint64_t>(request.bytes + 0x18));
+	put(8, length);
+	put(0x10, 0x800000000000009AULL);
+	request.bytes[0xB8] = 0x64;
+	put(0xC0, 1);
+	put(0x108, 1);
+	SharedRef ref;
+	reinterpret_cast<LoadFn>(base + Load)(manager, &ref, &request, 0);
+	std::string text;
+	if (!ref.object) fail("the loader returned nothing");
+	else if (const auto state = At<std::uint32_t>(ref.object, 0); state != 3) fail(("the loader state is " + std::to_string(state)).c_str());
+	else {
+		const auto* data = At<const char*>(ref.object, 8);
+		const auto  size = At<std::uint64_t>(ref.object, 0x10);
+		if (data && size > 0 && size < (64u << 20)) text.assign(data, size);
+		else fail("the file is empty");
+	}
+	if (ref.control) {
+		auto* strong = reinterpret_cast<volatile long*>(ref.control + 8);
+		auto* weak   = reinterpret_cast<volatile long*>(ref.control + 0xC);
+		auto* table  = *reinterpret_cast<ReleaseFn* const*>(ref.control);
+		if (InterlockedDecrement(strong) == 0) {
+			table[2](ref.control);
+			if (InterlockedDecrement(weak) == 0) table[3](ref.control);
+		}
+	}
+	return text;
+}
+
+// The game's file: from its archive, else through its loader. `trouble`
+// says why it could not be read (empty when the archive had it).
+inline std::string GameFile(const char* path, std::string* trouble = nullptr) {
+	std::string why;
+	std::string bytes = ArchiveFile(path, &why);
+	if (bytes.empty()) bytes = LoadedFile(path, &why);
+	if (trouble) *trouble = bytes.empty() || !why.empty() ? why : std::string();
+	return bytes;
+}
+
 // ---- small readers for the game's layout JSON (not a JSON parser) ----
 
 // The string after "key": from `from`, if found before `limit`.
@@ -98,10 +188,10 @@ struct NativeButton {
 inline NativeButton FindRefreshButton() {
 	NativeButton      found;
 	std::string       trouble;
-	const std::string profile = ArchiveFile("data/global/ui/layouts/_profilehd.json", &trouble);
+	const std::string profile = GameFile("data/global/ui/layouts/_profilehd.json", &trouble);
 	for (const char* panel : { "joingamepanelhd", "gamelistpanelhd", "ladderpanelhd", "friendslistpanelhd", "consolelobbypanelhd", "createGamepanelhd" }) {
 		const std::string path   = std::string("data/global/ui/layouts/") + panel + ".json";
-		const std::string layout = ArchiveFile(path.c_str(), &trouble);
+		const std::string layout = GameFile(path.c_str(), &trouble);
 		if (layout.empty()) continue;
 		for (std::size_t at = 0; (at = layout.find("\"name\"", at)) != std::string::npos; ++at) {
 			const auto  value = StringAfter(layout, at, "name", at + 8);
@@ -114,7 +204,7 @@ inline NativeButton FindRefreshButton() {
 			if (!filename.empty() && filename[0] == '$') filename = StringAfter(profile, 0, filename.c_str() + 1, profile.size());
 			if (filename.empty()) continue;
 			const std::string file = SpritePathOf(filename);
-			found.file             = ArchiveFile(file.c_str(), &trouble);
+			found.file             = GameFile(file.c_str(), &trouble);
 			found.normal           = NumberAfter(layout, at, "normalFrame", limit, 0);
 			found.hovered          = NumberAfter(layout, at, "hoveredFrame", limit, found.normal);
 			found.pressed          = NumberAfter(layout, at, "pressedFrame", limit, found.normal);

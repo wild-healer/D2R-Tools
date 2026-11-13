@@ -4,19 +4,19 @@
 D2RL_PLUGIN_MANIFEST_RESOURCE_ID RCDATA { D2RL_PLUGIN_RESOURCE_DWORD(D2RL_PLUGIN_ABI_VERSION) }
 
 1 VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION 1,2,2,1
+PRODUCTVERSION 1,2,2,1
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Grail On! D2RLoader plugin"
-      VALUE "FileVersion", "1.0.0"
+      VALUE "FileVersion", "1.2.2-dev-1"
       VALUE "InternalName", "grail-on"
       VALUE "OriginalFilename", "d2rl-grail-on.dll"
       VALUE "ProductName", "Grail On!"
-      VALUE "ProductVersion", "1.0.0"
+      VALUE "ProductVersion", "1.2.2-dev-1"
       VALUE "LegalCopyright", "Icons by Lorc, Delapouite and contributors, game-icons.net, CC BY 3.0"
     END
   END

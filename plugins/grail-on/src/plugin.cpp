@@ -98,10 +98,10 @@
 #include <thread>
 #include <tuple>
 #include <vector>
-#include "png_inflate.h"
+#include <d2r_gui.h>
 
 // The stash frame's PNGs, compiled into the DLL's read-only data (not
-// resources: see png_inflate.h).
+// resources: see D2R GUI's png.h).
 asm(".section .rdata,\"dr\"\n"
     ".balign 16\n"
     "grailon_panel_png: .incbin \"art/stash_tall.png\"\n"
@@ -116,7 +116,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.2.2";
+constexpr const char* PluginVersion = "1.2.2-dev-1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -132,6 +132,9 @@ const D2RL::PluginInfo Info {
 namespace Items  = D2RL::Items;
 namespace Events = D2RL::SharedEvents;
 namespace Tables = D2RL::DataTables;
+namespace Gui    = D2RGui;
+namespace Kit    = Gui::StashKit;
+using Picture    = Gui::Picture;
 
 struct AssetEntry {
 	const char* key;
@@ -140,11 +143,8 @@ struct AssetEntry {
 #include "art.inc"
 #include "builtin_art.inc"
 #include "icons.inc"
-#include "mold.inc"
 
-constexpr const char* Languages[]   = { "enUS", "deDE", "esES", "esMX", "frFR", "itIT", "jaJP", "koKR", "plPL", "ptBR", "ruRU", "zhCN", "zhTW" };
-constexpr const char* CommandPrefix = "grail-on/Cmd-";
-constexpr const char* StringsPath   = "data/local/lng/strings/d2rloader/grail-on/view.json";
+using Gui::Languages; // the game's 13, in its string tables' order
 // The panel is Expanded Stash Plus's stash made two cells taller
 // (tools/tall_stash.py): 1687x1829 and the title under it, a view 18 cells of 98 units tall at 58,32
 // and the category name in the band under it. The 16x16 page grid sits 1.5
@@ -768,7 +768,7 @@ int CategoryCount() { return static_cast<int>(Categories.size()); }
 // ids with each language's), or the one chosen in the settings; item names
 // then come from the strings files in that language too.
 #include "translations.inc"
-constexpr int LanguageCount = static_cast<int>(std::size(Languages));
+using Gui::LanguageCount;
 constexpr const char* LanguageNames[] { "English", "Deutsch", "Español (España)", "Español (Latinoamérica)", "Français", "Italiano", "日本語", "한국어", "Polski", "Português (Brasil)", "Русский", "简体中文", "繁體中文" };
 struct GameTexts {
 	std::vector<std::array<std::string, std::size(Languages)>> texts;
@@ -932,15 +932,12 @@ void ReadTexts(const std::string& file, GameTexts& texts) {
 }
 
 // Game thread. The game's strings files, and which language the game shows.
-std::string ArchiveFile(const char* path);
-std::string ResourceFile(const char* path);
 void ReadGameTexts() {
 	GameTexts texts;
 	// The interface's first: its English texts are the ones the plugin's are compared with.
 	for (const char* name : { "ui", "item-names", "item-nameaffixes", "item-runes", "item-modifiers", "skills", "ui-controller" }) {
 		const std::string path = std::string("data/local/lng/strings/") + name + ".json";
-		std::string       file = ArchiveFile(path.c_str()); // quietly: a file a game version lacks is no problem
-		if (file.empty()) file = ResourceFile(path.c_str());
+		std::string       file = Gui::GameFile(path.c_str()); // quietly: a file a game version lacks is no problem
 		ReadTexts(file, texts);
 	}
 	// The game's language: the one whose text the game gives for most of a sample of ids.
@@ -2403,403 +2400,47 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 }
 
 // ---- game files (game thread) ----
-// The game's own files are read the way the game reads its json files: its
-// resource manager (0x9F3540) loads the file (0x9F3DA0, what Fog's JSON loader
-// 0xA0ACA0 calls), so the active mod's copy wins over the game's. The result is
-// a shared pointer {resource, control}; the resource holds {u32 state (3 =
-// loaded), data at +8, size at +0x10}. If that fails, D2RCore's archive open
-// (export ordinal 160, what Stash Search reads its layout with) with the game's
-// size, read and close. D2R 3.3.93787 / 3.3.94995, checked before use.
-
-namespace Resource {
-constexpr std::uint64_t Manager = 0x9F3540, Load = 0x9F3DA0;
-constexpr std::uint8_t  ManagerBytes[] { 0x48, 0x83, 0xEC, 0x38, 0x65, 0x48, 0x8B, 0x04, 0x25, 0x58, 0x00, 0x00, 0x00 };
-constexpr std::uint8_t  LoadBytes[] { 0x40, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48, 0x8B, 0xFA, 0x48, 0x8D, 0x54, 0x24, 0x20 };
-} // namespace Resource
-
-struct SharedRef {
-	unsigned char* object {};
-	unsigned char* control {}; // vtable, strong count at +8, weak count at +0xC
-};
-using ManagerFn = void* (*)() noexcept;
-// The load request, as Fog's JSON loader builds it on its stack: the path as
-// the game's string (text, length, capacity with the "not owned" bit) with its
-// inline buffer at +0x18, a byte 0x64 at +0xB8, then two empty callbacks
-// (tagged 1) at +0xC0 and +0x108.
-struct alignas(16) LoadRequest {
-	unsigned char bytes[0x180] {};
-};
-using LoadFn    = SharedRef* (*)(void* manager, SharedRef* out, LoadRequest* request, int flags) noexcept;
-using ReleaseFn = void (*)(void* control) noexcept;
-
-// Why the last read failed, for the log.
-std::string FileTrouble;
-
-template <typename T>
-T Read(const unsigned char* at, std::size_t offset) {
-	T value {};
-	std::memcpy(&value, at + offset, sizeof(T));
-	return value;
-}
-
-std::string ResourceFile(const char* path) {
-	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
-	if (!base || std::memcmp(reinterpret_cast<const void*>(base + Resource::Manager), Resource::ManagerBytes, sizeof(Resource::ManagerBytes)) != 0
-	    || std::memcmp(reinterpret_cast<const void*>(base + Resource::Load), Resource::LoadBytes, sizeof(Resource::LoadBytes)) != 0) {
-		FileTrouble += "; game loader: the game's file loader is not the expected one";
-		return {};
-	}
-	void* manager = reinterpret_cast<ManagerFn>(base + Resource::Manager)();
-	if (!manager) {
-		FileTrouble += "; game loader: no file manager yet";
-		return {};
-	}
-	const std::size_t length = std::strlen(path);
-	if (length >= 0x9A) {
-		FileTrouble += "; game loader: the path is too long";
-		return {};
-	}
-	LoadRequest request;
-	const auto  put = [&](std::size_t offset, std::uint64_t value) { std::memcpy(request.bytes + offset, &value, sizeof(value)); };
-	std::memcpy(request.bytes + 0x18, path, length);
-	put(0, reinterpret_cast<std::uint64_t>(request.bytes + 0x18));
-	put(8, length);
-	put(0x10, 0x800000000000009AULL);
-	request.bytes[0xB8] = 0x64;
-	put(0xC0, 1);
-	put(0x108, 1);
-	SharedRef ref;
-	reinterpret_cast<LoadFn>(base + Resource::Load)(manager, &ref, &request, 0);
-	std::string text;
-	if (!ref.object) FileTrouble += "; game loader: the loader returned nothing";
-	else if (const auto state = Read<std::uint32_t>(ref.object, 0); state != 3) FileTrouble += "; game loader: the loader state is " + std::to_string(state);
-	else {
-		const auto* data = Read<const char*>(ref.object, 8);
-		const auto  size = Read<std::uint64_t>(ref.object, 0x10);
-		if (data && size > 0 && size < (64u << 20)) text.assign(data, size);
-		else FileTrouble += "; game loader: the file is empty";
-	}
-	if (ref.control) {
-		auto* strong = reinterpret_cast<volatile long*>(ref.control + 8);
-		auto* weak   = reinterpret_cast<volatile long*>(ref.control + 0xC);
-		auto* table  = *reinterpret_cast<ReleaseFn* const*>(ref.control);
-		if (InterlockedDecrement(strong) == 0) {
-			table[2](ref.control);
-			if (InterlockedDecrement(weak) == 0) table[3](ref.control);
-		}
-	}
-	return text;
-}
-
-namespace FileApi {
-constexpr std::uint16_t OpenOrdinal = 160;
-constexpr std::uint64_t Size = 0xA00050, Read = 0xA00EC0, Close = 0x9FFE50;
-constexpr std::uint8_t  SizeBytes[] { 0x48, 0x8B, 0x01, 0x48, 0xFF, 0x60, 0x30 };                    // mov rax, [rcx]; jmp [rax+0x30]
-constexpr std::uint8_t  ReadBytes[] { 0x4C, 0x89, 0x44, 0x24, 0x18, 0x48, 0x89, 0x54, 0x24, 0x10 }; // mov [rsp+18h], r8; mov [rsp+10h], rdx
-constexpr std::uint8_t  CloseBytes[] { 0xE9 };                                                     // jmp
-} // namespace FileApi
-
-using FileOpenFn  = void* (*)(const char* path) noexcept;
-using FileSizeFn  = std::uint64_t (*)(void* file) noexcept;
-using FileReadFn  = bool (*)(void* file, void* buffer, std::uint64_t size, std::uint64_t* read) noexcept;
-using FileCloseFn = void (*)(void* file) noexcept;
-
-// The whole file, or empty when it is not there or cannot be read.
-std::string ArchiveFile(const char* path) {
-	static const FileOpenFn open = [] {
-		const auto base = static_cast<std::uintptr_t>(Context->exeBase);
-		const auto same = [&](std::uint64_t rva, const std::uint8_t* bytes, std::size_t count) { return std::memcmp(reinterpret_cast<const void*>(base + rva), bytes, count) == 0; };
-		HMODULE    core = GetModuleHandleW(L"D2RCore.dll");
-		if (!base || !core || !same(FileApi::Size, FileApi::SizeBytes, sizeof(FileApi::SizeBytes)) || !same(FileApi::Read, FileApi::ReadBytes, sizeof(FileApi::ReadBytes))
-		    || !same(FileApi::Close, FileApi::CloseBytes, sizeof(FileApi::CloseBytes)))
-			return FileOpenFn {};
-		return reinterpret_cast<FileOpenFn>(reinterpret_cast<void*>(GetProcAddress(core, MAKEINTRESOURCEA(FileApi::OpenOrdinal))));
-	}();
-	if (!open) {
-		FileTrouble += "D2RCore's archive open is missing";
-		return {};
-	}
-	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
-	void*      file = open(path);
-	if (!file) {
-		FileTrouble += "D2RCore's archive does not have it";
-		return {};
-	}
-	std::string         text;
-	const std::uint64_t size = reinterpret_cast<FileSizeFn>(base + FileApi::Size)(file);
-	if (size > 0 && size < (64u << 20)) {
-		text.resize(size);
-		std::uint64_t read = 0;
-		if (!reinterpret_cast<FileReadFn>(base + FileApi::Read)(file, text.data(), size, &read) || read != size) text.clear();
-	}
-	reinterpret_cast<FileCloseFn>(base + FileApi::Close)(file);
-	if (text.empty()) FileTrouble += "D2RCore's archive read failed";
-	return text;
-}
-
+// The game's own files (the active mod's copy first): D2R GUI's GameFile.
 
 // The Chronicle's grey rune stones (a sprite of 98x98 cells, the 33 runes by
 // English name, Amn to Zod, in reading order): read on the game thread, cut and
 // registered on the UI thread, with a blank stone made from them.
 std::string ChronicleRunesFile;
 std::string AdvancedButtonFile;
-// A ButtonWidget named like "...Refresh..." in the lobby panels' layouts: its
-// sprite ($names looked up in the profile) and its frames.
 std::string GameFile(const char* path);
-std::string ArchiveFile(const char* path);
-std::string ResourceFile(const char* path);
 
-// The game's own settings art (check box, dividers, list rows, drop-down
-// parts), read with the lists; the settings page's sprites are made from it.
-struct GameArt {
-	const char* path;
-	std::string file;
-};
-GameArt SettingsArt[] {
-	{ "data/hd/global/ui/panel/loot_filter/lootfilter_large_list_btn_checkbox.sprite" }, { "data/hd/global/ui/pausemenu/divider.sprite" },
-	{ "data/hd/global/ui/panel/loot_filter/slot_large_list.sprite" },                    { "data/hd/global/ui/panel/loot_filter/slot_large_list_vertical_divider.sprite" },
-	{ "data/hd/global/ui/panel/dropdownbutton_left.sprite" },                            { "data/hd/global/ui/panel/dropdownbutton_center.sprite" },
-	{ "data/hd/global/ui/panel/dropdownbutton_right.sprite" },                           { "data/hd/global/ui/panel/dropdowntile_left.sprite" },
-	{ "data/hd/global/ui/panel/dropdowntile_center.sprite" },                            { "data/hd/global/ui/panel/dropdowntile_right.sprite" },
-	{ "data/hd/global/ui/panel/loot_filter/slot_large_list_btn_1.sprite" },              { "data/hd/global/ui/panel/loot_filter/slot_large_list_btn_2.sprite" },
-	{ "data/hd/global/ui/panel/loot_filter/chronicle_btn_add.sprite" },                       { "data/hd/global/ui/panel/closebtn_4x.sprite" },
-};
-enum { ArtCheck, ArtLine, ArtRow, ArtColumn, ArtDropLeft, ArtDropCenter, ArtDropRight, ArtTileLeft, ArtTileCenter, ArtTileRight, ArtUp, ArtDown, ArtNew, ArtClose };
 std::atomic<bool> SettingsArtRead {};
-// The lobby's refresh button (the grail button's reset): its sprite file and
-// frames, found in the lobby panels' layouts.
-struct NativeButton {
-	std::string file;
-	int         normal {}, hovered {}, pressed {};
-};
-NativeButton RefreshArt;
-NativeButton FindRefreshButton();
 std::atomic<int> GenericRunes {}; // rune stones registered as grune<n>, and grune-blank
 std::atomic<int> GemSocketSize { Cell }; // the game's socket picture's height, in pixels
-// A rune's cell (r01 El .. r33 Zod -> its place by name).
-constexpr int RuneCell[] { 4, 5, 29, 19, 6, 12, 27, 23, 21, 28, 0, 25, 24, 3, 9, 10, 17, 14, 7, 15, 22, 30, 18, 11, 8, 31, 20, 16, 26, 1, 13, 2, 32 };
-
-NativeButton FindRefreshButton() {
-	NativeButton found;
-	const std::string profile = GameFile("data/global/ui/layouts/_profilehd.json");
-	const auto        stringAfter = [](const std::string& text, std::size_t from, const char* key, std::size_t limit) -> std::string {
-        const auto at = text.find(std::string("\"") + key + "\"", from);
-        if (at == std::string::npos || at > limit) return {};
-        const auto open = text.find('"', text.find(':', at) + 1);
-        const auto close = open == std::string::npos ? open : text.find('"', open + 1);
-        return close == std::string::npos ? std::string() : text.substr(open + 1, close - open - 1);
-	};
-	const auto numberAfter = [](const std::string& text, std::size_t from, const char* key, std::size_t limit, int fallback) {
-		const auto at = text.find(std::string("\"") + key + "\"", from);
-		if (at == std::string::npos || at > limit) return fallback;
-		return std::atoi(text.c_str() + text.find(':', at) + 1);
-	};
-	for (const char* panel : { "joingamepanelhd", "gamelistpanelhd", "ladderpanelhd", "friendslistpanelhd", "consolelobbypanelhd", "createGamepanelhd" }) {
-		const std::string path   = std::string("data/global/ui/layouts/") + panel + ".json";
-		const std::string layout = GameFile(path.c_str());
-		if (layout.empty()) continue;
-		for (std::size_t at = 0; (at = layout.find("\"name\"", at)) != std::string::npos; ++at) {
-			const auto value = stringAfter(layout, at, "name", at + 8);
-			std::string lower = value;
-			for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-			if (lower.find("refresh") == std::string::npos) continue;
-			const auto next  = layout.find("\"type\"", at + 8);
-			const auto limit = next == std::string::npos ? layout.size() : next;
-			std::string filename = stringAfter(layout, at, "filename", limit);
-			if (filename.empty()) continue;
-			if (filename[0] == '$') filename = stringAfter(profile, 0, filename.c_str() + 1, profile.size());
-			if (filename.empty()) continue;
-			std::string file = "data/hd/global/ui/";
-			for (const char c : filename) file += c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-			file += ".sprite";
-			found.file = ArchiveFile(file.c_str());
-			if (found.file.empty()) found.file = ResourceFile(file.c_str());
-			found.normal  = numberAfter(layout, at, "normalFrame", limit, 0);
-			found.hovered = numberAfter(layout, at, "hoveredFrame", limit, found.normal);
-			found.pressed = numberAfter(layout, at, "pressedFrame", limit, found.normal);
-			Say(false, "grailon: refresh button %s in %s: %s (%s), frames %d/%d/%d", value.c_str(), panel, filename.c_str(), found.file.empty() ? "not read" : "read", found.normal, found.hovered,
-			    found.pressed);
-			if (!found.file.empty()) return found;
-		}
-	}
-	Say(false, "grailon: the lobby's refresh button was not found; the reset button is the plugin's own");
-	return {};
-}
 
 // ---- item colours ----
 // The grid colours a unique's art by its colour (UniqueItems invtransform):
-// GlobalData's SpriteColoringHelper (data/global/ui/layouts/globaldatahd.json)
-// gives each colour an hsv and a tint transform, applied to the pixels in the
-// art's colour range (by its base's InvTrans class, or by its sprite). The
-// plugin's own pictures of stored items get the same fields.
-struct ColorRange {
-	bool  empty = true;
-	float hue[2] {}, saturation[2] {}, value[2] {};
-};
-std::vector<ColorRange>               ColorRanges;     // by colour class
-std::vector<std::array<float, 8>>     ColorTransforms; // by colour: hsv[4], tint[4]
-std::map<std::string, ColorRange>     RangeOverrides;  // by sprite ("items/armor/helmet/helm")
+// D2R GUI's ItemArt reads GlobalData's SpriteColoringHelper; the plugin's own
+// pictures of stored items get the same fields.
 
-// A lenient JSON reader for the game's layout files (comments, trailing commas).
-struct JsonValue {
-	enum Kind { Null, Number, String, Array, Object } kind = Null;
-	double                                         number {};
-	std::string                                    text;
-	std::vector<JsonValue>                         items;
-	std::vector<std::pair<std::string, JsonValue>> fields;
-	const JsonValue* get(const std::string& key) const {
-		for (const auto& [name, value] : fields)
-			if (name == key) return &value;
-		return nullptr;
-	}
-};
-
-struct JsonReader {
-	const std::string& s;
-	std::size_t        at = 0;
-	void skip() {
-		for (;;) {
-			while (at < s.size() && std::isspace(static_cast<unsigned char>(s[at]))) ++at;
-			if (s.compare(at, 2, "//") == 0) at = s.find('\n', at) == std::string::npos ? s.size() : s.find('\n', at);
-			else if (s.compare(at, 2, "/*") == 0) at = s.find("*/", at) == std::string::npos ? s.size() : s.find("*/", at) + 2;
-			else return;
-		}
-	}
-	std::string str() {
-		std::string out;
-		for (++at; at < s.size() && s[at] != '"'; ++at) out += s[at] == '\\' && at + 1 < s.size() ? s[++at] : s[at];
-		++at;
-		return out;
-	}
-	JsonValue value(int depth = 0) {
-		JsonValue v;
-		skip();
-		if (at >= s.size() || depth > 64) return v;
-		const char c = s[at];
-		if (c == '{' || c == '[') {
-			v.kind = c == '{' ? JsonValue::Object : JsonValue::Array;
-			++at;
-			for (;;) {
-				skip();
-				if (at >= s.size()) return v;
-				if (s[at] == '}' || s[at] == ']') {
-					++at;
-					return v;
-				}
-				if (s[at] == ',') {
-					++at;
-					continue;
-				}
-				if (v.kind == JsonValue::Object) {
-					std::string key = s[at] == '"' ? str() : std::string();
-					skip();
-					if (at < s.size() && s[at] == ':') ++at;
-					v.fields.emplace_back(std::move(key), value(depth + 1));
-				} else v.items.push_back(value(depth + 1));
-			}
-		}
-		if (c == '"') {
-			v.kind = JsonValue::String;
-			v.text = str();
-			return v;
-		}
-		char* end = nullptr;
-		v.number  = std::strtod(s.c_str() + at, &end);
-		if (end && end != s.c_str() + at) {
-			v.kind = JsonValue::Number;
-			at     = static_cast<std::size_t>(end - s.c_str());
-		} else
-			while (at < s.size() && !std::strchr(",]}", s[at])) ++at; // true, false, null
-		return v;
-	}
-};
-
-ColorRange ReadRange(const JsonValue& v) {
-	ColorRange range;
-	if (v.kind != JsonValue::Object) return range;
-	const auto pair = [&](const char* key, float* out) {
-		const auto* field = v.get(key);
-		if (!field || field->items.size() < 2) return false;
-		out[0] = static_cast<float>(field->items[0].number), out[1] = static_cast<float>(field->items[1].number);
-		return true;
-	};
-	range.empty = !(pair("hue", range.hue) && pair("saturation", range.saturation) && pair("value", range.value));
-	return range;
-}
-
-// Game thread, with the lists. Finds the SpriteColoringHelper's fields.
+// Game thread, with the lists.
 void ReadItemColors(const std::string& text) {
+	std::size_t counts[3] {};
 	if (text.empty()) return;
-	JsonReader reader { text };
-	const JsonValue root = reader.value();
-	std::vector<const JsonValue*> stack { &root };
-	const JsonValue*              fields = nullptr;
-	while (!stack.empty() && !fields) {
-		const auto* node = stack.back();
-		stack.pop_back();
-		if (const auto* type = node->get("type"); type && type->text == "SpriteColoringHelper") fields = node->get("fields");
-		if (const auto* children = node->get("children"))
-			for (const auto& child : children->items) stack.push_back(&child);
-	}
-	if (!fields) {
+	if (!Gui::ItemArt::ReadColors(text, counts)) {
 		Problem(false, "grailon: no SpriteColoringHelper in the game's GlobalData; drawn items keep their art's colours");
 		return;
 	}
-	std::vector<ColorRange> ranges;
-	std::vector<std::array<float, 8>> transforms;
-	std::map<std::string, ColorRange> overrides;
-	if (const auto* list = fields->get("colorRange"))
-		for (const auto& item : list->items) ranges.push_back(ReadRange(item));
-	if (const auto* list = fields->get("colorTransform"))
-		for (const auto& item : list->items) {
-			std::array<float, 8> t {};
-			for (int half = 0; half < 2; ++half)
-				if (const auto* values = item.get(half ? "tintTransform" : "hsvTransform"))
-					for (std::size_t i = 0; i < 4 && i < values->items.size(); ++i) t[half * 4 + i] = static_cast<float>(values->items[i].number);
-			transforms.push_back(t);
-		}
-	if (const auto* list = fields->get("colorRangeOverride"))
-		for (const auto& item : list->items)
-			if (item.items.size() >= 2) {
-				std::string path = item.items[0].text;
-				for (char& c : path) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c == '\\' ? '/' : c)));
-				if (path.rfind("data/hd/global/ui/", 0) == 0) path.erase(0, 18);
-				overrides[path] = ReadRange(item.items[1]);
-			}
-	std::lock_guard guard(Lock);
-	ColorRanges.swap(ranges);
-	ColorTransforms.swap(transforms);
-	RangeOverrides.swap(overrides);
-	Say(false, "grailon: item colours: %zu ranges, %zu colours, %zu sprite ranges", ColorRanges.size(), ColorTransforms.size(), RangeOverrides.size());
+	Say(false, "grailon: item colours: %zu ranges, %zu colours, %zu sprite ranges", counts[0], counts[1], counts[2]);
 }
 
-// Lock held. The coloring fields of a stored item's art, as the grid draws it.
-std::string ColorFields(const UniqueEntry& entry, const std::string& art) {
-	if (entry.color < 0 || entry.color >= static_cast<int>(ColorTransforms.size())) return {};
-	std::string key = art;
-	for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c == '\\' ? '/' : c)));
-	const ColorRange* range = nullptr;
-	if (const auto found = RangeOverrides.find(key); found != RangeOverrides.end()) range = &found->second;
-	else if (entry.colorClass >= 0 && entry.colorClass < static_cast<int>(ColorRanges.size())) range = &ColorRanges[entry.colorClass];
-	if (!range || range->empty) return {};
-	const auto& t = ColorTransforms[entry.color];
-	char        text[400] {};
-	std::snprintf(text, sizeof(text),
-	              R"(, "useAdvancedColoring": true, "recolorRange": {"hue": [%g, %g], "saturation": [%g, %g], "value": [%g, %g]}, "hsvTransform": [%g, %g, %g, %g], "tintTransform": [%g, %g, %g, %g])",
-	              range->hue[0], range->hue[1], range->saturation[0], range->saturation[1], range->value[0], range->value[1], t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]);
-	return text;
-}
+// The coloring fields of a stored item's art, as the grid draws it.
+std::string ColorFields(const UniqueEntry& entry, const std::string& art) { return Gui::ItemArt::ColorFields(entry.color, entry.colorClass, art); }
 
 std::string GameFile(const char* path) {
-	FileTrouble.clear();
-	std::string text = ArchiveFile(path);
-	if (text.empty()) text = ResourceFile(path);
-	if (text.empty()) Problem(false, "grailon: could not read %s: %s", path, FileTrouble.c_str());
+	std::string trouble;
+	std::string text = Gui::GameFile(path, &trouble);
+	if (text.empty()) Problem(false, "grailon: could not read %s: %s", path, trouble.c_str());
 	else {
 		std::string start = text.substr(0, 48);
 		for (char& c : start)
 			if (static_cast<unsigned char>(c) < 32 || static_cast<unsigned char>(c) > 126) c = '.';
-		Say(false, "grailon: read %s: %zu bytes (%s), %zu art entries, starts \"%s\"", path, text.size(), FileTrouble.empty() ? "D2RCore's archive" : "the game's loader",
+		Say(false, "grailon: read %s: %zu bytes (%s), %zu art entries, starts \"%s\"", path, text.size(), trouble.empty() ? "D2RCore's archive" : "the game's loader",
 		    ParseAssets(text).size(), start.c_str());
 	}
 	return text;
@@ -2831,11 +2472,9 @@ void __cdecl BuildFromGame(const D2RL::PluginContext* context, void*) noexcept {
 	ReadGameTexts();
 	if (ChronicleRunesFile.empty()) {
 		constexpr const char* path = "data/hd/global/ui/panel/chronicle/chronicle_runes.sprite";
-		ChronicleRunesFile         = ArchiveFile(path);
-		if (ChronicleRunesFile.empty()) ChronicleRunesFile = ResourceFile(path);
+		ChronicleRunesFile         = Gui::GameFile(path);
 		constexpr const char* socket = "data/hd/global/ui/panel/gemsocket.sprite";
-		std::string           file   = ArchiveFile(socket);
-		if (file.empty()) file = ResourceFile(socket);
+		std::string           file   = Gui::GameFile(socket);
 		if (file.size() >= 0x10 && !file.compare(0, 4, "SpA1")) {
 			std::uint32_t height = 0;
 			std::memcpy(&height, file.data() + 12, 4);
@@ -2843,16 +2482,9 @@ void __cdecl BuildFromGame(const D2RL::PluginContext* context, void*) noexcept {
 		}
 		Say(false, "grailon: socket picture %d px high", GemSocketSize.load());
 		constexpr const char* advanced = "data/hd/global/ui/panel/character_sheet/advancedstatsbutton.sprite";
-		AdvancedButtonFile             = ArchiveFile(advanced);
-		if (AdvancedButtonFile.empty()) AdvancedButtonFile = ResourceFile(advanced);
+		AdvancedButtonFile             = Gui::GameFile(advanced);
 		if (AdvancedButtonFile.empty()) Say(false, "grailon: the Advanced Stats button picture was not found");
-		for (auto& art : SettingsArt) {
-			art.file = ArchiveFile(art.path);
-			if (art.file.empty()) art.file = ResourceFile(art.path);
-			const std::string name = std::strrchr(art.path, '/') + 1;
-			if (art.file.empty()) Say(false, "grailon: settings art %s not found", name.c_str());
-		}
-		RefreshArt = FindRefreshButton();
+		Gui::Kit::Read(); // the settings page's art: the game's check box, dividers, list rows, drop-down parts
 		SettingsArtRead = true;
 	}
 	ReadItemColors(GameFile("data/global/ui/layouts/globaldatahd.json"));
@@ -2877,8 +2509,7 @@ void __cdecl BuildFromGame(const D2RL::PluginContext* context, void*) noexcept {
 	optional(Tables::TableId::PropertyGroups, extra.groups, extra.groupSize);
 	{
 		const auto txt = [](const char* path) {
-			std::string file = ArchiveFile(path);
-			return file.empty() ? ResourceFile(path) : file;
+			return Gui::GameFile(path);
 		};
 		ReadVariantTexts(extra, txt("data/global/excel/skills.txt"), txt("data/global/excel/skilldesc.txt"), txt("data/global/excel/charstats.txt"),
 		                 txt("data/global/excel/itemstatcost.txt"), txt("data/global/excel/propertygroups.txt"));
@@ -2888,8 +2519,7 @@ void __cdecl BuildFromGame(const D2RL::PluginContext* context, void*) noexcept {
 	// The item types' names (a comment column, not in the compiled table): from the game's itemtypes.txt.
 	{
 		constexpr const char* path = "data/global/excel/itemtypes.txt";
-		std::string           file = ArchiveFile(path);
-		if (file.empty()) file = ResourceFile(path);
+		std::string           file = Gui::GameFile(path);
 		std::vector<std::string> lines;
 		for (std::size_t at = 0; at < file.size();) {
 			auto end = file.find('\n', at);
@@ -3415,10 +3045,13 @@ int                 Scroll {};          // first tile row shown
 int                 RowCount {};        // tile rows of the current category
 int                 LastRow {};
 int                 MaxScroll {};       // first row once the last row is on screen
-std::atomic<int>    BarMax {};          // MaxScroll for the window thread (0: no scroll bar)
-// The scroll bar on screen, for the window thread: its top and steps (the
-// view's, or the Loot page's exclusions list's, shorter).
-std::atomic<int> BarY { BarTop }, BarSteps { ScrollSteps };
+// The scroll bars (D2R GUI's): the view's, and the Loot page's exclusions
+// list's (shorter, where the view's is). The track is one long empty slot
+// (a shorter bar shows its top and its bottom edge), the steps quiet.
+Gui::ScrollBar::Look BarLook() {
+	return { .track = [](int w, int h) { return Kit::Slot(w, h); }, .thumb = [](int w, int h) { return Gui::Kit::Thumb(w, h); }, .trackHeight = BarHeight, .edge = 16, .quietSteps = true, .nestedX = -MenuRoom };
+}
+Gui::ScrollBar GridBar("", BarLeft, BarWidth, StepHeight, 236, PanelY), ExclBar("excl", BarLeft, BarWidth, StepHeight, 236, PanelY);
 std::vector<Tile>   Shown;              // tiles on screen, page coordinates
 std::vector<std::pair<int, int>> ShownHeaders; // set names on screen: set, view row
 std::vector<Tile>   Peeking;            // tiles shown as pictures: past the view's end, or past the page's rows (page coordinates)
@@ -3534,32 +3167,12 @@ std::vector<Row> BuildRows(int category) {
 // Lock held. Picks the rows that fit on the page from Scroll on.
 // ---- 1-wide items centred in their tile ----
 // A tile is two cells wide; a 1-wide item sits in its first column. The page
-// grid is drawn half a cell further right in those two columns: the grid
-// widgets share the game's grid vtable (Base+0x1CF3800), whose element rect
-// (vt31, which item rects, item backgrounds and highlights all come from) and
-// element under the mouse (vt19) are wrapped for the plugin's grid only (marked
-// by chronicleFlourishOffset {GridMarker, GridMarker}, +0x634). The items stay
-// in their real cells. Wrapped on the first view, after every plugin loaded,
-// on top of whatever is there (Inventory Slots wraps the same entries).
-struct HalfTile {
-	int x {}, y {}, width {}, height {}, hx {}, hy {}; // cells it covers; half cells its items move right, down
-};
-constexpr float  GridMarker = 7100.0f;
-constexpr int    VtCellAtPoint = 19, VtCellRect = 31;
-SRWLOCK          HalfLock = SRWLOCK_INIT;
-std::vector<HalfTile> HalfTiles; // the current view's, under HalfLock
-
-using CellRectFn    = std::int32_t* (*)(void* widget, std::int32_t* out, std::uint64_t size, std::uint64_t cell) noexcept;
-using CellAtPointFn = std::uint64_t* (*)(void* widget, std::uint64_t* out, std::uint64_t point) noexcept;
-CellRectFn    GridCellRect {};
-CellAtPointFn GridCellAtPoint {};
-void**        GridVtable {};
-
-void SetHalfTiles(std::vector<HalfTile> tiles) {
-	AcquireSRWLockExclusive(&HalfLock);
-	HalfTiles = std::move(tiles);
-	ReleaseSRWLockExclusive(&HalfLock);
-}
+// grid draws it half a cell further right (Gui::TileGrid wraps the game's grid
+// vtable for the plugin's grid only); the items stay in their real cells.
+// Wrapped on the first view, after every plugin loaded. While the grail's grid
+// draws, no "cannot wear" colour on its items (the game's and Item Quality
+// Backgrounds').
+using HalfTile = Gui::TileGrid::Shift;
 
 // The next view's half cells, applied as it opens: before, the view on
 // screen would draw its 1-wide items with the next view's offsets. Lock held.
@@ -3568,145 +3181,21 @@ bool                  HalfTilesWaiting {};
 void ApplyHalfTiles() {
 	if (!HalfTilesWaiting) return;
 	HalfTilesWaiting = false;
-	SetHalfTiles(std::move(NextHalfTiles));
+	Gui::TileGrid::SetShifts(std::move(NextHalfTiles));
 	NextHalfTiles.clear();
 }
 
 // The plugin's own grid, or the host's grid of the grail's area (its cells
 // stay the host page's: OriginX/Y take them to the grail's).
 bool IsGrailGrid(const void* widget) {
-	float marker[2] {};
-	std::memcpy(marker, static_cast<const std::uint8_t*>(widget) + 0x634, sizeof(marker));
-	if (Host::On()) return marker[0] == Host::Info.gridMarker[0] && marker[1] == Host::Info.gridMarker[1];
-	return marker[0] == GridMarker && marker[1] == GridMarker;
+	if (Host::On()) return Gui::TileGrid::Marked(widget, Host::Info.gridMarker[0], Host::Info.gridMarker[1]);
+	return Gui::TileGrid::Marked(widget, Gui::TileGrid::Marker, Gui::TileGrid::Marker);
 }
 int OriginX() { return Host::On() ? Host::Info.x : 0; }
 int OriginY() { return Host::On() ? Host::Info.y : 0; }
 
-// The shift (in half cells) of the tile holding cell `cell`; false for none.
-bool HalfShift(std::uint64_t cell, int& hx, int& hy) {
-	if (cell == ~std::uint64_t { 0 }) return false;
-	const int x = static_cast<std::int32_t>(cell) - OriginX(), y = static_cast<std::int32_t>(cell >> 32) - OriginY();
-	bool      found = false;
-	AcquireSRWLockShared(&HalfLock);
-	for (const auto& tile : HalfTiles)
-		if (y >= tile.y && y < tile.y + tile.height && x >= tile.x && x < tile.x + tile.width) hx = tile.hx, hy = tile.hy, found = true;
-	ReleaseSRWLockShared(&HalfLock);
-	return found;
-}
-
-// Half a cell across and down, in pixels.
-void HalfCell(void* widget, int& across, int& down) {
-	std::int32_t first[4] {}, right[4] {}, below[4] {};
-	GridCellRect(widget, first, 1 | (std::uint64_t { 1 } << 32), 0);
-	GridCellRect(widget, right, 1 | (std::uint64_t { 1 } << 32), 1);
-	GridCellRect(widget, below, 1 | (std::uint64_t { 1 } << 32), std::uint64_t { 1 } << 32);
-	across = (right[0] - first[0]) / 2;
-	down   = (below[1] - first[1]) / 2;
-}
-
-thread_local bool          PeekCellOn {}; // a picture tile's tooltip being shown: its item is at PeekCell
-thread_local std::uint64_t PeekCell {}; // grail cells (x low 32 bits, y high)
-
-// The screen rect (x, y, w, h) of `size` cells from grail cell (x, y), also
-// past the grid's own cells (it is only 3x5): measured on its first cells and
-// carried on, as the game would lay out a bigger grid.
-void TileRect(void* widget, std::int32_t* out, std::uint64_t size, int x, int y) {
-	const auto cellAt = [](int cx, int cy) { return static_cast<std::uint32_t>(cx) | (std::uint64_t { static_cast<std::uint32_t>(cy) } << 32); };
-	std::int32_t right[4] {}, below[4] {};
-	GridCellRect(widget, out, size, cellAt(OriginX(), OriginY()));
-	GridCellRect(widget, right, size, cellAt(OriginX() + 1, OriginY()));
-	GridCellRect(widget, below, size, cellAt(OriginX(), OriginY() + 1));
-	out[0] += x * (right[0] - out[0]);
-	out[1] += y * (below[1] - out[1]);
-}
-
-std::int32_t* HookGridCellRect(void* widget, std::int32_t* out, std::uint64_t size, std::uint64_t cell) noexcept {
-	if (PeekCellOn && widget && IsGrailGrid(widget)) return TileRect(widget, out, size, static_cast<std::int32_t>(PeekCell), static_cast<std::int32_t>(PeekCell >> 32)), out;
-	GridCellRect(widget, out, size, cell);
-	int hx = 0, hy = 0;
-	if (widget && IsGrailGrid(widget) && HalfShift(cell, hx, hy)) {
-		int across = 0, down = 0;
-		HalfCell(widget, across, down);
-		out[0] += hx * across;
-		out[1] += hy * down;
-	}
-	return out;
-}
-
-std::atomic<std::uint64_t> HoverCell { ~std::uint64_t { 0 } }; // the grail grid's last cell looked up under a point (the mouse)
-std::uint64_t* HookGridCellAtPointInner(void* widget, std::uint64_t* out, std::uint64_t point) noexcept;
-std::uint64_t* HookGridCellAtPoint(void* widget, std::uint64_t* out, std::uint64_t point) noexcept {
-	if (!widget || !IsGrailGrid(widget)) return GridCellAtPoint(widget, out, point);
-	HookGridCellAtPointInner(widget, out, point);
-	HoverCell = *out;
-	return out;
-}
-std::uint64_t* HookGridCellAtPointInner(void* widget, std::uint64_t* out, std::uint64_t point) noexcept {
-	int across = 0, down = 0;
-	HalfCell(widget, across, down);
-	const auto back = [&](int hx, int hy) {
-		const auto x = static_cast<std::uint32_t>(static_cast<std::int32_t>(point) - hx * across);
-		const auto y = static_cast<std::uint32_t>(static_cast<std::int32_t>(point >> 32) - hy * down);
-		return x | (std::uint64_t { y } << 32);
-	};
-	GridCellAtPoint(widget, out, point);
-	// Over a shifted tile's cells: the cell its shifted items show there.
-	int hx = 0, hy = 0;
-	if (HalfShift(*out, hx, hy)) return GridCellAtPoint(widget, out, back(hx, hy));
-	// Over a shifted item's part that sticks out of its tile's cells.
-	std::vector<HalfTile> tiles;
-	AcquireSRWLockShared(&HalfLock);
-	tiles = HalfTiles;
-	ReleaseSRWLockShared(&HalfLock);
-	const auto plain = *out;
-	for (const auto& tile : tiles) {
-		std::uint64_t cell = ~std::uint64_t { 0 };
-		GridCellAtPoint(widget, &cell, back(tile.hx, tile.hy));
-		const int x = static_cast<std::int32_t>(cell) - OriginX(), y = static_cast<std::int32_t>(cell >> 32) - OriginY();
-		if (cell != ~std::uint64_t { 0 } && y >= tile.y && y < tile.y + tile.height && x >= tile.x && x < tile.x + tile.width) return *out = cell, out;
-	}
-	*out = plain;
-	return out;
-}
-
-// ---- no "cannot wear" on the grail's items ----
-// The grid's draw (vt3) marks the grail grid's drawing; meanwhile the item
-// requirement check says every item can be used: the game's (thunk slot
-// Base+0x3E2A808, called from Base+0x2C3774, D2RCore's
-// CheckInventoryItemRequirementsForDisplay); and Item Quality Backgrounds'
-// cannot-equip check (1.2.42: module+0xECD0, called once from +0xAD04, al 0 =
-// no mark) answers "can equip" (its call goes through a stub near the module).
-constexpr int VtDraw = 3;
-using GridDrawFn     = std::uint64_t (*)(void*, void*, void*, void*) noexcept;
-using RequirementFn  = std::int32_t (*)(void*, void*, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t) noexcept;
-GridDrawFn    GridDraw {};
-using IqbCannotFn    = bool (*)(void* state, void* item) noexcept;
-RequirementFn GameRequirement {};
-IqbCannotFn   IqbCannot {};
-std::uint8_t* IqbCallSite {};
-void*         IqbStub {};
-bool          InGrailDraw {};
-
-bool ViewOpen();
-void PeekTooltip(void* widget);
-void MoveMoldFrom(void* grid);
-std::uint64_t HookGridDraw(void* widget, void* a, void* b, void* c) noexcept {
-	const bool grail = widget && IsGrailGrid(widget);
-	// The host's grid is in the host's panel, closed a moment after the view: not drawn meanwhile.
-	if (grail && Host::On() && !ViewOpen()) return 0;
-	if (!grail && widget) MoveMoldFrom(widget); // the inventory's grid: the grail button, moved by the settings
-	const bool before = InGrailDraw;
-	InGrailDraw       = grail;
-	const auto result = GridDraw(widget, a, b, c);
-	InGrailDraw       = before;
-	if (grail) PeekTooltip(widget);
-	return result;
-}
-std::int32_t HookGameRequirement(void* item, void* player, std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d, std::uint64_t e) noexcept {
-	return InGrailDraw ? 1 : GameRequirement(item, player, a, b, c, d, e);
-}
-bool HookIqbCannot(void* state, void* item) noexcept { return InGrailDraw ? false : IqbCannot(state, item); }
+// The screen rect (x, y, w, h) of `size` cells from grail cell (x, y).
+void TileRect(void* widget, std::int32_t* out, std::uint64_t size, int x, int y) { Gui::TileGrid::TileRect(widget, out, size, x, y); }
 
 // Points the rel32 call at `site` to `target`.
 bool PointCall(std::uint8_t* site, const void* target) {
@@ -3721,95 +3210,39 @@ bool PointCall(std::uint8_t* site, const void* target) {
 	return true;
 }
 
-bool SwapAt(std::uint64_t* slot, std::uint64_t from, std::uint64_t to) {
-	DWORD keep = 0;
-	if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &keep)) return false;
-	const bool swapped = InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(slot), static_cast<LONG64>(to), static_cast<LONG64>(from)) == static_cast<LONG64>(from);
-	VirtualProtect(slot, sizeof(*slot), keep, &keep);
-	return swapped;
-}
-
-void InstallRequirementHooks() {
-	const auto base  = static_cast<std::uintptr_t>(Context->exeBase);
-	const auto* thunk = reinterpret_cast<const std::uint8_t*>(base + 0x3E2B298);
-	std::int32_t rel  = 0;
-	std::memcpy(&rel, thunk + 2, 4);
-	if (thunk[0] == 0xFF && thunk[1] == 0x25 && rel == -0xA96) {
-		auto*      slot    = reinterpret_cast<std::uint64_t*>(base + 0x3E2A808);
-		const auto current = *slot;
-		if (current && SwapAt(slot, current, reinterpret_cast<std::uint64_t>(&HookGameRequirement))) GameRequirement = reinterpret_cast<RequirementFn>(current);
-	}
-	if (!GameRequirement) Problem(false, "grailon: the game's cannot-wear colour stays on grail items (requirement check not where expected)");
-	if (HMODULE iqb = GetModuleHandleW(L"d2rl-item-quality-backgrounds.dll")) {
-		auto*                  module = reinterpret_cast<std::uint8_t*>(iqb);
-		constexpr std::uint8_t call[] { 0xE8, 0xC7, 0x3F, 0x00, 0x00 }, start[] { 0x48, 0x89, 0x5C, 0x24, 0x18 };
-		if (std::memcmp(module + 0xAD04, call, sizeof(call)) == 0 && std::memcmp(module + 0xECD0, start, sizeof(start)) == 0) {
-			// A jump to the hook within reach of the call.
-			for (std::uintptr_t at = (reinterpret_cast<std::uintptr_t>(module) & ~std::uintptr_t { 0xFFFF }) - 0x10000; !IqbStub && at > reinterpret_cast<std::uintptr_t>(module) - 0x70000000;
-			     at -= 0x10000)
-				IqbStub = VirtualAlloc(reinterpret_cast<void*>(at), 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-			if (IqbStub) {
-				std::uint8_t jump[14] { 0xFF, 0x25, 0, 0, 0, 0 };
-				const auto   hook = reinterpret_cast<std::uint64_t>(&HookIqbCannot);
-				std::memcpy(jump + 6, &hook, 8);
-				std::memcpy(IqbStub, jump, sizeof(jump));
-				FlushInstructionCache(GetCurrentProcess(), IqbStub, sizeof(jump));
-				IqbCannot = reinterpret_cast<IqbCannotFn>(module + 0xECD0);
-				if (PointCall(module + 0xAD04, IqbStub)) IqbCallSite = module + 0xAD04;
-			}
-		}
-		if (!IqbCallSite) Problem(false, "grailon: Item Quality Backgrounds' cannot-equip mark stays on grail items (not version 1.2.42)");
-	}
-}
-
-void UninstallRequirementHooks() {
-	if (GameRequirement) (void)SwapAt(reinterpret_cast<std::uint64_t*>(static_cast<std::uintptr_t>(Context->exeBase) + 0x3E2A808), reinterpret_cast<std::uint64_t>(&HookGameRequirement), reinterpret_cast<std::uint64_t>(GameRequirement));
-	if (IqbCallSite) (void)PointCall(IqbCallSite, reinterpret_cast<const void*>(IqbCannot));
-	GameRequirement = nullptr;
-	IqbCallSite     = nullptr; // the stub stays: a draw may still be in it
-}
-
+bool ViewOpen();
+void PeekTooltip(void* widget);
+void MoveMoldFrom(void* grid);
 void InstallSoundMute();
 
 // UI thread, once a view opens.
 void WrapGridVtable() {
 	static bool tried = false;
 	if (tried) return;
-	tried      = true;
+	tried = true;
 	InstallSoundMute();
-	GridVtable = reinterpret_cast<void**>(static_cast<std::uintptr_t>(Context->exeBase) + 0x1CF3800);
-	// Entries nobody wraps tell the build; the wrapped ones are chained as they are.
-	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
-	if (GridVtable[25] != reinterpret_cast<void*>(base + 0x2C49F0) || GridVtable[33] != reinterpret_cast<void*>(base + 0x2C3310)) {
-		Problem(false, "grailon: the item grid is not the expected one; 1-wide items stay in their first column");
-		GridVtable = nullptr;
-		return;
-	}
-	DWORD protect = 0;
-	if (!VirtualProtect(GridVtable, (VtCellRect + 1) * sizeof(void*), PAGE_READWRITE, &protect)) {
-		GridVtable = nullptr;
-		return;
-	}
-	GridCellRect             = reinterpret_cast<CellRectFn>(GridVtable[VtCellRect]);
-	GridCellAtPoint          = reinterpret_cast<CellAtPointFn>(GridVtable[VtCellAtPoint]);
-	GridDraw                 = reinterpret_cast<GridDrawFn>(GridVtable[VtDraw]);
-	GridVtable[VtCellRect]    = reinterpret_cast<void*>(&HookGridCellRect);
-	GridVtable[VtCellAtPoint] = reinterpret_cast<void*>(&HookGridCellAtPoint);
-	GridVtable[VtDraw]        = reinterpret_cast<void*>(&HookGridDraw);
-	VirtualProtect(GridVtable, (VtCellRect + 1) * sizeof(void*), protect, &protect);
-	InstallRequirementHooks();
+	Gui::TileGrid::Wrap({
+		.mine   = [](const void* widget) { return IsGrailGrid(widget); },
+		.origin = [] { return std::pair<int, int> { OriginX(), OriginY() }; },
+		// The host's grid is in the host's panel, closed a moment after the view: not drawn meanwhile.
+		.draw = [](void* widget, bool grail) {
+			if (grail && Host::On() && !ViewOpen()) return false;
+			if (!grail) MoveMoldFrom(widget); // the inventory's grid: the grail button, moved by the settings
+			return true;
+		},
+		.drawn = [](void* widget, bool grail) {
+			if (grail) PeekTooltip(widget);
+		},
+		.clearRequirements = true,
+		.problem = [](const char* what) {
+			std::string text(what);
+			if (const auto at = text.find("the plugin's items"); at != std::string::npos) text.replace(at, 18, "grail items");
+			Problem(false, "grailon: %s", text.c_str());
+		},
+	});
 }
 
-void UnwrapGridVtable() {
-	if (!GridVtable || !GridCellRect) return;
-	DWORD protect = 0;
-	if (!VirtualProtect(GridVtable, (VtCellRect + 1) * sizeof(void*), PAGE_READWRITE, &protect)) return;
-	if (GridVtable[VtCellRect] == reinterpret_cast<void*>(&HookGridCellRect)) GridVtable[VtCellRect] = reinterpret_cast<void*>(GridCellRect);
-	if (GridVtable[VtCellAtPoint] == reinterpret_cast<void*>(&HookGridCellAtPoint)) GridVtable[VtCellAtPoint] = reinterpret_cast<void*>(GridCellAtPoint);
-	if (GridDraw && GridVtable[VtDraw] == reinterpret_cast<void*>(&HookGridDraw)) GridVtable[VtDraw] = reinterpret_cast<void*>(GridDraw);
-	UninstallRequirementHooks();
-	VirtualProtect(GridVtable, (VtCellRect + 1) * sizeof(void*), protect, &protect);
-}
+void UnwrapGridVtable() { Gui::TileGrid::Unwrap(); }
 
 // Lock held. Where a tile's item sits in it: centred, half cells included (a
 // 1-wide item in its two-cell slot, a stored runeword smaller than its tile).
@@ -3840,8 +3273,7 @@ void PlaceRows(const std::vector<Row>& rows) {
 	RowCount  = static_cast<int>(rows.size());
 	MaxScroll = RowCount;
 	for (int height = 0; MaxScroll > 0 && height + rows[MaxScroll - 1].height <= ViewRows;) height += rows[--MaxScroll].height;
-	BarMax = MaxScroll;
-	BarY = BarTop, BarSteps = ScrollSteps;
+	GridBar.Set(BarTop, ScrollSteps, MaxScroll);
 	// An item dropped for another category or row: show the row with its tile.
 	// An item dropped for another category or row: scroll as little as it takes
 	// to show the row with its tile.
@@ -3935,21 +3367,13 @@ bool TileShown(int unique, bool eth) {
 
 // ---- layout ----
 
-std::string Json(const std::string& text) {
-	std::string out = "\"";
-	for (const char c : text) {
-		if (c == '"' || c == '\\') out += '\\';
-		if (c == '\n') out += "\\n";
-		if (static_cast<unsigned char>(c) >= 0x20) out += c;
-	}
-	return out + '"';
-}
-
-std::string Rect(int x, int y, int width, int height) {
-	char text[128] {};
-	std::snprintf(text, sizeof(text), R"("rect": {"x": %d, "y": %d, "width": %d, "height": %d})", x, y, width, height);
-	return text;
-}
+// Every widget is D2R GUI's (layout.h). The plugin's texts go in as they are
+// (it translates them itself: Services::plainText). Item art and the plugin's
+// own icons are file paths as the tables give them (single backslashes):
+// Image and Icon take those; the buttons take D2R GUI's sprite names.
+using Gui::Json;
+using Gui::Rect;
+using Gui::Command;
 
 // A wrapped label: the game's own text style for item names in slots, its
 // lines at the bottom of the box.
@@ -3962,133 +3386,52 @@ std::string Label(const std::string& name, int x, int y, int width, int height, 
 			text = Uniques[u].name;
 			while (!text.empty() && (text.front() == '@' || text.front() == '$')) text.erase(text.begin());
 		}
-	return R"(, {"type": "TextBoxWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height) + R"(, "text": )" + Json(text)
-	     + R"(, "style": {"fontColor": ")" + color + R"(", "pointSize": )" + std::to_string(size) + R"(, "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": ")"
-	     + align + R"(", "v": ")" + vertical + R"("}, "options": {"lineWrap": true}}}})";
+	return Gui::TextBox(name, x, y, width, height, text, { .color = color, .size = size, .h = align, .v = vertical, .wrap = true });
 }
 
-std::string Image(const std::string& name, int x, int y, const std::string& filename, const std::string& extra = "") {
-	char rect[96] {};
-	std::snprintf(rect, sizeof(rect), R"("rect": {"x": %d, "y": %d})", x, y);
-	return R"(, {"type": "ImageWidget", "name": )" + Json(name) + R"(, "fields": {)" + rect + R"(, "filename": )" + Json(filename) + extra + "}}";
-}
+// An image of a file path as the tables give it.
+std::string Image(const std::string& name, int x, int y, const std::string& filename, const std::string& extra = "") { return Gui::Image(name, x, y, Gui::Path(filename), extra); }
 
-// Item art in gray, the way the Item Dictionary mod recolours item art: every
-// hue, saturation and brightness is in range ([middle, half width]), then
-// saturation and brightness are shifted.
-std::string GrayFields() {
-	char text[320] {};
-	std::snprintf(text, sizeof(text),
-	              R"(, "useAdvancedColoring": true, "recolorRange": {"hue": [0.5, 0.501], "saturation": [0.5, 0.501], "value": [0.5, 0.501]}, "hsvTransform": [0.0, %.2f, %.2f, 0.0], "tintTransform": [0.0, 0.0, 0.0, 0.0])",
-	              Config.saturation / 100.0, Config.brightness / 100.0);
-	return text;
-}
+std::string GrayFields() { return Gui::ItemArt::GrayFields(Config.saturation, Config.brightness); }
 
-std::string Command(const std::string& command) { return Json(std::string("PanelManager:ClosePanel:") + CommandPrefix + command); }
-
-// A square button: an empty slot, gold-rimmed when on, sending `command`.
-std::string SquareButton(const std::string& name, int x, int y, bool on, const char* sprite, const std::string& tooltip, const std::string& command, int size = ButtonSize) {
-	char button[768] {};
-	std::snprintf(button, sizeof(button),
-	              R"(, {"type": "ButtonWidget", "name": %s, "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "filename": "d2rloader\\grail-on\\%s%s", "normalFrame": 0, "hoveredFrame": 1, "pressedFrame": 2, "tooltipString": %s, "sound": "cursor_menu_select_hd", "onClickMessage": %s}})",
-	              Json(name).c_str(), x, y, size, size, sprite, on ? "On" : "", Json(tooltip).c_str(), Command(command).c_str());
-	return button;
+// A square button on sprite `file` (frames 0 normal, 1 hovered, 2 pressed), sending `command`.
+std::string SquareButton(const std::string& name, int x, int y, const std::string& file, const std::string& tooltip, const std::string& command, int size = ButtonSize) {
+	return Gui::SpriteButton(name, x, y, size, size, file, { .normal = 0, .pressed = 2, .hovered = 1 }, command, tooltip);
 }
 
 // An invisible button: its tooltip on hover, `command` on a click (none when empty).
-std::string HitButton(const std::string& name, int x, int y, int width, int height, const std::string& tooltip, const std::string& command) {
-	std::string out = R"(, {"type": "ButtonWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height)
-	                + R"(, "filename": "d2rloader\\grail-on\\blank", "normalFrame": 0, "hoveredFrame": 1, "pressedFrame": 1, "tooltipString": )" + Json(tooltip);
-	if (!command.empty()) out += R"(, "sound": "cursor_menu_select_hd", "onClickMessage": )" + Command(command);
-	return out + "}}";
-}
+std::string HitButton(const std::string& name, int x, int y, int width, int height, const std::string& tooltip, const std::string& command) { return Gui::QuietButton(name, x, y, width, height, command, tooltip); }
 
-// A button on a settings sprite, its text on it (centred).
-std::string TextButton(const std::string& name, int x, int y, int width, int height, const char* sprite, int normal, int hovered, int pressed, const std::string& text, const char* color,
+// A button on sprite `file`, its text on it (translated, centred).
+std::string TextButton(const std::string& name, int x, int y, int width, int height, const std::string& file, int normal, int hovered, int pressed, const std::string& text, const char* color,
                        const std::string& tooltip, const std::string& command) {
-	std::string out = R"(, {"type": "ButtonWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height) + R"(, "filename": "d2rloader\\grail-on\\)" + sprite
-	                + R"(", "normalFrame": )" + std::to_string(normal) + R"(, "hoveredFrame": )" + std::to_string(hovered) + R"(, "pressedFrame": )" + std::to_string(pressed);
-	if (!text.empty())
-		out += R"(, "textString": )" + Json(Tr(text)) + R"(, "textColor": ")" + color
-		     + R"(", "text/style": {"pointSize": 30, "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "center", "v": "center"}})";
-	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(tooltip);
-	if (!command.empty()) out += R"(, "sound": "cursor_menu_select_hd", "onClickMessage": )" + Command(command);
-	return out + "}}";
+	return Gui::SpriteButton(name, x, y, width, height, file, { .normal = normal, .pressed = pressed, .hovered = hovered }, command, tooltip, { .text = text.empty() ? std::string() : Tr(text), .color = color ? color : "" });
 }
 
-// A tooltip's text in lines of about `width` characters.
-// The text is translated first. Widths count characters, Chinese, Japanese
-// and Korean ones as two; Chinese and Japanese lines break between any two of
-// their characters, others at spaces.
-std::string Wrap(const std::string& english, std::size_t width = 46) {
-	const std::string text = Tr(english);
-	struct Piece {
-		std::string text;
-		std::size_t width {};
-		bool        space {}; // a space before it
-	};
-	std::vector<Piece> pieces;
-	Piece              word;
-	const auto         flush = [&]() {
-        if (!word.text.empty()) pieces.push_back(word);
-        word = {};
-	};
-	for (std::size_t at = 0; at < text.size();) {
-		const auto    c    = static_cast<unsigned char>(text[at]);
-		const int     size = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
-		std::uint32_t code = size == 1 ? c : c & (0x3F >> (size - 1));
-		for (int k = 1; k < size && at + k < text.size(); ++k) code = (code << 6) | (static_cast<unsigned char>(text[at + k]) & 0x3F);
-		if (c == ' ' || c == '\n') {
-			flush();
-			if (c == '\n') pieces.push_back({ "\n" });
-			else word.space = true;
-			++at;
-			continue;
-		}
-		const bool hangul = (code >= 0x1100 && code <= 0x115F) || (code >= 0xAC00 && code <= 0xD7A3);
-		const bool wide   = hangul || (code >= 0x2E80 && code <= 0xA4CF) || (code >= 0xF900 && code <= 0xFAFF) || (code >= 0xFE30 && code <= 0xFE4F) || (code >= 0xFF00 && code <= 0xFF60)
-		               || (code >= 0xFFE0 && code <= 0xFFE6);
-		if (wide && !hangul) {
-			const bool space = word.space && word.text.empty();
-			flush();
-			word = { text.substr(at, size), 2, space };
-			flush();
-		} else word.text += text.substr(at, size), word.width += wide ? 2 : 1;
-		at += size;
-	}
-	flush();
-	std::string out, line;
-	std::size_t used = 0;
-	for (const auto& piece : pieces) {
-		if (piece.text == "\n") {
-			out += line + "\n", line.clear(), used = 0;
-			continue;
-		}
-		const std::size_t gap = !line.empty() && piece.space ? 1 : 0;
-		if (!line.empty() && used + gap + piece.width > width) out += line + "\n", line.clear(), used = 0;
-		else if (gap) line += ' ', ++used;
-		line += piece.text, used += piece.width;
-	}
-	return out + line;
-}
+// A tooltip's text, translated, in lines of about `width` characters.
+std::string Wrap(const std::string& english, std::size_t width = 46) { return Gui::WrapLines(Tr(english), width); }
+
+// An empty slot, a search veil, a perfect glow: one sprite per tile size.
+std::string SlotSprite(int width, int height) { return Kit::Slot(std::clamp(width, 1, 4) * Cell, std::clamp(height, 1, 4) * Cell); }
+std::string VeilSprite(int width, int height) { return Kit::Veil(std::clamp(width, 1, 4) * Cell, std::clamp(height, 1, 4) * Cell); }
+std::string GlowSprite(int width, int height) { return Kit::Glow(std::clamp(width, 1, 4) * Cell, std::clamp(height, 1, 4) * Cell, GlowPad, GlowFrames); }
+// The grid's cover: the stash's stone under the rows.
+std::string CoverSprite() { return Kit::Stone(1571, ViewRows * Cell + 2, BackgroundColor, 12, 3); }
 
 // The see-through look of ethereal items, for the ethereal menus' icons.
-const std::string EthLook = ", \"transparency\": 0.45";
+const std::string EthLook = Gui::ItemArt::EthLook;
 
 // Item art (or a plugin sprite) fitted in a square box at x, y, centered.
 std::string Icon(const std::string& name, int x, int y, int box, const std::string& art, int width, int height, const std::string& extra = "", int artSize = 0) {
 	const int    unit  = artSize > 0 ? artSize : Cell; // the art's pixels per width/height unit
 	const double scale = static_cast<double>(box) / (std::max(width, height) * unit);
-	char         icon[512] {};
-	std::snprintf(icon, sizeof(icon), R"(, {"type": "ImageWidget", "name": %s, "fields": {"rect": {"x": %d, "y": %d, "scale": %.4f}, "filename": %s%s}})", Json(name).c_str(),
-	              x + static_cast<int>((box - width * unit * scale) / 2), y + static_cast<int>((box - height * unit * scale) / 2), scale, Json(art).c_str(), extra.c_str());
-	return icon;
+	return Gui::ScaledImage(name, x + static_cast<int>((box - width * unit * scale) / 2), y + static_cast<int>((box - height * unit * scale) / 2), scale, Gui::Path(art), extra);
 }
 
 // A square button (the menu buttons' plate) with one of the icons on it.
 std::string IconButton(const std::string& name, int x, int y, const char* icon, const std::string& tooltip, const std::string& command, int size = DropHeight) {
 	const int box = size * 7 / 10;
-	return SquareButton(name, x, y, false, "squarebtn", tooltip, command, size)
+	return SquareButton(name, x, y, Kit::SlotButton(size, size), tooltip, command, size)
 	     + Icon(name + "Icon", x + (size - box) / 2, y + (size - box) / 2, box, std::string("d2rloader\\grail-on\\icon-") + icon, 1, 1, "", IconSize);
 }
 
@@ -4145,55 +3488,10 @@ std::string MenuArt(int menu, int& width, int& height) {
 
 // Moves every widget right by MenuRoom: the view is laid out from the window's
 // corner, the panel starts MenuRoom left of it.
-std::string ShiftLayout(const std::string& layout) {
-	static const std::string key = R"("rect": {"x": )";
-	std::string              shifted;
-	std::size_t              from = 0;
-	for (std::size_t at; (at = layout.find(key, from)) != std::string::npos;) {
-		at += key.size();
-		char*      end = nullptr;
-		const long x   = std::strtol(layout.c_str() + at, &end, 10);
-		shifted += layout.substr(from, at - from) + std::to_string(x + MenuRoom);
-		from = static_cast<std::size_t>(end - layout.c_str());
-	}
-	return shifted + layout.substr(from);
-}
+std::string ShiftLayout(const std::string& layout) { return Gui::ShiftX(layout, MenuRoom); }
 
-// Whether Item Quality Backgrounds is loaded: its background sprites are then
-// drawn under the tiles the plugin draws itself (the grid's items get them from
-// it directly).
-bool QualityBackgrounds() { return GetModuleHandleW(L"d2rl-item-quality-backgrounds.dll") != nullptr; }
-
-// Where an item of width x height cells has its sockets, in socket order (rows
-// order): their centres in cells, and the room each has (1 for a whole cell).
-// One column for narrow items and up to 3 sockets, two columns from 4 (5 as
-// 2-1-2), like the game's sockets.
-std::pair<std::vector<std::pair<double, double>>, double> SocketSpots(int width, int height, int count) {
-	std::vector<std::pair<double, double>> spots;
-	if (count <= 0) return { spots, 1.0 };
-	const double midX = width / 2.0, midY = height / 2.0;
-	std::vector<int> rows; // sockets per row
-	if (width < 2 || (count <= 3 && height >= count)) rows.assign(count, 1);
-	else if (count == 3) rows = { 2, 1 };
-	else if (count == 5) rows = { 2, 1, 2 };
-	else rows.assign((count + 1) / 2, 2);
-	const double step = std::min(1.0, static_cast<double>(height) / rows.size());
-	for (std::size_t r = 0; r < rows.size(); ++r) {
-		const double y = midY + (r - (rows.size() - 1) / 2.0) * step;
-		if (rows[r] == 1) spots.push_back({ midX, y });
-		else spots.push_back({ midX - 0.5, y }), spots.push_back({ midX + 0.5, y });
-	}
-	// The game's order: 2-2 top left, bottom right, bottom left, top right;
-	// 2-1-2 the middle one, then the same.
-	const auto order = [&](std::initializer_list<int> at) {
-		std::vector<std::pair<double, double>> sorted;
-		for (const int k : at) sorted.push_back(spots[k]);
-		spots = std::move(sorted);
-	};
-	if (rows.size() == 2 && rows[0] == 2 && rows[1] == 2) order({ 0, 3, 2, 1 });
-	else if (rows.size() == 3 && rows[0] == 2 && rows[1] == 1 && rows[2] == 2) order({ 2, 0, 4, 3, 1 });
-	return { spots, step };
-}
+using Gui::ItemArt::QualityBackgrounds;
+using Gui::ItemArt::SocketSpots;
 constexpr double RuneScale = 0.8; // a rune stone's size in its socket
 
 // Lock held. A perfect tile's glow around its slot (`left`, `top`: the tile's
@@ -4203,15 +3501,10 @@ constexpr double RuneScale = 0.8; // a rune stone's size in its socket
 std::string StillGlow(const Tile& tile, const std::string& n, int left, int top, const std::string& extra = "");
 std::string GlowImage(const Tile& tile, const std::string& n, int left, int top) {
 	if (!Config.frameAnimations) return StillGlow(tile, n, left, top);
-	char rect[96] {};
-	std::snprintf(rect, sizeof(rect), R"("rect": {"x": %d, "y": %d})", left + (tile.width == 1 ? Cell / 2 : 0) - GlowPad, top - GlowPad);
-	return R"(, {"type": "AnimatedImageWidget", "name": )" + Json(n) + R"(, "fields": {)" + rect + R"(, "filename": )"
-	     + Json("d2rloader\\grail-on\\glow" + std::to_string(std::clamp(tile.width, 1, 4)) + "x" + std::to_string(std::clamp(tile.height, 1, 4)))
-	     + R"(, "fps": 8, "loop": true, "playing": true, "transparency": )" + std::to_string(GlowOpacity) + "}}";
+	return Gui::AnimatedImage(n, left + (tile.width == 1 ? Cell / 2 : 0) - GlowPad, top - GlowPad, GlowSprite(tile.width, tile.height), 8, ", \"transparency\": " + std::to_string(GlowOpacity));
 }
 std::string StillGlow(const Tile& tile, const std::string& n, int left, int top, const std::string& extra) {
-	return Image(n, left + (tile.width == 1 ? Cell / 2 : 0) - GlowPad, top - GlowPad,
-	             "d2rloader\\grail-on\\glow" + std::to_string(std::clamp(tile.width, 1, 4)) + "x" + std::to_string(std::clamp(tile.height, 1, 4)), extra + ", \"transparency\": " + std::to_string(GlowOpacity));
+	return Gui::Image(n, left + (tile.width == 1 ? Cell / 2 : 0) - GlowPad, top - GlowPad, GlowSprite(tile.width, tile.height), extra + ", \"transparency\": " + std::to_string(GlowOpacity));
 }
 
 // Lock held. A runeword tile's picture: its stored item's base, centred by
@@ -4229,21 +3522,15 @@ std::string RunewordArt(const Tile& tile, const std::string& n, int left, int to
 		const auto box = ItemBoxOf(tile);
 		const int  x = left + box.dx, y = top + box.dy;
 		const bool bare = BaseTiles.count({ tile.unique, tile.eth }) != 0; // a base: empty sockets
-		if (QualityBackgrounds())
-			out += Image(n + "Back", x, y, std::string("d2rloader\\item-quality-backgrounds\\") + (bare ? "normal\\" : "runeword\\") + std::to_string(box.width) + "x" + std::to_string(box.height),
-			             bare ? ", \"transparency\": 0.65" : ", \"transparency\": 0.55");
+		if (QualityBackgrounds()) out += Gui::ItemArt::QualityBackground(n + "Back", x, y, bare ? "normal" : "runeword", box.width, box.height, bare ? ", \"transparency\": 0.65" : ", \"transparency\": 0.55");
 		// The game's sockets are about 62% of a cell, their runes 55%. The
 		// sockets are under the item, at about 60% (the game's grid in a
 		// screenshot), the runes over it.
 		const auto   spots = SocketSpots(box.width, box.height, static_cast<int>(entry.runes.size()));
 		const double room  = Cell * std::min(1.0, spots.second) * 0.62;
-		char         rect[256] {};
 		for (std::size_t k = 0; k < spots.first.size(); ++k) {
 			const auto [cx, cy] = spots.first[k];
-			const int  sx = x + static_cast<int>(cx * Cell - room / 2), sy = y + static_cast<int>(cy * Cell - room / 2);
-			std::snprintf(rect, sizeof(rect), R"(, {"type": "ImageWidget", "name": "%sSocket%zu", "fields": {"rect": {"x": %d, "y": %d, "scale": %.4f}, "filename": "PANEL\\gemsocket", "transparency": 0.6}})", n.c_str(), k,
-			              sx, sy, room / std::max(GemSocketSize.load(), 1));
-			out += rect;
+			out += Gui::ItemArt::Socket(n + "Socket" + std::to_string(k), x + cx * Cell, y + cy * Cell, room, GemSocketSize.load());
 		}
 		out += Image(n, x, y, base->second.asset);
 		for (std::size_t k = 0; k < spots.first.size() && !bare; ++k) {
@@ -4252,8 +3539,7 @@ std::string RunewordArt(const Tile& tile, const std::string& n, int left, int to
 			const auto [cx, cy] = spots.first[k];
 			const double size = room * 0.55 / 0.62;
 			const int    rx = x + static_cast<int>(cx * Cell - size / 2), ry = y + static_cast<int>(cy * Cell - size / 2);
-			std::snprintf(rect, sizeof(rect), R"(, {"type": "ImageWidget", "name": "%sRune%zu", "fields": {"rect": {"x": %d, "y": %d, "scale": %.4f}, "filename": )", n.c_str(), k, rx, ry, size / Cell);
-			out += rect + Json(rune->second.asset) + "}}";
+			out += Gui::ScaledImage(n + "Rune" + std::to_string(k), rx, ry, size / Cell, Gui::Path(rune->second.asset));
 		}
 		return out;
 	}
@@ -4268,15 +3554,12 @@ std::string RunewordArt(const Tile& tile, const std::string& n, int left, int to
 		std::string art;
 		const auto& code = entry.runes[k];
 		const int   index = code.size() == 3 && code[0] == 'r' ? std::atoi(code.c_str() + 1) - 1 : -1;
-		if (GenericRunes && hidden) art = "d2rloader\\grail-on\\grune-blank";
-		else if (index >= 0 && index < static_cast<int>(std::size(RuneCell)) && RuneCell[index] < GenericRunes) art = "d2rloader\\grail-on\\grune" + std::to_string(RuneCell[index]);
-		else if (const auto rune = Bases.find(code); rune != Bases.end()) art = rune->second.asset;
+		if (GenericRunes && hidden) art = Gui::SpriteName("grune-blank");
+		else if (index >= 0 && index < static_cast<int>(std::size(Gui::ItemArt::RuneStoneCell)) && Gui::ItemArt::RuneStoneCell[index] < GenericRunes) art = Gui::SpriteName("grune" + std::to_string(Gui::ItemArt::RuneStoneCell[index]));
+		else if (const auto rune = Bases.find(code); rune != Bases.end()) art = Gui::Path(rune->second.asset);
 		if (art.empty()) continue;
 		const auto [cx, cy] = spots.first[k];
-		char rect[200] {};
-		std::snprintf(rect, sizeof(rect), R"(, {"type": "ImageWidget", "name": "%s_%zu", "fields": {"rect": {"x": %d, "y": %d, "scale": %.4f}, "filename": )", n.c_str(), k,
-		              left + static_cast<int>(cx * Cell - size / 2), top + static_cast<int>(cy * Cell - size / 2), size / Cell);
-		out += rect + Json(art) + extra + "}}";
+		out += Gui::ScaledImage(n + "_" + std::to_string(k), left + static_cast<int>(cx * Cell - size / 2), top + static_cast<int>(cy * Cell - size / 2), size / Cell, art, extra);
 	}
 	return out;
 }
@@ -4290,7 +3573,7 @@ bool Dimmed(int u, bool eth);
 std::string StoredArt(int u, bool eth, const std::string& art);
 // A tile the search leaves out: a dark veil over its slot and art.
 std::string DimVeil(const Tile& tile, const std::string& name, int left, int top) {
-	return Image(name, left, top, "d2rloader\\grail-on\\dim" + std::to_string(std::clamp(tile.width, 1, 4)) + "x" + std::to_string(std::clamp(tile.height, 1, 4)));
+	return Gui::Image(name, left, top, VeilSprite(tile.width, tile.height));
 }
 // Lock held. How many grail tiles a list holds.
 int ListCount(const ExclList& list) {
@@ -4437,7 +3720,7 @@ std::string FakeTile(const Tile& tile, int top, const std::string& n, bool label
 	const bool  named   = NameShown(tile.unique), drawn = ArtShown(tile.unique);
 	const int   left    = tile.x * Cell - MenuRoom, itemLeft = left + (tile.width == 1 ? Cell / 2 : 0);
 	const auto  size    = std::to_string(tile.width) + "x" + std::to_string(tile.height);
-	std::string out     = Image("FSlot" + n, itemLeft, top, "d2rloader\\grail-on\\slot" + size);
+	std::string out     = Gui::Image("FSlot" + n, itemLeft, top, SlotSprite(tile.width, tile.height));
 	if (stored && Perfect.count({ tile.unique, tile.eth }) && Config.perfectFrames) {
 		out += frames ? GlowImage(tile, "FGlow" + n, left, top) : StillGlow(tile, "FGlow" + n, left, top);
 	}
@@ -4462,10 +3745,13 @@ std::string FakeTile(const Tile& tile, int top, const std::string& n, bool label
 // A ClipViewWidget over the view (GridLeft, ViewTop, 16 cells by ViewRows)
 // holding `children`; the game clips their drawing to it (D2UI ClipViewWidget).
 std::string ClipView(const std::string& name, const std::string& children, bool visible) {
-	char clip[320] {};
-	std::snprintf(clip, sizeof(clip), R"(, {"type": "ClipViewWidget", "name": "%s", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "clipMouseInput": true%s}, "children": [)",
-	              name.c_str(), GridLeft, ViewTop, PageSize * Cell, ViewRows * Cell, visible ? "" : R"(, "visible": false)");
-	return clip + (children.empty() ? std::string() : children.substr(1)) + "]}";
+	return Gui::ClipBox(name, GridLeft, ViewTop, PageSize * Cell, ViewRows * Cell, children, visible ? R"(, "clipMouseInput": true)" : R"(, "clipMouseInput": true, "visible": false)");
+}
+
+// The window's frame: Expanded Stash Plus's stash (the plugin's own picture),
+// the stone cover over its grid from `coverY`, the game's close button.
+std::string WindowFrame(int coverY) {
+	return Gui::Image("Background", 0, 0, Gui::SpriteName("panel")) + Gui::Image("Cover", 57, coverY, CoverSprite()) + Gui::CloseButton("CloseButton", 1600, 9, "close");
 }
 
 // Lock held. Rows `first`.. as pictures, the first row's top `top` pixels under
@@ -4480,7 +3766,7 @@ std::string FakeRows(int first, int top, const std::string& prefix) {
 			if (header) {
 				const auto name = HeaderKey(row.header);
 				out += Label(prefix + "Set" + std::to_string(r), HeaderLeft - GridLeft - MenuRoom, y, HeaderWidth, Cell - 14, name, HeaderColor(row.header), Config.font + 8, "center", "center");
-				out += Image(prefix + "Line" + std::to_string(r), HeaderLeft - GridLeft - MenuRoom, y + Cell - 14, "d2rloader\\grail-on\\divider");
+				out += Gui::Image(prefix + "Line" + std::to_string(r), HeaderLeft - GridLeft - MenuRoom, y + Cell - 14, Kit::Divider(HeaderWidth));
 			}
 			for (const auto& tile : row.tiles) out += FakeTile(tile, y + (header + LabelRows) * Cell - Cell / 2, prefix + std::to_string(n++), true, true);
 		}
@@ -4499,7 +3785,6 @@ constexpr int ScrollFrames = 4;
 // screen), and its top at a scroll of `quarter` / ScrollFrames rows.
 // The same all the way down (rows differ in height, so the rows on screen vary).
 int ThumbSteps() { return RowCount ? std::clamp((ScrollSteps * (RowCount - MaxScroll) + RowCount / 2) / RowCount, 1, ScrollSteps - 1) : 1; }
-int ThumbTop(int steps, int quarter) { return BarTop + (ScrollSteps - steps) * StepHeight * quarter / std::max(1, MaxScroll * ScrollFrames); }
 
 // Lock held. The scroll panel's layout for one row down (or up) from Scroll.
 std::string ScrollLayout(bool down) {
@@ -4511,61 +3796,39 @@ std::string ScrollLayout(bool down) {
 	// doubled the button's shadow): two clips leave the button's corner out.
 	constexpr int coverLeft = 57, buttonLeft = 1600, buttonBottom = 100, coverWidth = 1571;
 	const int     coverTop = ViewTop - 2, coverHeight = ViewRows * Cell + 2;
-	char          cover[1024] {};
-	std::snprintf(cover, sizeof(cover),
-	              R"(, {"type": "ClipViewWidget", "name": "CoverLeft", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}}, "children": [)"
-	              R"({"type": "ImageWidget", "name": "Cover", "fields": {"rect": {"x": %d, "y": 0}, "filename": "d2rloader\\grail-on\\cover"}}]})"
-	              R"(, {"type": "ClipViewWidget", "name": "CoverRight", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}}, "children": [)"
-	              R"({"type": "ImageWidget", "name": "Cover2", "fields": {"rect": {"x": %d, "y": %d}, "filename": "d2rloader\\grail-on\\cover"}}]})",
-	              coverLeft, coverTop, buttonLeft - coverLeft, coverHeight, -MenuRoom, buttonLeft, buttonBottom, coverLeft + coverWidth - buttonLeft, coverTop + coverHeight - buttonBottom,
-	              -MenuRoom - (buttonLeft - coverLeft), coverTop - buttonBottom);
-	layout += cover;
+	layout += Gui::ClipBox("CoverLeft", coverLeft, coverTop, buttonLeft - coverLeft, coverHeight, Gui::Image("Cover", -MenuRoom, 0, CoverSprite()));
+	layout += Gui::ClipBox("CoverRight", buttonLeft, buttonBottom, coverLeft + coverWidth - buttonLeft, coverTop + coverHeight - buttonBottom,
+	                       Gui::Image("Cover2", -MenuRoom - (buttonLeft - coverLeft), coverTop - buttonBottom, CoverSprite()));
 	// The scroll bar's track hides the view's thumb; each frame has its own.
 	const bool bar   = MaxScroll > 0;
 	const int  steps = ThumbSteps();
-	if (bar) layout += Image("Track", BarLeft, BarTop, "d2rloader\\grail-on\\track");
+	if (bar) layout += GridBar.TrackLayout(BarTop, BarHeight);
 	for (int k = 1; k < ScrollFrames; ++k) {
 		const std::string name = "Frame" + std::to_string(k);
 		// A frame: a plain container (from the panel's corner: ShiftLayout moves
 		// it and its children, so it starts MenuRoom left) with the rows and the thumb.
 		std::string children = ClipView(name + "Rows", FakeRows(first, down ? -height * k / ScrollFrames : -height + height * k / ScrollFrames, name), true);
-		if (bar) children += Image(name + "Thumb", BarLeft, ThumbTop(steps, Scroll * ScrollFrames + (down ? k : -k)), "d2rloader\\grail-on\\thumb" + std::to_string(steps));
-		char frame[160] {};
-		std::snprintf(frame, sizeof(frame), R"(, {"type": "Widget", "name": "%s", "fields": {"rect": {"x": %d, "y": 0}}, "children": [)", name.c_str(), -MenuRoom);
-		layout += frame + children.substr(1) + "]}";
+		if (bar) children += GridBar.Thumb(name + "Thumb", BarTop, ScrollSteps, steps, Scroll * ScrollFrames + (down ? k : -k), MaxScroll * ScrollFrames);
+		layout += Gui::Group(name, -MenuRoom, 0, children);
 	}
-	char open[512] {};
-	std::snprintf(open, sizeof(open), R"({"type": "Panel", "name": "grail-on/Scroll", "fields": {"priority": %d, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": {"x": 0.0, "y": 0.397}}, "children": [)",
-	              OverShown ? OverPriority + 2 : 12, WindowX() - MenuRoom, PanelY, PanelSpan(), PanelHeight);
-	return open + ShiftLayout(layout).substr(2) + "]}";
+	return Gui::Panel("grail-on/Scroll", WindowX() - MenuRoom, PanelY, PanelSpan(), PanelHeight, ShiftLayout(layout), OverShown ? OverPriority + 2 : 12, Gui::LeftAnchor);
 }
 
 // A text box showing `text` as it is (not a string key).
 // `color`: a profile colour ("$FontColorWhite") or a colour object ({"r": ...}).
 std::string TextLabel(const std::string& name, int x, int y, int width, int height, const std::string& text, const char* color, int size, const char* align = "left") {
-	const std::string fill = color[0] == '{' ? std::string(color) : "\"" + std::string(color) + "\"";
-	return R"(, {"type": "TextBoxWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height) + R"(, "text": )" + Json(Tr(text)) + R"(, "style": {"fontColor": )" + fill
-	     + R"(, "pointSize": )" + std::to_string(size) + R"(, "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": ")" + align + R"(", "v": "center"}}}})";
+	return Gui::TextBox(name, x, y, width, height, Tr(text), { .color = color, .size = size, .h = align, .v = "center" });
 }
 
 // Text as it is, wrapped in its box, from the top.
 std::string TextBlock(const std::string& name, int x, int y, int width, int height, const std::string& text, const char* color, int size) {
-	return R"(, {"type": "TextBoxWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height) + R"(, "text": )" + Json(Tr(text)) + R"(, "style": {"fontColor": ")" + color
-	     + R"(", "pointSize": )" + std::to_string(size) + R"(, "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "left", "v": "top"}, "options": {"lineWrap": true}}}})";
+	return Gui::TextBox(name, x, y, width, height, Tr(text), { .color = color, .size = size, .h = "left", .v = "top", .wrap = true });
 }
 
 // The grail page when something it needs is switched off: the frame, a title
 // and what is wrong. Nothing on the characters was changed.
 std::string ErrorLayout() {
-	char open[1024] {};
-	std::snprintf(open, sizeof(open),
-	              R"({"type": "Panel", "name": "grail-on/Error", "fields": {"priority": 10, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": {"x": 0.0, "y": 0.397}}, "children": [)"
-	              R"({"type": "ClickCatcherWidget", "name": "PanelClickCatcher", "fields": {"rect": {"x": 0, "y": 0, "width": %d, "height": %d}}})"
-	              R"(, {"type": "ImageWidget", "name": "Background", "fields": {"rect": {"x": 0, "y": 0}, "filename": "d2rloader\\grail-on\\panel"}})"
-	              R"(, {"type": "ImageWidget", "name": "Cover", "fields": {"rect": {"x": 57, "y": %d}, "filename": "d2rloader\\grail-on\\cover"}})"
-	              R"(, {"type": "ButtonWidget", "name": "CloseButton", "fields": {"rect": {"x": 1600, "y": 9}, "filename": "PANEL\\closebtn_4x", "hoveredFrame": 3, "tooltipString": "@d2r:strClose", "sound": "cursor_close_window_hd", "onClickMessage": %s}})",
-	              WindowX(), PanelY, PanelWidth, PanelHeight, PanelWidth, PanelHeight, ViewTop - 2, Command("close").c_str());
-	std::string layout = open;
+	std::string layout = Gui::ClickCatcher("PanelClickCatcher", 0, 0, PanelWidth, PanelHeight) + WindowFrame(ViewTop - 2);
 	const int   left = GridLeft + Cell, width = 14 * Cell;
 	int         y    = ViewTop + 120;
 	layout += TextLabel("ErrorTitle", GridLeft, y, PageSize * Cell, 70, "The grail cannot work here", "$FontColorRed", 44, "center");
@@ -4588,7 +3851,7 @@ std::string ErrorLayout() {
 	}
 	y += 40;
 	layout += TextBlock("ErrorFoot", left, y, width, 100, "Nothing was changed on your characters or in the grail file. The details are in the grail-on log (d2rloader\\logs).", "$FontColorGray", 26);
-	return layout + "]}";
+	return Gui::Panel("grail-on/Error", WindowX(), PanelY, PanelWidth, PanelHeight, layout, 10, Gui::LeftAnchor);
 }
 
 // ---- stats ----
@@ -4606,9 +3869,7 @@ constexpr const char* KindNames[] { "Uniques", "Ethereal", "Set Items", "Runewor
 constexpr Kind        AllKinds[] { Kind::Uniques, Kind::Ethereal, Kind::Sets, Kind::Runewords, Kind::Misc, Kind::Objectives };
 constexpr int         KindCountAll = static_cast<int>(std::size(AllKinds));
 bool                  MenuShown(int menu);
-struct Rgb {
-	int r, g, b;
-};
+using Rgb = Gui::Rgb;
 // Perfect copies in the set items' green, stored ones in the uniques' gold,
 // missing ones grey. An item taken out of the grail is missing again.
 constexpr Rgb PerfectColor { 30, 205, 40 }, StoredColor { 199, 179, 119 }, BaseColor { 225, 225, 225 }, MissingColor { 92, 89, 84 };
@@ -4689,11 +3950,11 @@ std::string CountText(const std::string& name, const KindCount& count) {
 constexpr int RingPad = 6, ButtonHole = 78;
 std::string ButtonRing(const std::string& name, int x, int y, int size, const KindCount& count, int pad = RingPad, int hole = ButtonHole, bool square = true) {
 	if (!count.total()) return "";
-	return Image(name, x + pad, y + pad, ChartSprite(ChartParts(count), size - 2 * pad, hole, square));
+	return Gui::Image(name, x + pad, y + pad, ChartSprite(ChartParts(count), size - 2 * pad, hole, square));
 }
 // The Lost items buttons' ring: all red.
 constexpr Rgb LostColor { 200, 30, 30 };
-std::string LostRing(const std::string& name, int x, int y, int size) { return Image(name, x + RingPad, y + RingPad, ChartSprite({ { 1, LostColor } }, size - 2 * RingPad, ButtonHole, true)); }
+std::string LostRing(const std::string& name, int x, int y, int size) { return Gui::Image(name, x + RingPad, y + RingPad, ChartSprite({ { 1, LostColor } }, size - 2 * RingPad, ButtonHole, true)); }
 
 // Invisible buttons over a ring chart's parts, for their tooltips: along each
 // row of small squares, one button per run of squares whose centre is in the
@@ -4761,7 +4022,7 @@ Progress OverviewProgress() {
 
 // A ring chart with its goal's share in the middle.
 std::string RingChart(const std::string& name, int x, int y, int size, const KindCount& count, const Progress& goal) {
-	std::string out = Image(name + "Ring", x, y, ChartSprite(ChartParts(count), size, 58));
+	std::string out = Gui::Image(name + "Ring", x, y, ChartSprite(ChartParts(count), size, 58));
 	// The share done, in the colour of what counts (stored, or perfect).
 	out += TextLabel(name + "Pct", x, y + size / 2 - 52, size, 60, Percent(goal.done, goal.total), ColorText(goal.perfect ? PerfectColor : StoredColor).c_str(), Config.font + 16, "center");
 	out += TextLabel(name + "Num", x, y + size / 2 + 8, size, 44, std::to_string(goal.done) + " / " + std::to_string(goal.total), "$FontColorGray", Config.font, "center");
@@ -4773,11 +4034,7 @@ std::string RingChart(const std::string& name, int x, int y, int size, const Kin
 constexpr int StatTile = 170, StatTileIcon = 70, StatTileHole = 62;
 std::string StatTileAt(const std::string& name, int x, int y, const std::string& icon, const std::string& label, const KindCount& count, const std::string& command,
                        const std::string& extra = "") {
-	char button[1024] {};
-	std::snprintf(button, sizeof(button),
-	              R"(, {"type": "ButtonWidget", "name": %s, "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "filename": "d2rloader\\grail-on\\stattile", "normalFrame": 0, "hoveredFrame": 1, "pressedFrame": 2, "tooltipString": %s, "sound": "cursor_menu_select_hd", "onClickMessage": %s}})",
-	              Json(name).c_str(), x, y, StatTile, StatTile, Json(CountText(label, count)).c_str(), Command(command).c_str());
-	std::string out = button;
+	std::string out = SquareButton(name, x, y, Kit::SlotButton(StatTile, StatTile), CountText(label, count), command, StatTile);
 	out += ButtonRing(name + "Ring", x, y, StatTile, count, 9, StatTileHole);
 	if (!icon.empty()) out += Icon(name + "Icon", x + (StatTile - StatTileIcon) / 2, y + (StatTile - StatTileIcon) / 2, StatTileIcon, icon, 1, 1, extra);
 	return out;
@@ -4880,7 +4137,7 @@ void JumpToMatch() {
 	std::tie(JumpTo, JumpEth) = SearchMatches[SearchAt];
 }
 
-std::string SearchBox(int width); // its sprite, made once per length
+std::string SearchBox(int width) { return Kit::InputBox(width, DropHeight); } // its sprite, made once per length
 
 // Lock held. The bar: its box, the text (a caret while typing), the count,
 // previous and next, and a clear button while something is typed.
@@ -4890,23 +4147,22 @@ std::string SearchBar() {
 	const std::string typed  = TypedText(TypeSearch);
 	const bool        typing = ObjTyping && TypeTarget == TypeSearch;
 	const bool        empty  = typed.empty() && !typing;
-	std::string       out    = Image("SearchBack", x, y, SearchBox(width));
-	out += R"(, {"type": "TextBoxWidget", "name": "SearchText", "fields": {)" + Rect(x + 24, y, width - 48, DropHeight) + R"(, "text": )" + Json(empty ? Tr("Search") : typed + (typing ? "|" : ""))
-	     + R"(, "style": {"fontColor": ")" + (empty ? "$FontColorGray" : "$FontColorWhite") + R"(", "pointSize": 30, "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "left", "v": "center"}}}})";
+	std::string       out    = Gui::Image("SearchBack", x, y, SearchBox(width));
+	out += Gui::TextBox("SearchText", x + 24, y, width - 48, DropHeight, empty ? Tr("Search") : typed + (typing ? "|" : ""), { .color = empty ? "$FontColorGray" : "$FontColorWhite" });
 	out += HitButton("SearchHit", x, y, width, DropHeight, Wrap("Type a name: the grail shows the first item that has it. Enter or the arrows: the next one."), "searchtype");
 	if (typed.empty()) return out;
 	// The result line under the bar, as wide and high as it: the count, then
 	// the arrows and the clear button at its right end.
 	const int         line  = y + DropHeight + SearchGap;
 	const std::string count = SearchMatches.empty() ? Tr("No match") : std::to_string(SearchAt + 1) + " / " + std::to_string(SearchMatches.size());
-	out += Image("SearchLineBack", x, line, SearchBox(width));
+	out += Gui::Image("SearchLineBack", x, line, SearchBox(width));
 	int at = x + width - 12 - DropHeight;
-	out += TextButton("SearchClear", at, line, DropHeight, DropHeight, "removebutton", 0, 3, 1, "", "", Wrap("Clear the search"), "searchclear");
+	out += TextButton("SearchClear", at, line, DropHeight, DropHeight, Kit::Remove(DropHeight), 0, 3, 1, "", "", Wrap("Clear the search"), "searchclear");
 	if (SearchMatches.size() > 1) {
 		at -= DropHeight + 10;
-		out += TextButton("SearchNext", at, line, DropHeight, DropHeight, "downarrow", 0, 1, 2, "", "", Wrap("Next"), "searchnext");
+		out += TextButton("SearchNext", at, line, DropHeight, DropHeight, Kit::Arrow(false, DropHeight), 0, 1, 2, "", "", Wrap("Next"), "searchnext");
 		at -= DropHeight + 10;
-		out += TextButton("SearchPrev", at, line, DropHeight, DropHeight, "uparrow", 0, 1, 2, "", "", Wrap("Previous"), "searchprev");
+		out += TextButton("SearchPrev", at, line, DropHeight, DropHeight, Kit::Arrow(true, DropHeight), 0, 1, 2, "", "", Wrap("Previous"), "searchprev");
 	}
 	return out + TextLabel("SearchCount", x + 24, line, at - x - 34, DropHeight, count, SearchMatches.empty() ? "$FontColorGray" : "$FontColorWhite", 30, "left");
 }
@@ -4915,34 +4171,22 @@ std::string SearchBar() {
 // tiles, the settings or the stats. Its texts are the strings registered with the lists.
 std::string ViewLayout(const std::string& id, bool over = false) {
 	const bool settings = CurrentCategory < 0; // no tiles: the settings or the stats
-	char       open[512] {}, head[2048] {};
 	// The window's top is where Expanded Stash Plus's $LeftPanelRect_ExpandedStash
 	// puts it (x 236, y -856, at the top of the screen; it reaches 88 units lower with the title, still above the skill bar);
 	// the panel starts MenuRoom further left, for the menus.
-	std::snprintf(open, sizeof(open),
-	              R"({"type": "Panel", "name": "grail-on/%s", "fields": {"priority": %d, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": {"x": 0.0, "y": 0.397}}, "children": [)"
-	              R"({"type": "ClickCatcherWidget", "name": "PanelClickCatcher", "fields": {"rect": {"x": 0, "y": 0, "width": %d, "height": %d}}})",
-	              id.c_str(), over ? OverPriority : 10, WindowX() - MenuRoom, PanelY, PanelSpan(), std::max(PanelHeight, Config.searchY - PanelY + 2 * DropHeight + SearchGap + 8), PanelSpan(), PanelHeight);
-	std::snprintf(head, sizeof(head),
-	              R"(, {"type": "ImageWidget", "name": "Background", "fields": {"rect": {"x": 0, "y": 0}, "filename": "d2rloader\\grail-on\\panel"}})"
-	              R"(, {"type": "ImageWidget", "name": "Cover", "fields": {"rect": {"x": 57, "y": %d}, "filename": "d2rloader\\grail-on\\cover"}})"
-	              R"(, {"type": "ButtonWidget", "name": "CloseButton", "fields": {"rect": {"x": 1600, "y": 9}, "filename": "PANEL\\closebtn_4x", "hoveredFrame": 3, "tooltipString": "@d2r:strClose", "sound": "cursor_close_window_hd", "onClickMessage": %s}})",
-	              ViewTop - 2, Command("close").c_str());
+	const std::string catcher = Gui::ClickCatcher("PanelClickCatcher", 0, 0, PanelSpan(), PanelHeight);
 	// The page's grid (3x5, its items only passing through) first, under the
 	// window's background, so nothing of it shows: every tile is a picture.
 	// The settings keep it off screen. The host's grid is in its own panel,
 	// under this one.
-	char grid[512] {};
-	std::snprintf(grid, sizeof(grid),
-	              R"(, {"type": "InventoryGridWidget", "name": "grail-on/Grid", "fields": {"rect": {"x": %d, "y": %d}, "cellCount": {"x": %d, "y": %d}, "cellSize": "$ItemCellSize", "gemSocketFilename": "PANEL\\gemsocket", "chronicleFlourishOffset": {"x": 7100, "y": 7100}}})",
-	              TilesView() ? GridLeft : -20000, GridTop, StageCols, StageRows);
-	std::string layout = (Host::On() ? std::string() : std::string(grid)) + head;
+	const std::string grid   = Gui::ItemGrid("grail-on/Grid", TilesView() ? GridLeft : -20000, GridTop, StageCols, StageRows, Gui::TileGrid::MarkerFields);
+	std::string       layout = (Host::On() ? std::string() : grid) + WindowFrame(ViewTop - 2);
 	const int menu = CurrentMenu();
 	// The menus down the left, the stats first; Misc while it tracks something.
 	for (int m = 0, slot = 0; m < static_cast<int>(std::size(Menus)); ++m) {
 		if (!MenuShown(m)) continue;
 		const int  x = MenuX(), y = MenuTop + slot++ * MenuStep;
-		layout += SquareButton("Menu" + std::to_string(m), x, y, m == menu, "menu", "@grail-on:M" + std::to_string(m), "menu" + std::to_string(m), MenuSize);
+		layout += SquareButton("Menu" + std::to_string(m), x, y, Kit::SlotButton(MenuSize, MenuSize, m == menu), "@grail-on:M" + std::to_string(m), "menu" + std::to_string(m), MenuSize);
 		layout += m == LostMenu ? LostRing("MenuRing" + std::to_string(m), x, y, MenuSize) : ButtonRing("MenuRing" + std::to_string(m), x, y, MenuSize, CountMenu(m));
 		// The ethereal menus' icons are see-through, like ethereal items.
 		int width = 1, height = 1;
@@ -4961,7 +4205,7 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 		const int  top        = ViewTop + row * Cell;
 		const auto name       = HeaderKey(set);
 		layout += Label("SetName" + std::to_string(h), HeaderLeft, top, HeaderWidth, Cell - 14, name, HeaderColor(set), Config.font + 8, "center", "center");
-		layout += Image("SetLine" + std::to_string(h), HeaderLeft, top + Cell - 14, "d2rloader\\grail-on\\divider");
+		layout += Gui::Image("SetLine" + std::to_string(h), HeaderLeft, top + Cell - 14, Kit::Divider(HeaderWidth));
 	}
 	// Slots, item art and labels go first, so the grid draws its items over them.
 	const std::string gray = GrayFields();
@@ -4973,7 +4217,7 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 		const auto  n       = std::to_string(i);
 		const int   left = GridLeft + tile.x * Cell, top = GridTop + tile.y * Cell;
 		const int   itemLeft = left + (tile.width == 1 ? Cell / 2 : 0); // a 1-wide item is centred, like the grid draws it
-		layout += Image("Slot" + n, itemLeft, top, "d2rloader\\grail-on\\slot" + std::to_string(tile.width) + "x" + std::to_string(tile.height));
+		layout += Gui::Image("Slot" + n, itemLeft, top, SlotSprite(tile.width, tile.height));
 		if (entry.secret) { // its glow, its item, nothing more
 			if (Config.perfectFrames && Stored.count({ tile.unique, tile.eth })) layout += GlowImage(tile, "Glow" + n, left, top);
 			continue;
@@ -5021,30 +4265,22 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 	}
 	layout += veils;
 	{
-		char rest[160] {};
-		std::snprintf(rest, sizeof(rest), R"(, {"type": "Widget", "name": "Rest", "fields": {"rect": {"x": %d, "y": 0}}, "children": [)", -MenuRoom);
-		layout = layoutBefore + (layout.empty() ? std::string() : rest + layout.substr(1) + "]}");
+		layout = layoutBefore + Gui::Group("Rest", -MenuRoom, 0, layout);
 	}
 	if (TilesView()) {
 		// Every tile is a picture: an item dropped anywhere on the view goes to
 		// its tile (over the grid too, so the grid never takes a drop itself).
-		char lower[512] {};
-		std::snprintf(lower, sizeof(lower),
-		              R"(, {"type": "ButtonWidget", "name": "LowerHit", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "filename": "d2rloader\\grail-on\\blank", "normalFrame": 0, "hoveredFrame": 0, "pressedFrame": 0, "onClickMessage": %s}})",
-		              GridLeft, ViewTop, PageSize * Cell, ViewRows * Cell, Command("lower").c_str());
-		layout += lower;
+		layout += Gui::ClickArea("LowerHit", GridLeft, ViewTop, PageSize * Cell, ViewRows * Cell, "lower");
 	}
 	if (!tips.empty()) {
-		char shift[160] {};
-		std::snprintf(shift, sizeof(shift), R"(, {"type": "Widget", "name": "Tips", "fields": {"rect": {"x": %d, "y": 0}}, "children": [)", -MenuRoom);
-		layout += shift + tips.substr(1) + "]}";
+		layout += Gui::Group("Tips", -MenuRoom, 0, tips);
 	}
 	// The menu's categories down the left (over the grid's empty first column,
 	// after the grid so their clicks reach them), the category's first base on them.
 	for (int c = 0; c < CategoryCount() && !settings; ++c) {
 		if (!InMenu(c, menu)) continue;
 		const int y = ButtonTop(c);
-		layout += SquareButton("Cat" + std::to_string(c), CatX(), y, c == CurrentCategory, "category", "@grail-on:C" + std::to_string(c),
+		layout += SquareButton("Cat" + std::to_string(c), CatX(), y, Kit::SlotButton(CatSize, CatSize, c == CurrentCategory), "@grail-on:C" + std::to_string(c),
 		                       "cat" + std::to_string(c), CatSize);
 		layout += Categories[c].menu == LostMenu ? LostRing("CatRing" + std::to_string(c), CatX(), y, CatSize) : ButtonRing("CatRing" + std::to_string(c), CatX(), y, CatSize, CountCategory(c, ViewEth));
 		const auto& category = Categories[c];
@@ -5059,18 +4295,14 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 		if (halves <= 0) continue;
 		const int width = std::clamp(tile.width, 1, 2);
 		const int left  = GridLeft + tile.x * Cell + (width == 1 ? Cell / 2 : 0), top = GridTop + tile.y * Cell;
-		char      button[512] {};
-		std::snprintf(button, sizeof(button),
-		              R"(, {"type": "ButtonWidget", "name": "PeekHit%zu", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "filename": "d2rloader\\grail-on\\blank", "normalFrame": 0, "hoveredFrame": 1, "pressedFrame": 1, "onClickMessage": %s}})",
-		              i, left, top, width * Cell, halves * Cell / 2, Command("peek" + std::to_string(i)).c_str());
-		layout += button;
+		layout += Gui::SpriteButton("PeekHit" + std::to_string(i), left, top, width * Cell, halves * Cell / 2, Gui::Kit::Clear(), { .normal = 0, .pressed = 1, .hovered = 1 }, "peek" + std::to_string(i), {}, {}, {}, nullptr);
 	}
 	if (CurrentCategory == StatsView) {
 		// The stats pages down the left, like a menu's categories.
 		for (int p = 0, shown = 0; p <= KindCountAll; ++p) {
 			if (!StatsPageShown(p)) continue; // misc: while something is tracked; objectives: while there are some
 			const int y = ViewTop + shown++ * (Cell + 20) + (Cell - CatSize) / 2;
-			layout += SquareButton("StatPage" + std::to_string(p), CatX(), y, p == StatsPage, "category", "@grail-on:SP" + std::to_string(p), "stats" + std::to_string(p), CatSize);
+			layout += SquareButton("StatPage" + std::to_string(p), CatX(), y, Kit::SlotButton(CatSize, CatSize, p == StatsPage), "@grail-on:SP" + std::to_string(p), "stats" + std::to_string(p), CatSize);
 			layout += ButtonRing("StatPageRing" + std::to_string(p), CatX(), y, CatSize, p ? CountKind(static_cast<Kind>(p - 1)) : CountMenu(StatsMenu));
 			int        width = 1, height = 1;
 			const auto art = MenuArt(p == 0 ? StatsMenu : p == 1 || p == 2 ? WeaponMenu : p == 3 ? SetMenu : p == 4 ? RunewordMenu : p == 5 ? MiscMenu : ObjMenu, width, height);
@@ -5089,14 +4321,14 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 		const auto header = [&](const char* text) {
 			if (y > ViewTop + 16) {
 				y += 8;
-				layout += Image(std::string("Line") + text, HeaderLeft, y, "d2rloader\\grail-on\\section");
+				layout += Gui::Image(std::string("Line") + text, HeaderLeft, y, Kit::Section(HeaderWidth));
 				y += LineHeight + 10;
 			}
 			layout += TextLabel(std::string("Head") + text, HeaderLeft, y, HeaderWidth, 56, text, "$FontColorGoldYellow", Config.font + 6, "center");
 			y += 64;
 		};
 		const auto setting = [&](const std::string& id, int sx, const std::string& name, bool on, const std::string& help, const std::string& command, int width = TableWidth / 2) {
-			layout += SquareButton("Set" + id, sx, y, on, "tick", help.empty() ? std::string() : Wrap(help), command);
+			layout += SquareButton("Set" + id, sx, y, Kit::Tick(on, ButtonSize), help.empty() ? std::string() : Wrap(help), command);
 			layout += TextLabel("SetName" + id, sx + ButtonSize + 20, y, width - ButtonSize - 40, ButtonSize, name, "$FontColorWhite", 30);
 			layout += HitButton("SetHit" + id, sx + ButtonSize + 20, y, width - ButtonSize - 40, ButtonSize, help.empty() ? std::string() : Wrap(help), command);
 		};
@@ -5105,20 +4337,18 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 		// name's room; a narrower box for the misc types.
 		struct List {
 			int                      x {}, y {}, width = DropWidth;
-			const char*              tile = "droptile";
 			std::vector<std::string> names, commands;
 			int                      current {};
 		} list;
 		const auto dropdownAt = [&](int id, int nameX, int boxX, int boxWidth, const std::string& name, const std::vector<std::string>& names, int current, const std::string& help,
 		                            const std::string& prefix, bool raw) {
-			const bool  narrow = boxWidth != DropWidth;
 			const auto  tip    = help.empty() ? std::string() : Wrap(help);
 			layout += TextLabel("DropName" + std::to_string(id), nameX, y, boxX - nameX - 20, DropHeight, raw ? name : Tr(name), "$FontColorWhite", 30);
 			layout += HitButton("DropHit" + std::to_string(id), nameX, y, boxX - nameX - 20, DropHeight, tip, "");
-			layout += TextButton("Drop" + std::to_string(id), boxX, y, boxWidth, DropHeight, narrow ? "dropboxs" : "dropbox", 0, 3, 1, names[current], "$FontColorLightGold", tip,
+			layout += TextButton("Drop" + std::to_string(id), boxX, y, boxWidth, DropHeight, Kit::DropBox(boxWidth, DropHeight), 0, 3, 1, names[current], "$FontColorLightGold", tip,
 			                     "drop" + std::to_string(id));
 			if (OpenDrop == id) {
-				list.x = boxX, list.y = y + DropHeight, list.current = current, list.width = boxWidth, list.tile = narrow ? "droptiles" : "droptile";
+				list.x = boxX, list.y = y + DropHeight, list.current = current, list.width = boxWidth;
 				for (int k = 0; k < static_cast<int>(names.size()); ++k) list.names.push_back(names[k]), list.commands.push_back(prefix + std::to_string(k));
 			}
 		};
@@ -5132,7 +4362,7 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 			constexpr const char* icons[] { "setgen", "setdisp", "setloot", "setmisc", "objectives" };
 			for (int p = 0; p < SettingsPageCount; ++p) {
 				const int top = ViewTop + p * (Cell + 20) + (Cell - CatSize) / 2;
-				layout += SquareButton("SetPage" + std::to_string(p), CatX(), top, p == SettingsPage, "category", "@grail-on:SG" + std::to_string(p), "spage" + std::to_string(p), CatSize);
+				layout += SquareButton("SetPage" + std::to_string(p), CatX(), top, Kit::SlotButton(CatSize, CatSize, p == SettingsPage), "@grail-on:SG" + std::to_string(p), "spage" + std::to_string(p), CatSize);
 				layout += Icon("SetPageIcon" + std::to_string(p), CatX() + (CatSize - CatIcon) / 2, top + (CatSize - CatIcon) / 2, CatIcon, std::string("d2rloader\\grail-on\\icon-") + icons[p], 1, 1);
 			}
 		}
@@ -5148,15 +4378,15 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 			y += 50;
 			for (int r = 0; r < 2; ++r) {
 				const std::string row = r ? "Art" : "Names";
-				layout += Image("SpoilRow" + row, left, y, "d2rloader\\grail-on\\tablerow");
-				for (int c = 0; c < 4; ++c) layout += Image("SpoilLine" + row + std::to_string(c), left + TableLabel + c * TableColumn - 2, y + 7, "d2rloader\\grail-on\\tablecol");
+				layout += Gui::Image("SpoilRow" + row, left, y, Kit::TableRow(TableWidth, TableRow));
+				for (int c = 0; c < 4; ++c) layout += Gui::Image("SpoilLine" + row + std::to_string(c), left + TableLabel + c * TableColumn - 2, y + 7, Kit::TableColumn(TableRow - 14));
 				layout += TextLabel("SpoilName" + row, left + 28, y, TableLabel - 40, TableRow, r ? "Show art" : "Show names", "$FontColorWhite", 30);
 				for (int c = 0; c < 4; ++c) {
 					const char* key = r ? art[c] : names[c];
 					if (!key) continue;
 					for (const auto& toggle : Toggles)
 						if (!std::strcmp(toggle.key, key))
-							layout += SquareButton("Set" + std::string(key), left + TableLabel + c * TableColumn + (TableColumn - ButtonSize) / 2, y + (TableRow - ButtonSize) / 2, Config.*toggle.field, "tick",
+							layout += SquareButton("Set" + std::string(key), left + TableLabel + c * TableColumn + (TableColumn - ButtonSize) / 2, y + (TableRow - ButtonSize) / 2, Kit::Tick(Config.*toggle.field, ButtonSize),
 							                       Wrap(toggle.help), std::string("toggle:") + key);
 				}
 				y += TableRow + 6;
@@ -5208,7 +4438,7 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 			// up (the game's drop-down plates), and the lobby's refresh button to reset.
 			const std::string help = Wrap("Moves the grail button on the inventory's left edge, in the inventory's units. Click: 1, Shift+click: 10, Ctrl+click: 100.");
 			const std::string resetHelp = Wrap("Puts the grail button back in its first place.");
-			const int         resetWidth = RefreshArt.file.empty() ? ResetBox : DropHeight;
+			const int         resetWidth = Kit::Refresh(DropHeight).empty() ? ResetBox : DropHeight;
 			const int         controls   = dropX + DropWidth - 2 * AxisWidth - resetWidth;
 			layout += TextLabel("ButtonName", x, y, controls - x - 20, DropHeight, "Grail button", "$FontColorWhite", 30);
 			layout += HitButton("ButtonHit", x, y, controls - x - 20, DropHeight, help, "");
@@ -5216,15 +4446,15 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 			for (const auto& [axis, value] : { std::pair { "X", Config.buttonX }, { "Y", Config.buttonY } }) {
 				layout += TextLabel(std::string("ButtonAxis") + axis, at, y, 30, DropHeight, axis, "$FontColorGoldYellow", 30, "center");
 				at += 30;
-				layout += TextButton(std::string("ButtonDown") + axis, at + (SmallBox - DropHeight) / 2, y, DropHeight, DropHeight, "downarrow", 0, 1, 2, "", "", help, std::string("btn") + axis + "-");
+				layout += TextButton(std::string("ButtonDown") + axis, at + (SmallBox - DropHeight) / 2, y, DropHeight, DropHeight, Kit::Arrow(false, DropHeight), 0, 1, 2, "", "", help, std::string("btn") + axis + "-");
 				at += SmallBox;
 				layout += TextLabel(std::string("ButtonValue") + axis, at, y, 100, DropHeight, std::to_string(value), "$FontColorWhite", 30, "center");
 				at += 100;
-				layout += TextButton(std::string("ButtonUp") + axis, at + (SmallBox - DropHeight) / 2, y, DropHeight, DropHeight, "uparrow", 0, 1, 2, "", "", help, std::string("btn") + axis + "+");
+				layout += TextButton(std::string("ButtonUp") + axis, at + (SmallBox - DropHeight) / 2, y, DropHeight, DropHeight, Kit::Arrow(true, DropHeight), 0, 1, 2, "", "", help, std::string("btn") + axis + "+");
 				at += SmallBox + 20;
 			}
-			if (RefreshArt.file.empty()) layout += TextButton("ButtonReset", at, y, ResetBox, DropHeight, "resetbox", 0, 3, 1, "Reset", "$FontColorLightGold", resetHelp, "btnreset");
-			else layout += TextButton("ButtonReset", at, y, DropHeight, DropHeight, "refresh", RefreshArt.normal, RefreshArt.hovered, RefreshArt.pressed, "", "", resetHelp, "btnreset");
+			if (Kit::Refresh(DropHeight).empty()) layout += TextButton("ButtonReset", at, y, ResetBox, DropHeight, Kit::PlainButton(ResetBox, DropHeight), 0, 3, 1, "Reset", "$FontColorLightGold", resetHelp, "btnreset");
+			else layout += TextButton("ButtonReset", at, y, DropHeight, DropHeight, Kit::Refresh(DropHeight), Kit::RefreshFrames().normal, Kit::RefreshFrames().hovered, Kit::RefreshFrames().pressed, "", "", resetHelp, "btnreset");
 			y += line;
 			// The search bar: its place (X, Y), then its length, and a reset.
 			const std::string searchHelp = Wrap("Moves the search bar, from the window's top left. Click: 1, Shift+click: 10, Ctrl+click: 100.");
@@ -5234,16 +4464,16 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 				if (axis[0]) layout += TextLabel("SAxis" + id, sx, y, 30, DropHeight, axis, "$FontColorGoldYellow", 30, "center");
 				sx += 30;
 				// The loot filter's arrows: down lowers, up raises.
-				layout += TextButton("SDown" + id, sx + (SmallBox - DropHeight) / 2, y, DropHeight, DropHeight, "downarrow", 0, 1, 2, "", "", tip, command + "-");
+				layout += TextButton("SDown" + id, sx + (SmallBox - DropHeight) / 2, y, DropHeight, DropHeight, Kit::Arrow(false, DropHeight), 0, 1, 2, "", "", tip, command + "-");
 				layout += TextLabel("SValue" + id, sx + SmallBox, y, 100, DropHeight, std::to_string(value), "$FontColorWhite", 30, "center");
-				layout += TextButton("SUp" + id, sx + SmallBox + 100 + (SmallBox - DropHeight) / 2, y, DropHeight, DropHeight, "uparrow", 0, 1, 2, "", "", tip, command + "+");
+				layout += TextButton("SUp" + id, sx + SmallBox + 100 + (SmallBox - DropHeight) / 2, y, DropHeight, DropHeight, Kit::Arrow(true, DropHeight), 0, 1, 2, "", "", tip, command + "+");
 			};
 			layout += TextLabel("SearchName", x, y, controls - x - 20, DropHeight, "Search bar", "$FontColorWhite", 30);
 			layout += HitButton("SearchNameHit", x, y, controls - x - 20, DropHeight, searchHelp, "");
 			stepper("X", controls, "X", Config.searchX, searchHelp, "srchX");
 			stepper("Y", controls + AxisWidth, "Y", Config.searchY, searchHelp, "srchY");
-			if (RefreshArt.file.empty()) layout += TextButton("SearchReset", controls + 2 * AxisWidth, y, ResetBox, DropHeight, "resetbox", 0, 3, 1, "Reset", "$FontColorLightGold", searchReset, "srchreset");
-			else layout += TextButton("SearchReset", controls + 2 * AxisWidth, y, DropHeight, DropHeight, "refresh", RefreshArt.normal, RefreshArt.hovered, RefreshArt.pressed, "", "", searchReset, "srchreset");
+			if (Kit::Refresh(DropHeight).empty()) layout += TextButton("SearchReset", controls + 2 * AxisWidth, y, ResetBox, DropHeight, Kit::PlainButton(ResetBox, DropHeight), 0, 3, 1, "Reset", "$FontColorLightGold", searchReset, "srchreset");
+			else layout += TextButton("SearchReset", controls + 2 * AxisWidth, y, DropHeight, DropHeight, Kit::Refresh(DropHeight), Kit::RefreshFrames().normal, Kit::RefreshFrames().hovered, Kit::RefreshFrames().pressed, "", "", searchReset, "srchreset");
 			y += line;
 			layout += TextLabel("SearchLength", x, y, controls - x - 20, DropHeight, "Search bar length", "$FontColorWhite", 30);
 			layout += HitButton("SearchLengthHit", x, y, controls - x - 20, DropHeight, lengthHelp, "");
@@ -5285,21 +4515,21 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 			for (int i = 0; i < count; ++i) {
 				const auto& list = ExclLists[i];
 				const auto  n    = std::to_string(i);
-				layout += SquareButton("ExclOn" + n, x, y, list.active, "tick", onHelp, "exlon" + n);
+				layout += SquareButton("ExclOn" + n, x, y, Kit::Tick(list.active, ButtonSize), onHelp, "exlon" + n);
 				// The buttons from the right: Delete, Edit, Rename, down, up.
 				int        at   = x + TableWidth;
 				const bool armed = ExclDeleteArmed == i;
 				at -= ResetBox; // Delete's room: its button, or the confirmation as wide as Edit
-				if (armed) layout += TextButton("ExclDel" + n, at, y, ResetBox, DropHeight, "resetbox", 0, 3, 1, "Delete", "$FontColorRed", Wrap("Click again to delete this list."), "exldel" + n);
-				else layout += TextButton("ExclDel" + n, at + ResetBox - DropHeight, y, DropHeight, DropHeight, "removebutton", 0, 3, 1, "", "", deleteHelp, "exldel" + n);
+				if (armed) layout += TextButton("ExclDel" + n, at, y, ResetBox, DropHeight, Kit::PlainButton(ResetBox, DropHeight), 0, 3, 1, "Delete", "$FontColorRed", Wrap("Click again to delete this list."), "exldel" + n);
+				else layout += TextButton("ExclDel" + n, at + ResetBox - DropHeight, y, DropHeight, DropHeight, Kit::Remove(DropHeight), 0, 3, 1, "", "", deleteHelp, "exldel" + n);
 				at -= 12 + DropHeight;
 				layout += IconButton("ExclEdit" + n, at, y, "edit", editHelp, "exledit" + n);
 				at -= 12 + DropHeight;
 				layout += IconButton("ExclRename" + n, at, y, "rename", renameHelp, "exlren" + n);
 				at -= 12 + DropHeight;
-				if (i + 1 < count) layout += TextButton("ExclDown" + n, at, y, DropHeight, DropHeight, "downarrow", 0, 1, 2, "", "", Wrap("Move down"), "exldown" + n);
+				if (i + 1 < count) layout += TextButton("ExclDown" + n, at, y, DropHeight, DropHeight, Kit::Arrow(false, DropHeight), 0, 1, 2, "", "", Wrap("Move down"), "exldown" + n);
 				at -= 12 + DropHeight;
-				if (i > 0) layout += TextButton("ExclUp" + n, at, y, DropHeight, DropHeight, "uparrow", 0, 1, 2, "", "", Wrap("Move up"), "exlup" + n);
+				if (i > 0) layout += TextButton("ExclUp" + n, at, y, DropHeight, DropHeight, Kit::Arrow(true, DropHeight), 0, 1, 2, "", "", Wrap("Move up"), "exlup" + n);
 				const int nameX = x + ButtonSize + 20, countWidth = 170, nameWidth = at - 20 - countWidth - nameX;
 				if (renaming && ExclRenaming == i) {
 					layout += TextLabel("ExclName" + n, nameX, y, nameWidth, DropHeight, TypedText(TypeListName) + "|", "$FontColorWhite", 30);
@@ -5316,11 +4546,11 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 				layout += TextLabel("ExclNoList", x, y, TableWidth, DropHeight, "No list: add one", "$FontColorGray", 26);
 				y += line;
 			}
-			layout += TextButton("ExclListAdd", x, y, AddWidth, DropHeight, "addbutton", 0, 1, 2, "", "", Wrap("Add a list: empty, or with a preset's items."), "drop14");
+			layout += TextButton("ExclListAdd", x, y, AddWidth, DropHeight, Kit::Add(AddWidth, DropHeight), 0, 1, 2, "", "", Wrap("Add a list: empty, or with a preset's items."), "drop14");
 			layout += TextLabel("ExclAddName", x + AddWidth + 20, y, 400, DropHeight, "Add a list", "$FontColorWhite", 30);
 			layout += HitButton("ExclAddHit", x + AddWidth + 20, y, 400, DropHeight, "", "drop14");
 			if (OpenDrop == 14) {
-				list.x = x, list.y = y + DropHeight, list.current = -1, list.width = DropWidth, list.tile = "droptile";
+				list.x = x, list.y = y + DropHeight, list.current = -1, list.width = DropWidth;
 				const char* choices[] { "Empty list", PresetNames[0], PresetNames[1] };
 				for (int k = 0; k < 3; ++k) list.names.push_back(choices[k]), list.commands.push_back("exladd" + std::to_string(k));
 			}
@@ -5344,13 +4574,11 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 			y += line;
 		}
 		if (editing) {
-			layout += Image("ExclInputBack", x, y, "d2rloader\\grail-on\\inputboxs");
+			layout += Gui::Image("ExclInputBack", x, y, Kit::InputBox(ExclInputWidth, DropHeight));
 			const std::string typed  = TypedText(TypeExclude);
 			const bool        typing = ObjTyping && TypeTarget == TypeExclude;
 			const bool        empty  = typed.empty() && !typing;
-			layout += R"(, {"type": "TextBoxWidget", "name": "ExclTyped", "fields": {)" + Rect(x + 24, y, ExclInputWidth - 48, DropHeight) + R"(, "text": )"
-			        + Json(empty ? Tr("Search items") : typed + (typing ? "|" : "")) + R"(, "style": {"fontColor": ")" + (empty ? "$FontColorGray" : "$FontColorWhite")
-			        + R"(", "pointSize": 30, "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "left", "v": "center"}}}})";
+			layout += Gui::TextBox("ExclTyped", x + 24, y, ExclInputWidth - 48, DropHeight, empty ? Tr("Search items") : typed + (typing ? "|" : ""), { .color = empty ? "$FontColorGray" : "$FontColorWhite" });
 			layout += HitButton("ExclTypeHit", x, y, ExclInputWidth - (empty ? 0 : DropHeight), DropHeight, "", "excltype");
 			if (!empty) layout += IconButton("ExclTypeClear", x + ExclInputWidth - DropHeight, y, "cancel", Tr("Clear the search"), "excltypeclear");
 			const bool builtin = ExclDraft.preset >= 0;
@@ -5385,10 +4613,10 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 				const int   right  = arrowX - 20;
 				const int   markY  = y + (rowStep - ExclMark) / 2;
 				if (row.kind < 2) // a group: its arrow opens or closes it
-					layout += TextButton("ExclOpen" + n, indent, markY, ExclMark, ExclMark, row.open ? "exopen" : "exclosed", 0, 1, 2, "", "", "", "exo" + row.key);
-				const char* box = row.excluded == 0 ? "ticks" : row.excluded == row.total ? "ticksall" : "tickspart";
+					layout += TextButton("ExclOpen" + n, indent, markY, ExclMark, ExclMark, Kit::GroupArrow(row.open, ExclMark), 0, 1, 2, "", "", "", "exo" + row.key);
+				const std::string box = Kit::Ticks(row.excluded == 0 ? 0 : row.excluded == row.total ? 1 : 2, ExclMark);
 				// Too many combinations: listed, its box off and dimmed, nothing to click.
-				if (row.locked) layout += TextButton("ExclBox" + n, boxX, markY, ExclMark, ExclMark, "ticksoff", 0, 0, 0, "", "", lockedHelp, "");
+				if (row.locked) layout += TextButton("ExclBox" + n, boxX, markY, ExclMark, ExclMark, Kit::Ticks(3, ExclMark), 0, 0, 0, "", "", lockedHelp, "");
 				else layout += TextButton("ExclBox" + n, boxX, markY, ExclMark, ExclMark, box, 0, 1, 2, "", "", row.kind < 2 ? groupHelp : itemHelp, (row.kind < 2 ? "exg" : "exi") + row.key);
 				const char* color = row.locked ? R"({"r": 90, "g": 90, "b": 90, "a": 255})" : row.kind == 0 ? "$FontColorGoldYellow" : row.kind == 1 ? "$FontColorLightGold" : row.excluded ? "$FontColorWhite" : "$FontColorGray";
 				layout += TextLabel("ExclName" + n, nameX, y, right - nameX - 160, rowStep, row.name, color, row.kind == 2 ? 26 : 28);
@@ -5398,27 +4626,11 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 			}
 			// The list's scroll bar: the view's, where the view's is, as tall as
 			// the list (its track cut to that height, its bottom edge kept).
-			BarMax = ExclMax, BarY = top, BarSteps = steps;
 			if (ExclMax > 0) {
-				const int  height = steps * StepHeight, edge = 16;
-				const int  thumb  = std::clamp((steps * perPage + count / 2) / std::max(1, count), 1, steps - 1);
-				char       track[1024] {};
-				std::snprintf(track, sizeof(track),
-				              R"(, {"type": "ClipViewWidget", "name": "ExclTrack", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}}, "children": [)"
-				              R"({"type": "ImageWidget", "name": "ExclTrackTop", "fields": {"rect": {"x": %d, "y": 0}, "filename": "d2rloader\\grail-on\\track"}}]})"
-				              R"(, {"type": "ClipViewWidget", "name": "ExclTrackEnd", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}}, "children": [)"
-				              R"({"type": "ImageWidget", "name": "ExclTrackBottom", "fields": {"rect": {"x": %d, "y": %d}, "filename": "d2rloader\\grail-on\\track"}}]})",
-				              BarLeft, top, BarWidth, height - edge, -MenuRoom, BarLeft, top + height - edge, BarWidth, edge, -MenuRoom, edge - BarHeight);
-				layout += track;
-				layout += Image("ExclThumb", BarLeft, top + (steps - thumb) * StepHeight * ExclFirst / ExclMax, "d2rloader\\grail-on\\thumb" + std::to_string(thumb));
-				for (int i = 0; i < steps; ++i) {
-					char step[512] {};
-					std::snprintf(step, sizeof(step),
-					              R"(, {"type": "ButtonWidget", "name": "ExclStep%d", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "filename": "d2rloader\\grail-on\\step", "normalFrame": 0, "hoveredFrame": 0, "pressedFrame": 0, "onClickMessage": %s}})",
-					              i, BarLeft, top + i * StepHeight, BarWidth, StepHeight, Command("exs" + std::to_string(i)).c_str());
-					layout += step;
-				}
-			}
+				const int thumb = std::clamp((steps * perPage + count / 2) / std::max(1, count), 1, steps - 1);
+				layout += ExclBar.Steps(top, steps, thumb, ExclMax, ExclFirst, ExclMax);
+			} else ExclBar.Set(top, steps, 0);
+			ExclBar.Attach();
 		}
 		}
 		if (SettingsPage == 3) {
@@ -5448,9 +4660,9 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 			if (count > perPage) {
 				// More types than fit: pages of them.
 				const std::string pageText = std::to_string(MiscFirst / perPage + 1) + " / " + std::to_string((count + perPage - 1) / perPage);
-				layout += TextButton("MiscPrev", left, y, SmallBox, DropHeight, "stepbox", 0, 3, 1, "<", "$FontColorLightGold", "", "miscpage-");
+				layout += TextButton("MiscPrev", left, y, SmallBox, DropHeight, Kit::StepBox(SmallBox, DropHeight), 0, 3, 1, "<", "$FontColorLightGold", "", "miscpage-");
 				layout += TextLabel("MiscPage", left + SmallBox, y, 160, DropHeight, pageText, "$FontColorWhite", 30, "center");
-				layout += TextButton("MiscNext", left + SmallBox + 160, y, SmallBox, DropHeight, "stepbox", 0, 3, 1, ">", "$FontColorLightGold", "", "miscpage+");
+				layout += TextButton("MiscNext", left + SmallBox + 160, y, SmallBox, DropHeight, Kit::StepBox(SmallBox, DropHeight), 0, 3, 1, ">", "$FontColorLightGold", "", "miscpage+");
 				MiscPerPage = perPage;
 			}
 			if (count == 0) layout += TextLabel("MiscNone", x, top, TableWidth, 56, "This game has no misc items.", "$FontColorGray", 30);
@@ -5469,16 +4681,14 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 			y += 100;
 			// The box: the text typed (a hidden Windows text box takes the keys
 			// while it is active, so the game's keys don't fire), a caret while typing.
-			layout += Image("ObjInputBack", x, y, "d2rloader\\grail-on\\inputbox");
+			layout += Gui::Image("ObjInputBack", x, y, Kit::InputBox(ObjInputWidth, DropHeight));
 			{
 				const std::string typed = ObjTypedText();
 				const bool        empty = typed.empty() && !ObjTyping;
-				layout += R"(, {"type": "TextBoxWidget", "name": "ObjTyped", "fields": {)" + Rect(x + 24, y, ObjInputWidth - 48, DropHeight) + R"(, "text": )"
-				        + Json(empty ? Tr("A new objective") : typed + (ObjTyping ? "|" : "")) + R"(, "style": {"fontColor": ")" + (empty ? "$FontColorGray" : "$FontColorWhite")
-				        + R"(", "pointSize": 30, "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "left", "v": "center"}}}})";
+				layout += Gui::TextBox("ObjTyped", x + 24, y, ObjInputWidth - 48, DropHeight, empty ? Tr("A new objective") : typed + (ObjTyping ? "|" : ""), { .color = empty ? "$FontColorGray" : "$FontColorWhite" });
 				layout += HitButton("ObjTypeHit", x, y, ObjInputWidth, DropHeight, "", "objtype");
 			}
-			layout += TextButton("ObjAdd", x + TableWidth - AddWidth, y, AddWidth, DropHeight, "addbutton", 0, 1, 2, "", "", Tr("Add"), "objadd");
+			layout += TextButton("ObjAdd", x + TableWidth - AddWidth, y, AddWidth, DropHeight, Kit::Add(AddWidth, DropHeight), 0, 1, 2, "", "", Tr("Add"), "objadd");
 			y += line + 16;
 			// A line per objective: on/off, its icon (a click opens the picker),
 			// its text, up, down, remove.
@@ -5493,23 +4703,21 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 				const auto& objective = Objectives[i];
 				const auto  n         = std::to_string(i);
 				y                     = top + (i - ObjFirst) * line;
-				layout += SquareButton("ObjOn" + n, x, y, objective.enabled, "tick", onHelp, "objon" + n);
+				layout += SquareButton("ObjOn" + n, x, y, Kit::Tick(objective.enabled, ButtonSize), onHelp, "objon" + n);
 				const int iconX = x + ButtonSize + 16;
-				layout += TextButton("ObjIcon" + n, iconX, y, DropHeight, DropHeight, ("objrow" + std::to_string(std::clamp(objective.icon, 0, ObjectiveIconCount - 1))).c_str(), 0, 1, 1, "", "", iconHelp, "objpick" + n);
+				layout += TextButton("ObjIcon" + n, iconX, y, DropHeight, DropHeight, Gui::SpriteName("objrow" + std::to_string(std::clamp(objective.icon, 0, ObjectiveIconCount - 1))), 0, 1, 1, "", "", iconHelp, "objpick" + n);
 				const int textX = iconX + DropHeight + 20;
-				layout += R"(, {"type": "TextBoxWidget", "name": )" + Json("ObjText" + n) + R"(, "fields": {)" + Rect(textX, y, arrows - textX - 12, DropHeight)
-				        + R"(, "text": )" + Json(objective.text) + R"(, "style": {"fontColor": ")" + (objective.enabled ? "$FontColorWhite" : "$FontColorGray")
-				        + R"(", "pointSize": 30, "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "left", "v": "center"}}}})";
-				if (i > 0) layout += TextButton("ObjUp" + n, arrows, y, DropHeight, DropHeight, "uparrow", 0, 1, 2, "", "", Wrap("Move up"), "objup" + n);
-				if (i + 1 < count) layout += TextButton("ObjDown" + n, arrows + DropHeight + 12, y, DropHeight, DropHeight, "downarrow", 0, 1, 2, "", "", Wrap("Move down"), "objdown" + n);
-				layout += TextButton("ObjDel" + n, arrows + 2 * (DropHeight + 12), y, DropHeight, DropHeight, "removebutton", 0, 3, 1, "", "", removeHelp, "objdel" + n);
+				layout += Gui::TextBox("ObjText" + n, textX, y, arrows - textX - 12, DropHeight, objective.text, { .color = objective.enabled ? "$FontColorWhite" : "$FontColorGray" });
+				if (i > 0) layout += TextButton("ObjUp" + n, arrows, y, DropHeight, DropHeight, Kit::Arrow(true, DropHeight), 0, 1, 2, "", "", Wrap("Move up"), "objup" + n);
+				if (i + 1 < count) layout += TextButton("ObjDown" + n, arrows + DropHeight + 12, y, DropHeight, DropHeight, Kit::Arrow(false, DropHeight), 0, 1, 2, "", "", Wrap("Move down"), "objdown" + n);
+				layout += TextButton("ObjDel" + n, arrows + 2 * (DropHeight + 12), y, DropHeight, DropHeight, Kit::Remove(DropHeight), 0, 3, 1, "", "", removeHelp, "objdel" + n);
 			}
 			y = top + rows * line;
 			if (count > rows) {
 				const std::string pageText = std::to_string(ObjFirst / rows + 1) + " / " + std::to_string((count + rows - 1) / rows);
-				layout += TextButton("ObjPrev", left, y, SmallBox, DropHeight, "stepbox", 0, 3, 1, "<", "$FontColorLightGold", "", "objpage-");
+				layout += TextButton("ObjPrev", left, y, SmallBox, DropHeight, Kit::StepBox(SmallBox, DropHeight), 0, 3, 1, "<", "$FontColorLightGold", "", "objpage-");
 				layout += TextLabel("ObjPage", left + SmallBox, y, 160, DropHeight, pageText, "$FontColorWhite", 30, "center");
-				layout += TextButton("ObjNext", left + SmallBox + 160, y, SmallBox, DropHeight, "stepbox", 0, 3, 1, ">", "$FontColorLightGold", "", "objpage+");
+				layout += TextButton("ObjNext", left + SmallBox + 160, y, SmallBox, DropHeight, Kit::StepBox(SmallBox, DropHeight), 0, 3, 1, ">", "$FontColorLightGold", "", "objpage+");
 			}
 			if (count == 0) layout += TextLabel("ObjNone", x, top, TableWidth, 56, "No objective yet.", "$FontColorGray", 30);
 			// The icon picker, over everything: every icon, the current one
@@ -5518,13 +4726,13 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 				const int     boxW = PickWidth, boxH = PickHeight;
 				const int     boxX = GridLeft + (PageSize * Cell - boxW) / 2, boxY = ViewTop + (ViewRows * Cell - boxH) / 2;
 				layout += HitButton("PickCatch", GridLeft, ViewTop, PageSize * Cell, ViewRows * Cell, "", "objpickx");
-				layout += Image("PickBack", boxX, boxY, "d2rloader\\grail-on\\pickback");
+				layout += Gui::Image("PickBack", boxX, boxY, Kit::Back(PickWidth, PickHeight));
 				layout += TextLabel("PickTitle", boxX, boxY + 20, boxW, 60, "Choose an icon", "$FontColorGoldYellow", Config.font + 6, "center");
 				// The icons alone: gold, brighter on hover; the current one bright.
 				for (int k = 0; k < ObjectiveIconCount; ++k) {
 					const int  cx = boxX + 40 + (k % PickColumns) * (PickCell + PickGap), cy = boxY + 100 + (k / PickColumns) * (PickCell + PickGap);
 					const bool on = k == Objectives[ObjPicking].icon;
-					layout += TextButton("Pick" + std::to_string(k), cx, cy, PickCell, PickCell, ("objpick" + std::to_string(k)).c_str(), on ? 1 : 0, 1, 1, "", "", "", "objset" + std::to_string(k));
+					layout += TextButton("Pick" + std::to_string(k), cx, cy, PickCell, PickCell, Gui::SpriteName("objpick" + std::to_string(k)), on ? 1 : 0, 1, 1, "", "", "", "objset" + std::to_string(k));
 				}
 			}
 		}
@@ -5532,7 +4740,7 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 		if (!list.names.empty()) {
 			layout += HitButton("DropCatch", GridLeft, ViewTop, PageSize * Cell, ViewRows * Cell, "", "dropx");
 			for (std::size_t k = 0; k < list.names.size(); ++k)
-				layout += TextButton("DropItem" + std::to_string(k), list.x, list.y + static_cast<int>(k) * TileHeight, list.width, TileHeight, list.tile, 0, 1, 1, list.names[k],
+				layout += TextButton("DropItem" + std::to_string(k), list.x, list.y + static_cast<int>(k) * TileHeight, list.width, TileHeight, Kit::DropTile(list.width, TileHeight), 0, 1, 1, list.names[k],
 				                     static_cast<int>(k) == list.current ? "$FontColorGoldYellow" : "$FontColorWhite", "", list.commands[k]);
 		}
 		// What is switched off on this game (the grail itself works).
@@ -5554,20 +4762,10 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 	// The scroll bar, after the grid so its clicks reach it: a recessed track,
 	// the thumb (as tall as the share of rows on screen, in whole steps), and
 	// one invisible button per step.
-	if (MaxScroll > 0) {
-		const int steps  = ThumbSteps();
-		const int thumbY = ThumbTop(steps, Scroll * ScrollFrames);
-		layout += Image("Track", BarLeft, BarTop, "d2rloader\\grail-on\\track");
-		layout += Image("Thumb", BarLeft, thumbY, "d2rloader\\grail-on\\thumb" + std::to_string(steps));
-		for (int i = 0; i < ScrollSteps; ++i) {
-			char step[512] {};
-			std::snprintf(step, sizeof(step),
-			              R"(, {"type": "ButtonWidget", "name": "Step%d", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "filename": "d2rloader\\grail-on\\step", "normalFrame": 0, "hoveredFrame": 0, "pressedFrame": 0, "onClickMessage": %s}})",
-			              i, BarLeft, BarTop + i * StepHeight, BarWidth, StepHeight, Command("step" + std::to_string(i)).c_str());
-			layout += step;
-		}
-	}
-	return open + ShiftLayout(layout) + "]}";
+	if (MaxScroll > 0) layout += GridBar.Steps(BarTop, ScrollSteps, ThumbSteps(), MaxScroll, Scroll * ScrollFrames, MaxScroll * ScrollFrames);
+	if (CurrentCategory != SettingsView || (SettingsPage != 2 && !VarEditing)) GridBar.Attach();
+	return Gui::Panel("grail-on/" + id, WindowX() - MenuRoom, PanelY, PanelSpan(), std::max(PanelHeight, Config.searchY - PanelY + 2 * DropHeight + SearchGap + 8), catcher + ShiftLayout(layout),
+	                  over ? OverPriority : 10, Gui::LeftAnchor);
 }
 
 // Lock held. What a view shows: two views with the same key are the same.
@@ -5606,7 +4804,7 @@ std::string ViewKey() {
 // Every text the views use: category names, and per unique its base and name,
 // each plain and ethereal. The plugin's texts in each language's column (all
 // in the chosen one when there is one); item names come in the texts' language.
-std::string StringsJson() {
+std::vector<Gui::StringTable::Entry> StringsTable() {
 	enum Kind { Plain, Raw, EthCategory, Sockets };
 	struct Text {
 		std::string key, english;
@@ -5649,756 +4847,42 @@ std::string StringsJson() {
 		strings.push_back({ "BE" + n, Uniques[u].base, Raw }); // in the ethereal menus: no mark needed
 		strings.push_back({ "NE" + n, PlainName(u), Raw });
 	}
-	const int   chosen = Config.language >= 0 && Config.language < LanguageCount ? Config.language : -1;
-	std::string json   = "[";
+	const int                             chosen = Config.language >= 0 && Config.language < LanguageCount ? Config.language : -1;
+	std::vector<Gui::StringTable::Entry> table;
 	for (const auto& text : strings) {
-		json += std::string(json.size() > 1 ? ",\n" : "\n") + R"({"Key": )" + Json(text.key);
+		auto& entry = table.emplace_back(Gui::StringTable::Entry { text.key, {} });
 		for (int l = 0; l < LanguageCount; ++l) {
-			const int   language = chosen >= 0 ? chosen : l;
-			std::string value    = text.kind == Raw           ? text.english
-			                     : text.kind == EthCategory ? TrFormat("Ethereal %s", Tr(text.english, language), language)
-			                     : text.kind == Sockets     ? TrFormat(text.english == "1" ? "%d Socket" : "%d Sockets", text.english, language)
-			                                                : Tr(text.english, language);
-			json += std::string(", \"") + Languages[l] + "\": " + Json(value.empty() ? " " : value);
+			const int language = chosen >= 0 ? chosen : l;
+			entry.texts.push_back(text.kind == Raw           ? text.english
+			                      : text.kind == EthCategory ? TrFormat("Ethereal %s", Tr(text.english, language), language)
+			                      : text.kind == Sockets     ? TrFormat(text.english == "1" ? "%d Socket" : "%d Sockets", text.english, language)
+			                                                 : Tr(text.english, language));
 		}
-		json += "}";
 	}
-	return json + "\n]";
+	return table;
 }
 
-// Sprites drawn at the size they are used: a dark plate with a bronze bevel;
-// frames 0 normal, 1 hovered, 2 pressed. Active ones are brighter.
-std::string BuildSprite(int width, int height, bool active) {
-	constexpr int frames = 3;
-	std::string   out(40 + static_cast<std::size_t>(width) * frames * height * 4, '\0');
-	const auto    put = [&](std::size_t at, std::uint32_t value, int bytes) {
-        for (int i = 0; i < bytes; ++i) out[at + i] = static_cast<char>((value >> (8 * i)) & 0xFF);
-	};
-	std::memcpy(out.data(), "SpA1", 4);
-	put(4, 31, 2);
-	put(6, static_cast<std::uint32_t>(width), 2);
-	put(8, static_cast<std::uint32_t>(width * frames), 4);
-	put(12, static_cast<std::uint32_t>(height), 4);
-	put(20, frames, 4);
-	const int border = std::max(2, height / 20);
-	for (int frame = 0; frame < frames; ++frame)
-		for (int y = 0; y < height; ++y)
-			for (int x = 0; x < width; ++x) {
-				const int edge = std::min({ x, y, width - 1 - x, height - 1 - y });
-				int       rgba[4] {};
-				if (edge < 1) rgba[0] = 20, rgba[1] = 16, rgba[2] = 12, rgba[3] = 255;
-				else if (edge < 1 + border) {
-					const int  base[3] { active ? 222 : 128, active ? 186 : 110, active ? 100 : 76 };
-					const bool lit   = std::min(x, y) == edge;
-					const int  shade = (frame == 2 ? -1 : 1) * (lit ? 24 : -24) + (frame == 1 ? 40 : 0);
-					for (int c = 0; c < 3; ++c) rgba[c] = std::clamp(base[c] + shade, 0, 255);
-					rgba[3] = 255;
-				} else {
-					const int fill = (active ? 46 : 22) + (frame == 1 ? 18 : 0) - (frame == 2 ? 10 : 0);
-					rgba[0] = fill + 6, rgba[1] = fill + 3, rgba[2] = fill, rgba[3] = 235;
-				}
-				const std::size_t at = 40 + (static_cast<std::size_t>(y) * width * frames + static_cast<std::size_t>(frame) * width + x) * 4;
-				for (int c = 0; c < 4; ++c) out[at + c] = static_cast<char>(rgba[c]);
-			}
-	return out;
-}
+// ---- art ----
+// Every picture is D2R GUI's: the stash's look (StashKit: the game's own
+// settings parts, scaled by area average, the slot stone where one is
+// missing), registered the first time a size is asked for. The plugin's own
+// pictures (its icons, the grail button, the stash frame) go through Gui::RegisterSprite.
 
-// ---- native-looking art (same algorithms as tools/art.py) ----
+using Gui::RegisterResource;
+using Gui::RegisterSprite;
 
-struct Picture {
-	int                        width {}, height {};
-	std::vector<unsigned char> rgba;
-	unsigned char*             at(int x, int y) { return rgba.data() + (static_cast<std::size_t>(y) * width + x) * 4; }
-};
-
-double Noise(std::uint32_t x, std::uint32_t y, std::uint32_t seed) {
-	std::uint32_t h = x * 374761393u + y * 668265263u + seed * 2246822519u;
-	h               = (h ^ (h >> 13)) * 1274126177u;
-	return ((h ^ (h >> 16)) & 0xFF) / 255.0;
-}
-
-// The fine grain of the game's dark stone: single pixels and 3x3 blotches.
-Picture Stone(int width, int height, const int color[3], int grain, std::uint32_t seed) {
-	Picture out { width, height, std::vector<unsigned char>(static_cast<std::size_t>(width) * height * 4) };
-	for (int y = 0; y < height; ++y)
-		for (int x = 0; x < width; ++x) {
-			const double n = 0.6 * Noise(x, y, seed) + 0.4 * Noise(x / 3, y / 3, seed + 1) - 0.5;
-			auto*        p = out.at(x, y);
-			for (int c = 0; c < 3; ++c) p[c] = static_cast<unsigned char>(std::clamp(static_cast<int>(color[c] + n * grain), 0, 255));
-			p[3] = 255;
-		}
-	return out;
-}
-
-// An empty slot of any size: the stash slot's corners, its frame edges
-// stretched, around grained stone of the slot's inside colour.
-Picture Slot(int width, int height) {
-	const int  s = SlotSize, c = SlotCorner;
-	const auto src = [&](int x, int y) { return SlotPixels + (static_cast<std::size_t>(y) * s + x) * 4; };
-	long       sum[3] {}, count = 0;
-	for (int y = c; y < s - c; ++y)
-		for (int x = c; x < s - c; ++x, ++count)
-			for (int k = 0; k < 3; ++k) sum[k] += src(x, y)[k];
-	const int inside[3] { static_cast<int>(sum[0] / count), static_cast<int>(sum[1] / count), static_cast<int>(sum[2] / count) };
-	Picture   out = Stone(width, height, inside, 10, 7);
-	for (int y = 0; y < height; ++y)
-		for (int x = 0; x < width; ++x) {
-			const bool left = x < c, right = x >= width - c, top = y < c, bottom = y >= height - c;
-			if (!left && !right && !top && !bottom) continue;
-			const int sx = left ? x : right ? s - (width - x) : s / 2;
-			const int sy = top ? y : bottom ? s - (height - y) : s / 2;
-			std::memcpy(out.at(x, y), src(sx, sy), 4);
-		}
-	return out;
-}
-
-// The top of a slot cut by the view's end: its left, right and top edges,
-// nothing inside and no bottom edge.
-Picture PeekBox(int width, int height) {
-	const int s = SlotSize, c = SlotCorner;
-	Picture   out { width, height, std::vector<unsigned char>(static_cast<std::size_t>(width) * height * 4) };
-	for (int y = 0; y < height; ++y)
-		for (int x = 0; x < width; ++x) {
-			const bool left = x < c, right = x >= width - c, top = y < c;
-			if (!left && !right && !top) continue;
-			const int sx = left ? x : right ? s - (width - x) : s / 2;
-			const int sy = top ? y : s / 2;
-			std::memcpy(out.at(x, y), SlotPixels + (static_cast<std::size_t>(sy) * s + sx) * 4, 4);
-		}
-	return out;
-}
-
-// A square or tab button: an empty slot, lighter when hovered, darker when
-// pressed. The open one has the grid's gold rim.
-std::vector<Picture> CategoryButton(bool open, int width = ButtonSize, int height = ButtonSize) {
-	std::vector<Picture> frames;
-	for (const int shift : { 0, 22, -8 }) {
-		Picture picture = Slot(width, height);
-		for (int y = 0; y < height; ++y)
-			for (int x = 0; x < width; ++x) {
-				auto*     p    = picture.at(x, y);
-				const int edge = std::min({ x, y, width - 1 - x, height - 1 - y });
-				if (open && edge < 3) {
-					static constexpr unsigned char gold[3][3] { { 80, 66, 40 }, { 195, 180, 111 }, { 253, 252, 213 } };
-					std::memcpy(p, gold[edge], 3);
-					continue;
-				}
-				for (int k = 0; k < 3; ++k) p[k] = static_cast<unsigned char>(std::clamp(p[k] + shift, 0, 255));
-			}
-		frames.push_back(std::move(picture));
-	}
-	return frames;
-}
-
-// A check box: a small empty slot, with a gold check mark when on.
-std::vector<Picture> CheckBox(bool on) {
-	auto frames = CategoryButton(false);
-	if (!on) return frames;
-	for (auto& picture : frames)
-		for (int y = 0; y < ButtonSize; ++y)
-			for (int x = 0; x < ButtonSize; ++x) {
-				// Two strokes: down from (14,28) to (24,40), up to (43,15).
-				const auto onStroke = [&](double ax, double ay, double bx, double by) {
-					const double vx = bx - ax, vy = by - ay, t = std::clamp(((x - ax) * vx + (y - ay) * vy) / (vx * vx + vy * vy), 0.0, 1.0);
-					const double ex = x - (ax + t * vx), ey = y - (ay + t * vy);
-					return ex * ex + ey * ey < 12.0;
-				};
-				if (onStroke(14, 28, 24, 40) || onStroke(24, 40, 43, 15)) std::memcpy(picture.at(x, y), "\xFD\xD8\x7A", 3);
-			}
-	return frames;
-}
-
-// The line under a set's name: gold, fading out at both ends.
-Picture Divider(int width, int height) {
-	Picture out { width, height, std::vector<unsigned char>(static_cast<std::size_t>(width) * height * 4) };
-	for (int y = 0; y < height; ++y)
-		for (int x = 0; x < width; ++x) {
-			const double fade = std::clamp(std::min(x, width - 1 - x) / (width * 0.2), 0.0, 1.0);
-			const bool   lit  = y < height / 2;
-			auto*        px   = out.at(x, y);
-			px[0] = lit ? 195 : 80, px[1] = lit ? 180 : 66, px[2] = lit ? 111 : 40;
-			px[3] = static_cast<unsigned char>(230 * fade);
-		}
-	return out;
-}
-
-// The scroll bar: the track is a long empty slot; the thumb a bronze bar
-// `steps` steps tall; a step button is invisible, faintly lit when hovered.
-Picture ScrollThumb(int steps) {
-	const int height = steps * StepHeight;
-	Picture   out { BarWidth, height, std::vector<unsigned char>(static_cast<std::size_t>(BarWidth) * height * 4) };
-	for (int y = 0; y < height; ++y)
-		for (int x = 0; x < BarWidth; ++x) {
-			const int edge = std::min({ x, y, BarWidth - 1 - x, height - 1 - y });
-			const int lit  = edge < 3 ? (std::min(x, y) == edge ? 50 : -50) : static_cast<int>(18 * Noise(x, y, 11)) - 9;
-			const int rgba[4] { 128 + lit, 102 + lit, 62 + lit, edge < 1 ? 255 : 235 };
-			for (int k = 0; k < 4; ++k) out.at(x, y)[k] = static_cast<unsigned char>(std::clamp(rgba[k], 0, 255));
-		}
-	return out;
-}
-
-std::vector<Picture> ScrollStep() {
-	Picture idle { BarWidth, StepHeight, std::vector<unsigned char>(static_cast<std::size_t>(BarWidth) * StepHeight * 4) };
-	Picture hover = idle;
-	for (int y = 0; y < StepHeight; ++y)
-		for (int x = 0; x < BarWidth; ++x) std::memcpy(hover.at(x, y), "\xFF\xF0\xC8\x28", 4);
-	return { idle, hover };
-}
-
-Picture Half(const Picture& in) {
-	Picture out { std::max(1, in.width / 2), std::max(1, in.height / 2), {} };
-	out.rgba.resize(static_cast<std::size_t>(out.width) * out.height * 4);
-	for (int y = 0; y < out.height; ++y)
-		for (int x = 0; x < out.width; ++x)
-			for (int k = 0; k < 4; ++k) {
-				int total = 0;
-				for (int dy = 0; dy < 2; ++dy)
-					for (int dx = 0; dx < 2; ++dx) total += in.rgba[(static_cast<std::size_t>(std::min(in.height - 1, 2 * y + dy)) * in.width + std::min(in.width - 1, 2 * x + dx)) * 4 + k];
-				out.rgba[(static_cast<std::size_t>(y) * out.width + x) * 4 + k] = static_cast<unsigned char>(total / 4);
-			}
-	return out;
-}
-
-// Frames side by side, all the same size.
-std::string SpriteFile(const std::vector<Picture>& frames) {
-	const auto& first = frames.front();
-	const auto  count = static_cast<std::uint32_t>(frames.size());
-	std::string out(40, '\0');
-	const auto  put = [&](std::size_t at, std::uint32_t value, int bytes) {
-        for (int i = 0; i < bytes; ++i) out[at + i] = static_cast<char>((value >> (8 * i)) & 0xFF);
-	};
-	std::memcpy(out.data(), "SpA1", 4);
-	put(4, 31, 2);
-	put(6, static_cast<std::uint32_t>(first.width), 2);
-	put(8, static_cast<std::uint32_t>(first.width) * count, 4);
-	put(12, static_cast<std::uint32_t>(first.height), 4);
-	put(20, count, 4);
-	const std::size_t row = static_cast<std::size_t>(first.width) * 4;
-	for (int y = 0; y < first.height; ++y)
-		for (const auto& frame : frames) out.append(reinterpret_cast<const char*>(frame.rgba.data()) + y * row, row);
-	return out;
-}
-
-bool RegisterResource(const std::string& path, const std::string& bytes, D2RL::Resources::RegistrationHandle* handle = nullptr) {
-	static std::vector<std::string> kept; // the loader copies the bytes, but keep them anyway
-	kept.push_back(bytes);
-	const D2RL::Resources::ResourceRegistration resource {
-		.structSize = D2RL::Resources::ResourceRegistrationSize,
-		.path       = path.c_str(),
-		.bytes      = kept.back().data(),
-		.byteCount  = kept.back().size(),
-	};
-	D2RL::Resources::RegistrationHandle ignored = D2RL::Resources::InvalidHandle;
-	if (!ResourceApi) return false;
-	return ResourceApi->registerResource(Context, &resource, handle ? handle : &ignored) == D2RL::Resources::Result::Success;
-}
-
-// The grail button's sprite, again when the game's button art comes in.
-D2RL::Resources::RegistrationHandle GrailButtonHandles[2] { D2RL::Resources::InvalidHandle, D2RL::Resources::InvalidHandle };
-std::vector<Picture>                 GrailButton(const std::vector<Picture>& backs);
-bool RegisterGrailButton(const std::vector<Picture>& backs = {}) {
-	for (auto& handle : GrailButtonHandles)
-		if (handle != D2RL::Resources::InvalidHandle) (void)ResourceApi->unregisterResource(Context, handle), handle = D2RL::Resources::InvalidHandle;
-	const auto           frames = GrailButton(backs);
-	std::vector<Picture> half;
-	for (const auto& frame : frames) half.push_back(Half(frame));
-	const std::string path = "data/hd/global/ui/d2rloader/grail-on/grailbutton";
-	return RegisterResource(path + ".sprite", SpriteFile(frames), &GrailButtonHandles[0]) && RegisterResource(path + ".lowend.sprite", SpriteFile(half), &GrailButtonHandles[1]);
-}
-
-bool RegisterSprite(const std::string& name, const std::vector<Picture>& frames) {
-	std::vector<Picture> half;
-	for (const auto& frame : frames) half.push_back(Half(frame));
-	const std::string path = "data/hd/global/ui/d2rloader/grail-on/" + name;
-	return RegisterResource(path + ".sprite", SpriteFile(frames)) && RegisterResource(path + ".lowend.sprite", SpriteFile(half));
-}
-
-// ---- stats charts (UI thread) ----
-
-// A ring chart: the parts clockwise from the top, a thin dark gap between
-// them, lighter towards the outer edge; smooth edges. A square one is a pie
-// seen only in a square band (a button's padding around its icon).
-Picture Ring(const std::vector<std::pair<int, Rgb>>& parts, int size, int hole, bool square) {
-	Picture      picture { size, size, std::vector<unsigned char>(static_cast<std::size_t>(size) * size * 4) };
-	const double outer = size / 2.0 - 1, inner = outer * hole / 100.0, pi = 3.14159265358979, centre = size / 2.0;
-	double       total = 0;
-	int          used  = 0;
-	for (const auto& [value, color] : parts) total += value, used += value > 0;
-	std::vector<double> ends; // where each part ends, 0..1
-	double              sum = 0;
-	for (const auto& part : parts) ends.push_back((sum += part.first) / std::max(1.0, total));
-	for (int y = 0; y < size; ++y)
-		for (int x = 0; x < size; ++x) {
-			const double dx = x + 0.5 - centre, dy = y + 0.5 - centre, d = square ? std::max(std::abs(dx), std::abs(dy)) : std::sqrt(dx * dx + dy * dy);
-			const double r = std::sqrt(dx * dx + dy * dy);
-			double       cover = std::clamp(outer - d + 0.5, 0.0, 1.0) * std::clamp(d - inner + 0.5, 0.0, 1.0);
-			if (cover <= 0) continue;
-			double turn = std::atan2(dx, -dy) / (2 * pi); // 0 at the top, clockwise
-			if (turn < 0) turn += 1;
-			std::size_t which = 0;
-			while (which + 1 < ends.size() && turn >= ends[which]) ++which;
-			Rgb color = total > 0 ? parts[which].second : MissingColor;
-			// The gap: within a pixel of a part's start, when parts meet.
-			if (used > 1)
-				for (std::size_t e = 0; e < ends.size(); ++e) {
-					if (parts[e].first <= 0) continue;
-					const double edge = (e ? ends[e - 1] : 0.0) * 2 * pi, off = std::abs(std::sin(std::atan2(dx, -dy) - edge)) * r;
-					const double along = std::cos(std::atan2(dx, -dy) - edge);
-					if (along > 0 && off < 1.6) cover *= std::clamp(off - 0.6, 0.0, 1.0);
-				}
-			const double light = 0.78 + 0.32 * (d - inner) / (outer - inner);
-			auto*        px    = picture.at(x, y);
-			px[0]              = static_cast<unsigned char>(std::clamp(color.r * light, 0.0, 255.0));
-			px[1]              = static_cast<unsigned char>(std::clamp(color.g * light, 0.0, 255.0));
-			px[2]              = static_cast<unsigned char>(std::clamp(color.b * light, 0.0, 255.0));
-			px[3]              = static_cast<unsigned char>(255 * cover);
-		}
-	return picture;
-}
-
-// The inventory button: the mold, and the button in it (frames: 0 normal,
-// 1 pressed, 2 disabled, 3 hovered), the grail icon in the game's gold,
-// brighter on hover.
+// The inventory button's grail (frames: 0 normal, 1 pressed, 2 disabled, 3 hovered), in the mold.
 constexpr int ButtonX = 3, ButtonY = 954, GrailButtonWidth = 52, GrailButtonHeight = 60, GrailIconSize = 42;
-Picture Mold() {
-	Picture mold { MoldWidth, MoldHeight, std::vector<unsigned char>(MoldRgba, MoldRgba + sizeof(MoldRgba)) };
-	return mold;
-}
-// `in` shrunk (area average) to fit width x height, centred, never enlarged.
-Picture Fit(const Picture& in, int width, int height) {
-	Picture      out { width, height, std::vector<unsigned char>(static_cast<std::size_t>(width) * height * 4) };
-	if (in.width <= 0 || in.height <= 0 || width <= 0 || height <= 0) return out;
-	const double scale = std::min({ 1.0, static_cast<double>(width) / in.width, static_cast<double>(height) / in.height });
-	const int    w = std::max(1, static_cast<int>(in.width * scale + 0.5)), h = std::max(1, static_cast<int>(in.height * scale + 0.5));
-	const int    left = (width - w) / 2, top = (height - h) / 2;
-	for (int y = 0; y < h; ++y)
-		for (int x = 0; x < w; ++x) {
-			const int x0 = x * in.width / w, x1 = std::max(x0 + 1, (x + 1) * in.width / w), y0 = y * in.height / h, y1 = std::max(y0 + 1, (y + 1) * in.height / h);
-			double    sum[4] {}, n = 0;
-			for (int sy = y0; sy < y1; ++sy)
-				for (int sx = x0; sx < x1; ++sx) {
-					const auto* px = in.rgba.data() + (static_cast<std::size_t>(sy) * in.width + sx) * 4;
-					for (int c = 0; c < 3; ++c) sum[c] += px[c] * (px[3] / 255.0);
-					sum[3] += px[3], ++n;
-				}
-			auto* px = out.at(left + x, top + y);
-			for (int c = 0; c < 3; ++c) px[c] = static_cast<unsigned char>(sum[3] > 0 ? std::clamp(sum[c] * 255.0 / sum[3], 0.0, 255.0) : 0);
-			px[3] = static_cast<unsigned char>(sum[3] / n);
-		}
-	return out;
-}
-
-// The game's Advanced Stats button (character sheet), read from the game's
-// files on the game thread: the grail button is drawn on it when it is there.
-std::vector<Picture> AdvancedButtonFrames() {
-	const std::string& file = AdvancedButtonFile;
-	if (file.size() < 0x28 || file.compare(0, 4, "SpA1")) return {};
-	const auto u32 = [&](std::size_t at) { std::uint32_t v; std::memcpy(&v, file.data() + at, 4); return v; };
-	std::uint16_t version = 0, frameWidth = 0;
-	std::memcpy(&version, file.data() + 4, 2), std::memcpy(&frameWidth, file.data() + 6, 2);
-	const std::uint32_t width = u32(8), height = u32(12), count = u32(20);
-	if (version != 31 || !frameWidth || !height || !count || count > 16 || width != frameWidth * count || height > 1024 || file.size() < 0x28 + static_cast<std::size_t>(width) * height * 4) {
-		Say(false, "grailon: the Advanced Stats button picture is not one this plugin reads (version %u, %ux%u, %u frames, %zu bytes)", version, frameWidth, height, count, file.size());
-		return {};
-	}
-	std::vector<Picture> frames;
-	for (std::uint32_t f = 0; f < count; ++f) {
-		Picture frame { frameWidth, static_cast<int>(height), std::vector<unsigned char>(static_cast<std::size_t>(frameWidth) * height * 4) };
-		for (std::uint32_t y = 0; y < height; ++y) std::memcpy(frame.at(0, static_cast<int>(y)), file.data() + 0x28 + (static_cast<std::size_t>(y) * width + f * frameWidth) * 4, static_cast<std::size_t>(frameWidth) * 4);
-		frames.push_back(std::move(frame));
-	}
-	Say(false, "grailon: Advanced Stats button picture: %u frames of %ux%u", count, frameWidth, height);
-	return frames;
-}
-
-// A game sprite's frames (SpA1 version 31: RGBA frames side by side), or none.
-std::vector<Picture> SpriteFrames(const std::string& file, const char* what) {
-	if (file.size() < 0x28 || file.compare(0, 4, "SpA1")) return {};
-	const auto u32 = [&](std::size_t at) { std::uint32_t v; std::memcpy(&v, file.data() + at, 4); return v; };
-	std::uint16_t version = 0, frameWidth = 0;
-	std::memcpy(&version, file.data() + 4, 2), std::memcpy(&frameWidth, file.data() + 6, 2);
-	const std::uint32_t width = u32(8), height = u32(12), count = u32(20);
-	if (version != 31 || !frameWidth || !height || !count || count > 32 || width < frameWidth * count || height > 2048 || width > 8192
-	    || file.size() < 0x28 + static_cast<std::size_t>(width) * height * 4) {
-		Say(false, "grailon: %s is not a picture this plugin reads (version %u, %ux%u, %u frames)", what, version, frameWidth, height, count);
-		return {};
-	}
-	std::vector<Picture> frames;
-	for (std::uint32_t f = 0; f < count; ++f) {
-		Picture frame { frameWidth, static_cast<int>(height), std::vector<unsigned char>(static_cast<std::size_t>(frameWidth) * height * 4) };
-		for (std::uint32_t y = 0; y < height; ++y) std::memcpy(frame.at(0, static_cast<int>(y)), file.data() + 0x28 + (static_cast<std::size_t>(y) * width + f * (width / count)) * 4, static_cast<std::size_t>(frameWidth) * 4);
-		frames.push_back(std::move(frame));
-	}
-	Say(false, "grailon: %s: %u frames of %ux%u", what, count, frameWidth, height);
-	return frames;
-}
-
-// `in` resized to width x height (each pixel the average of its source box,
-// alpha weighted; the nearest pixel when enlarging).
-Picture Resize(const Picture& in, int width, int height) {
-	Picture out { width, height, std::vector<unsigned char>(static_cast<std::size_t>(width) * height * 4) };
-	if (in.width <= 0 || in.height <= 0) return out;
-	for (int y = 0; y < height; ++y)
-		for (int x = 0; x < width; ++x) {
-			const int x0 = x * in.width / width, x1 = std::max(x0 + 1, (x + 1) * in.width / width), y0 = y * in.height / height, y1 = std::max(y0 + 1, (y + 1) * in.height / height);
-			double    sum[4] {}, n = 0;
-			for (int sy = y0; sy < y1; ++sy)
-				for (int sx = x0; sx < x1; ++sx) {
-					const auto* px = in.rgba.data() + (static_cast<std::size_t>(sy) * in.width + sx) * 4;
-					for (int c = 0; c < 3; ++c) sum[c] += px[c] * (px[3] / 255.0);
-					sum[3] += px[3], ++n;
-				}
-			auto* px = out.at(x, y);
-			for (int c = 0; c < 3; ++c) px[c] = static_cast<unsigned char>(sum[3] > 0 ? std::clamp(sum[c] * 255.0 / sum[3], 0.0, 255.0) : 0);
-			px[3] = static_cast<unsigned char>(sum[3] / n);
-		}
-	return out;
-}
-// Part of a picture.
-Picture Crop(const Picture& in, int left, int top, int width, int height) {
-	Picture out { std::max(0, width), std::max(0, height), std::vector<unsigned char>(static_cast<std::size_t>(std::max(0, width)) * std::max(0, height) * 4) };
-	for (int y = 0; y < out.height; ++y) std::memcpy(out.at(0, y), in.rgba.data() + (static_cast<std::size_t>(top + y) * in.width + left) * 4, static_cast<std::size_t>(out.width) * 4);
-	return out;
-}
-void Paste(Picture& onto, const Picture& part, int left, int top) {
-	for (int y = 0; y < part.height && top + y < onto.height; ++y)
-		if (top + y >= 0 && left >= 0 && left < onto.width && std::min(part.width, onto.width - left) > 0) std::memcpy(onto.at(left, top + y), part.rgba.data() + static_cast<std::size_t>(y) * part.width * 4, static_cast<std::size_t>(std::min(part.width, onto.width - left)) * 4);
-}
-// A frame stretched to width x height, its borders kept: the corners as they
-// are (scaled down to fit), the edges stretched along, the middle both ways.
-Picture Stretch(const Picture& in, int width, int height, int capX, int capY) {
-	capX = std::min({ capX, in.width / 2 - 1, width / 2 }), capY = std::min({ capY, in.height / 2 - 1, height / 2 });
-	if (capX < 0 || capY < 0) return Resize(in, width, height);
-	Picture   out { width, height, std::vector<unsigned char>(static_cast<std::size_t>(width) * height * 4) };
-	const int sx[] { 0, capX, in.width - capX }, sw[] { capX, in.width - 2 * capX, capX };
-	const int sy[] { 0, capY, in.height - capY }, sh[] { capY, in.height - 2 * capY, capY };
-	const int dx[] { 0, capX, width - capX }, dw[] { capX, width - 2 * capX, capX };
-	const int dy[] { 0, capY, height - capY }, dh[] { capY, height - 2 * capY, capY };
-	for (int r = 0; r < 3; ++r)
-		for (int c = 0; c < 3; ++c)
-			if (sw[c] > 0 && sh[r] > 0 && dw[c] > 0 && dh[r] > 0) Paste(out, Resize(Crop(in, sx[c], sy[r], sw[c], sh[r]), dw[c], dh[r]), dx[c], dy[r]);
-	return out;
-}
-// A left cap, a middle stretched and a right cap side by side, `height` high
-// (the caps scaled to it), `width` wide.
-Picture Join(const Picture& left, const Picture& middle, const Picture& right, int width, int height) {
-	const auto scaled = [&](const Picture& part) { return Resize(part, std::max(1, part.width * height / std::max(1, part.height)), height); };
-	Picture l = scaled(left), r = scaled(right);
-	// Ends wider than the box together: both shrunk so they share it.
-	if (l.width + r.width > width) {
-		const int total = l.width + r.width, lw = std::max(1, width * l.width / total), rw = std::max(1, width - lw);
-		l = Resize(l, lw, height), r = Resize(r, rw, height);
-	}
-	Picture       out { width, height, std::vector<unsigned char>(static_cast<std::size_t>(width) * height * 4) };
-	Paste(out, Resize(middle, std::max(1, width - l.width - r.width), height), l.width, 0);
-	Paste(out, l, 0, 0);
-	Paste(out, r, width - r.width, 0);
-	return out;
-}
-
-
-// A small downward arrow, for a drop-down made by the plugin.
-void Arrow(Picture& picture, int cx, int cy, const unsigned char* color) {
-	for (int y = 0; y < 9; ++y)
-		for (int x = -8 + y; x <= 8 - y; ++x)
-			if (cx + x >= 0 && cx + x < picture.width && cy + y - 4 >= 0 && cy + y - 4 < picture.height) {
-				auto* p = picture.at(cx + x, cy + y - 4);
-				std::memcpy(p, color, 3), p[3] = 255;
-			}
-}
-
-// The settings page's sprites: the game's art when it was read, else the
-// plugin's own. Once, after the lists are read.
-// The search bar's box sprites, one per length (the drop-down's list line, as the objectives' box).
-std::vector<Picture> TileArt[3]; // its left, middle and right parts, kept from the settings' art
-std::set<int>        SearchBoxes;
-std::string SearchBox(int width) {
-	if (SearchBoxes.insert(width).second) {
-		const auto& [l, m, r] = TileArt;
-		if (!l.empty() && !m.empty() && !r.empty()) (void)RegisterSprite("searchbox" + std::to_string(width), { Join(l[0], m[0], r[0], width, DropHeight) });
-		else (void)RegisterSprite("searchbox" + std::to_string(width), { CategoryButton(false, width, DropHeight)[0] });
-	}
-	return "d2rloader\\grail-on\\searchbox" + std::to_string(width);
-}
-
-void RegisterSettingsArt() {
-	std::vector<std::vector<Picture>> art;
-	for (const auto& entry : SettingsArt) art.push_back(SpriteFrames(entry.file, std::strrchr(entry.path, '/') + 1));
-	bool ok = true;
-	// The check box: frames 0-3 off, 4-7 on (normal, hovered, pressed, disabled).
-	if (const auto& box = art[ArtCheck]; box.size() >= 7) {
-		std::vector<Picture> off, on;
-		for (const int f : { 0, 1, 2 }) off.push_back(Fit(box[f], ButtonSize, ButtonSize)), on.push_back(Fit(box[f + 4], ButtonSize, ButtonSize));
-		ok = RegisterSprite("tick", off) && RegisterSprite("tickOn", on) && ok;
-	} else ok = RegisterSprite("tick", CheckBox(false)) && RegisterSprite("tickOn", CheckBox(true)) && ok;
-	// The line between sections.
-	if (const auto& line = art[ArtLine]; !line.empty()) {
-		LineHeight = std::max(2, line[0].height * HeaderWidth / std::max(1, line[0].width));
-		ok         = RegisterSprite("section", { Resize(line[0], HeaderWidth, LineHeight) }) && ok;
-	} else ok = RegisterSprite("section", { Divider(HeaderWidth, LineHeight = 4) }) && ok;
-	// The spoiler table's rows and column lines.
-	if (const auto& row = art[ArtRow]; !row.empty()) ok = RegisterSprite("tablerow", { Stretch(row[0], TableWidth, TableRow, 24, 16) }) && ok;
-	else ok = RegisterSprite("tablerow", { CategoryButton(false, TableWidth, TableRow)[0] }) && ok;
-	if (const auto& column = art[ArtColumn]; !column.empty()) ok = RegisterSprite("tablecol", { Resize(column[0], column[0].width, TableRow - 14) }) && ok;
-	else ok = RegisterSprite("tablecol", { Divider(2, TableRow - 14) }) && ok;
-	// The drop-down: frames 0 normal, 1 pressed, 2 disabled, 3 hovered; its
-	// list's lines: 0 normal, 1 hovered when there is one. Two widths: the
-	// settings' (half the table) and the misc types' (narrow).
-	for (const auto& [suffix, width] : { std::pair { "", DropWidth }, { "s", MiscDrop } }) {
-		if (const auto &l = art[ArtDropLeft], &m = art[ArtDropCenter], &r = art[ArtDropRight]; !l.empty() && !m.empty() && !r.empty()) {
-			std::vector<Picture> box;
-			for (std::size_t f = 0; f < 4; ++f) {
-				const auto at = [&](const std::vector<Picture>& part) { return part[std::min(f, part.size() - 1)]; };
-				box.push_back(Join(at(l), at(m), at(r), width, DropHeight));
-			}
-			ok = RegisterSprite(std::string("dropbox") + suffix, box) && ok;
-		} else {
-			static constexpr unsigned char gold[3] { 199, 179, 119 };
-			auto frames = CategoryButton(false, width, DropHeight);
-			for (auto& frame : frames) Arrow(frame, width - 30, DropHeight / 2, gold);
-			std::vector<Picture> box { frames[0], frames[2], frames[0], frames[1] };
-			ok = RegisterSprite(std::string("dropbox") + suffix, box) && ok;
-		}
-		if (const auto &l = art[ArtTileLeft], &m = art[ArtTileCenter], &r = art[ArtTileRight]; !l.empty() && !m.empty() && !r.empty()) {
-			std::vector<Picture> tile;
-			for (std::size_t f = 0; f < 2; ++f) {
-				const auto at = [&](const std::vector<Picture>& part) { return part[std::min(f, part.size() - 1)]; };
-				tile.push_back(Join(at(l), at(m), at(r), width, TileHeight));
-			}
-			ok = RegisterSprite(std::string("droptile") + suffix, tile) && ok;
-		} else {
-			auto frames = CategoryButton(false, width, TileHeight);
-			ok          = RegisterSprite(std::string("droptile") + suffix, { frames[0], frames[1] }) && ok;
-		}
-	}
-	// The grail button's steps: the drop-down's plate with its left end on
-	// both sides (its right end has the arrow); frames as the drop-down's.
-	if (const auto &l = art[ArtDropLeft], &m = art[ArtDropCenter]; !l.empty() && !m.empty()) {
-		std::vector<Picture> box;
-		for (std::size_t f = 0; f < 4; ++f) {
-			const Picture& left = l[std::min(f, l.size() - 1)];
-			Picture        right { left.width, left.height, std::vector<unsigned char>(left.rgba.size()) };
-			for (int y = 0; y < left.height; ++y)
-				for (int x = 0; x < left.width; ++x) std::memcpy(right.at(left.width - 1 - x, y), const_cast<Picture&>(left).at(x, y), 4);
-			box.push_back(Join(left, m[std::min(f, m.size() - 1)], right, SmallBox, DropHeight));
-		}
-		ok = RegisterSprite("stepbox", box) && ok;
-	} else {
-		auto plain = CategoryButton(false, SmallBox, DropHeight);
-		ok         = RegisterSprite("stepbox", { plain[0], plain[2], plain[0], plain[1] }) && ok;
-	}
-	{
-		auto plain = CategoryButton(false, ResetBox, DropHeight);
-		ok         = RegisterSprite("resetbox", { plain[0], plain[2], plain[0], plain[1] }) && ok;
-	}
-	TileArt[0] = art[ArtTileLeft], TileArt[1] = art[ArtTileCenter], TileArt[2] = art[ArtTileRight];
-	SearchBoxes.clear();
-	// The objectives' text box: a line of the drop-down's list, at the drop-down's height.
-	if (const auto &l = art[ArtTileLeft], &m = art[ArtTileCenter], &r = art[ArtTileRight]; !l.empty() && !m.empty() && !r.empty())
-		ok = RegisterSprite("inputbox", { Join(l[0], m[0], r[0], ObjInputWidth, DropHeight) }) && ok;
-	else ok = RegisterSprite("inputbox", { CategoryButton(false, ObjInputWidth, DropHeight)[0] }) && ok;
-	// The objectives' buttons, the loot filter's: up and down arrows (frames 0
-	// normal, 1 hovered, 2 pressed), New Rule as Add, the close button as remove.
-	// Each sheet cut to what its frames draw first (the sheets pad their art
-	// differently), so the buttons line up side by side.
-	const auto fitted = [&](const std::vector<Picture>& frames, int width, int height) {
-		int left = 1 << 30, top = 1 << 30, right = -1, bottom = -1;
-		for (const auto& frame : frames)
-			for (int y = 0; y < frame.height; ++y)
-				for (int x = 0; x < frame.width; ++x)
-					if (frame.rgba[(static_cast<std::size_t>(y) * frame.width + x) * 4 + 3] > 24) left = std::min(left, x), right = std::max(right, x), top = std::min(top, y), bottom = std::max(bottom, y);
-		std::vector<Picture> out;
-		for (const auto& frame : frames) {
-			if (right < left || right >= frame.width || bottom >= frame.height) {
-				out.push_back(Fit(frame, width, height));
-				continue;
-			}
-			Picture cut { right - left + 1, bottom - top + 1, std::vector<unsigned char>(static_cast<std::size_t>(right - left + 1) * (bottom - top + 1) * 4) };
-			for (int y = 0; y < cut.height; ++y) std::memcpy(cut.at(0, y), frame.rgba.data() + (static_cast<std::size_t>(top + y) * frame.width + left) * 4, static_cast<std::size_t>(cut.width) * 4);
-			out.push_back(Fit(cut, width, height));
-		}
-		return out;
-	};
-	for (const auto& [name, index, text] : { std::tuple { "uparrow", ArtUp, "^" }, { "downarrow", ArtDown, "v" } }) {
-		if (art[index].size() >= 3) ok = RegisterSprite(name, fitted(art[index], DropHeight, DropHeight)) && ok;
-		else {
-			auto plain = CategoryButton(false, DropHeight, DropHeight);
-			static constexpr unsigned char gold[3] { 199, 179, 119 };
-			for (auto& frame : plain) Arrow(frame, DropHeight / 2, DropHeight / 2, gold);
-			if (text[0] == '^')
-				for (auto& frame : plain) // pointing up: the frame upside down
-					for (int y = 0; y < frame.height / 2; ++y)
-						for (int x = 0; x < frame.width; ++x) std::swap_ranges(frame.at(x, y), frame.at(x, y) + 4, frame.at(x, frame.height - 1 - y));
-			ok = RegisterSprite(name, { plain[0], plain[1], plain[2] }) && ok;
-		}
-	}
-	if (const auto& add = art[ArtNew]; add.size() >= 3) ok = RegisterSprite("addbutton", fitted(add, AddWidth, DropHeight)) && ok;
-	else {
-		auto plain = CategoryButton(false, AddWidth, DropHeight);
-		static constexpr unsigned char gold[3] { 199, 179, 119 };
-		for (auto& frame : plain) // a plus
-			for (int d = -12; d <= 12; ++d)
-				for (int w = -2; w <= 2; ++w) std::memcpy(frame.at(AddWidth / 2 + d, DropHeight / 2 + w), gold, 3), frame.at(AddWidth / 2 + d, DropHeight / 2 + w)[3] = 255,
-				                                std::memcpy(frame.at(AddWidth / 2 + w, DropHeight / 2 + d), gold, 3), frame.at(AddWidth / 2 + w, DropHeight / 2 + d)[3] = 255;
-		ok = RegisterSprite("addbutton", { plain[0], plain[1], plain[2] }) && ok;
-	}
-	if (const auto& close = art[ArtClose]; close.size() >= 4) ok = RegisterSprite("removebutton", fitted(close, DropHeight, DropHeight)) && ok;
-	else {
-		auto plain = CategoryButton(false, DropHeight, DropHeight);
-		ok         = RegisterSprite("removebutton", { plain[0], plain[2], plain[0], plain[1] }) && ok;
-	}
-	// The exclusions list: small check boxes (none, all, some of a group
-	// ticked: the ticked box dimmed), its search box, the groups' arrows (the
-	// loot filter's down arrow, turned to point right while closed).
-	if (const auto& box = art[ArtCheck]; box.size() >= 7) {
-		std::vector<Picture> off, on, part;
-		for (const int f : { 0, 1, 2 }) {
-			off.push_back(Fit(box[f], ExclMark, ExclMark)), on.push_back(Fit(box[f + 4], ExclMark, ExclMark));
-			Picture dim = on.back();
-			for (std::size_t k = 0; k + 3 < dim.rgba.size(); k += 4) dim.rgba[k] = static_cast<unsigned char>(dim.rgba[k] / 2), dim.rgba[k + 1] = static_cast<unsigned char>(dim.rgba[k + 1] / 2), dim.rgba[k + 2] = static_cast<unsigned char>(dim.rgba[k + 2] / 2);
-			part.push_back(dim);
-		}
-		std::vector<Picture> dimOff { off[0] };
-		for (std::size_t k = 0; k + 3 < dimOff[0].rgba.size(); k += 4) dimOff[0].rgba[k + 3] = static_cast<unsigned char>(dimOff[0].rgba[k + 3] * 2 / 5);
-		ok = RegisterSprite("ticks", off) && RegisterSprite("ticksall", on) && RegisterSprite("tickspart", part) && RegisterSprite("ticksoff", dimOff) && ok;
-	} else {
-		auto off = CheckBox(false), on = CheckBox(true);
-		for (auto& frame : off) frame = Fit(frame, ExclMark, ExclMark);
-		for (auto& frame : on) frame = Fit(frame, ExclMark, ExclMark);
-		std::vector<Picture> dimOff { off[0] };
-		for (std::size_t k = 0; k + 3 < dimOff[0].rgba.size(); k += 4) dimOff[0].rgba[k + 3] = static_cast<unsigned char>(dimOff[0].rgba[k + 3] * 2 / 5);
-		ok = RegisterSprite("ticks", off) && RegisterSprite("ticksall", on) && RegisterSprite("tickspart", on) && RegisterSprite("ticksoff", dimOff) && ok;
-	}
-	if (const auto &l = art[ArtTileLeft], &m = art[ArtTileCenter], &r = art[ArtTileRight]; !l.empty() && !m.empty() && !r.empty())
-		ok = RegisterSprite("inputboxs", { Join(l[0], m[0], r[0], ExclInputWidth, DropHeight) }) && ok;
-	else ok = RegisterSprite("inputboxs", { CategoryButton(false, ExclInputWidth, DropHeight)[0] }) && ok;
-	{
-		std::vector<Picture> down;
-		if (art[ArtDown].size() >= 3) down = fitted(art[ArtDown], ExclMark, ExclMark);
-		else {
-			auto plain = CategoryButton(false, ExclMark, ExclMark);
-			static constexpr unsigned char gold[3] { 199, 179, 119 };
-			for (auto& frame : plain) Arrow(frame, ExclMark / 2, ExclMark / 2, gold);
-			down = { plain[0], plain[1], plain[2] };
-		}
-		std::vector<Picture> right;
-		for (const auto& frame : down) { // turned a quarter: pointing right
-			Picture turned { frame.height, frame.width, std::vector<unsigned char>(frame.rgba.size()) };
-			for (int y = 0; y < frame.height; ++y)
-				for (int x = 0; x < frame.width; ++x) std::memcpy(turned.at(y, frame.width - 1 - x), const_cast<Picture&>(frame).at(x, y), 4);
-			right.push_back(turned);
-		}
-		ok = RegisterSprite("exopen", down) && RegisterSprite("exclosed", right) && ok;
-	}
-	// The icon picker's box: a loot filter list line, stretched.
-	if (const auto& row = art[ArtRow]; !row.empty()) ok = RegisterSprite("pickback", { Stretch(row[0], PickWidth, PickHeight, 24, 16) }) && ok;
-	else ok = RegisterSprite("pickback", { CategoryButton(false, PickWidth, PickHeight)[0] }) && ok;
-	// The reset: the lobby's refresh button, at the drop-down's height.
-	if (!RefreshArt.file.empty()) {
-		auto frames = SpriteFrames(RefreshArt.file, "refresh button");
-		for (auto& frame : frames) frame = Fit(frame, DropHeight, DropHeight);
-		if (frames.empty() || !RegisterSprite("refresh", frames)) RefreshArt.file.clear();
-		const int count = static_cast<int>(frames.size());
-		RefreshArt.normal = std::clamp(RefreshArt.normal, 0, std::max(0, count - 1)), RefreshArt.hovered = std::clamp(RefreshArt.hovered, 0, std::max(0, count - 1)),
-		RefreshArt.pressed = std::clamp(RefreshArt.pressed, 0, std::max(0, count - 1));
-	}
-	if (!ok) Say(true, "grailon: could not register the settings page's pictures");
-}
-
-// A square button in the Advanced Stats button's materials (that button is an
-// arrow): its straight left border on all four sides around its dark field.
-Picture SquareButton(Picture in, int width, int height) {
-	constexpr int Left = 3, Border = 8, Top = 22, Length = 24, Field = 10;
-	Picture out { width, height, std::vector<unsigned char>(static_cast<std::size_t>(width) * height * 4) };
-	if (in.width < Field + 1 || in.height < Top + Length) return Fit(in, width, height);
-	// The dark field: the column inside the border, averaged.
-	unsigned field[4] {};
-	for (int j = 0; j < Length; ++j)
-		for (int c = 0; c < 4; ++c) field[c] += in.at(Field, Top + j)[c];
-	for (int y = Border; y < height - Border; ++y)
-		for (int x = Border; x < width - Border; ++x)
-			for (int c = 0; c < 4; ++c) out.at(x, y)[c] = static_cast<unsigned char>(field[c] / Length);
-	// Pixel (i, j) of the border strip: i across (0 outside), j along it.
-	const auto strip = [&](int i, int j) { return in.at(Left + i, Top + j % Length); };
-	for (int j = 0; j < height; ++j)
-		for (int i = 0; i < Border; ++i) std::memcpy(out.at(i, j), strip(i, j), 4), std::memcpy(out.at(width - 1 - i, j), strip(i, j), 4);
-	for (int j = 0; j < width; ++j)
-		for (int i = 0; i < Border; ++i) std::memcpy(out.at(j, i), strip(i, j), 4), std::memcpy(out.at(j, height - 1 - i), strip(i, j), 4);
-	return out;
-}
-
-std::vector<Picture> GrailButton(const std::vector<Picture>& backs = {}) {
+bool RegisterGrailButton() {
 	const unsigned char* mask = nullptr;
 	for (const auto& icon : IconMasks)
 		if (!std::strcmp(icon.name, "grail")) mask = icon.alpha;
-	// The icon's coverage at GrailIconSize: each pixel the average of the mask's.
-	// On the game's button: the button fitted to the mold's hole, the icon
-	// smaller, inside its frame.
-	std::vector<Picture> fitted;
-	for (const auto& back : backs) fitted.push_back(SquareButton(back, GrailButtonWidth, GrailButtonHeight));
-	const int iconSize = fitted.empty() ? GrailIconSize : std::min(GrailButtonWidth, GrailButtonHeight) * 58 / 100;
-	std::vector<double> cover(static_cast<std::size_t>(iconSize) * iconSize);
-	const double        step = static_cast<double>(IconSize) / iconSize;
-	for (int y = 0; mask && y < iconSize; ++y)
-		for (int x = 0; x < iconSize; ++x) {
-			double sum = 0;
-			int    n   = 0;
-			for (int sy = static_cast<int>(y * step); sy < static_cast<int>((y + 1) * step) && sy < IconSize; ++sy)
-				for (int sx = static_cast<int>(x * step); sx < static_cast<int>((x + 1) * step) && sx < IconSize; ++sx) sum += mask[sy * IconSize + sx], ++n;
-			cover[static_cast<std::size_t>(y) * iconSize + x] = n ? sum / n / 255.0 : 0;
-		}
-	std::vector<Picture> frames;
-	const struct {
-		int r, g, b, dy;
-		double glow;
-	} looks[] { { 215, 200, 150, 0, 0 }, { 170, 155, 110, 1, 0 }, { 110, 105, 95, 0, 0 }, { 255, 238, 180, 0, 0.35 } };
-	for (std::size_t k = 0; k < std::size(looks); ++k) {
-		const auto& look = looks[k];
-		Picture frame = fitted.empty() ? Picture { GrailButtonWidth, GrailButtonHeight, std::vector<unsigned char>(static_cast<std::size_t>(GrailButtonWidth) * GrailButtonHeight * 4) }
-		                               : fitted[std::min(k, fitted.size() - 1)];
-		const int left = (GrailButtonWidth - iconSize) / 2, top = (GrailButtonHeight - iconSize) / 2 + look.dy;
-		for (int y = 0; y < GrailButtonHeight; ++y)
-			for (int x = 0; x < GrailButtonWidth; ++x) {
-				const int ix = x - left, iy = y - top;
-				double    a  = ix >= 0 && iy >= 0 && ix < iconSize && iy < iconSize ? cover[static_cast<std::size_t>(iy) * iconSize + ix] : 0;
-				if (!fitted.empty()) { // the icon over the game's button
-					if (a <= 0) continue;
-					auto* px = frame.at(x, y);
-					const double under = px[3] / 255.0, alpha = a + under * (1 - a);
-					px[0] = static_cast<unsigned char>((look.r * a + px[0] * under * (1 - a)) / alpha);
-					px[1] = static_cast<unsigned char>((look.g * a + px[1] * under * (1 - a)) / alpha);
-					px[2] = static_cast<unsigned char>((look.b * a + px[2] * under * (1 - a)) / alpha);
-					px[3] = static_cast<unsigned char>(255 * alpha);
-					continue;
-				}
-				// Hovered: a soft gold light behind the icon.
-				double light = 0;
-				if (look.glow > 0) {
-					const double dx = (x + 0.5 - GrailButtonWidth / 2.0) / (GrailButtonWidth / 2.0), dy = (y + 0.5 - GrailButtonHeight / 2.0) / (GrailButtonHeight / 2.0);
-					light           = look.glow * std::max(0.0, 1.0 - std::sqrt(dx * dx + dy * dy));
-				}
-				auto*        px    = frame.at(x, y);
-				const double alpha = a + light * (1 - a);
-				if (alpha <= 0) continue;
-				px[0] = static_cast<unsigned char>((look.r * a + 200 * light * (1 - a)) / alpha);
-				px[1] = static_cast<unsigned char>((look.g * a + 160 * light * (1 - a)) / alpha);
-				px[2] = static_cast<unsigned char>((look.b * a + 80 * light * (1 - a)) / alpha);
-				px[3] = static_cast<unsigned char>(255 * alpha);
-			}
-		frames.push_back(std::move(frame));
-	}
-	return frames;
+	return mask && RegisterSprite("grailbutton", Gui::MaskButton(mask, IconSize, GrailButtonWidth, GrailButtonHeight, GrailIconSize));
 }
-
-std::set<std::string> ChartsMade;
 
 // The sprite of a ring chart, made once for its numbers.
-std::string ChartSprite(const std::vector<std::pair<int, Rgb>>& parts, int size, int hole, bool square) {
-	std::string name = std::string(square ? "square" : "chart") + std::to_string(size) + "h" + std::to_string(hole);
-	for (const auto& [value, color] : parts) name += "-" + std::to_string(value) + "_" + std::to_string(color.r) + "." + std::to_string(color.g) + "." + std::to_string(color.b);
-	if (!ChartsMade.count(name) && RegisterSprite(name, { Ring(parts, size, hole, square) })) ChartsMade.insert(name);
-	return "d2rloader\\grail-on\\" + name;
-}
+std::string ChartSprite(const std::vector<std::pair<int, Rgb>>& parts, int size, int hole, bool square) { return Kit::Chart(parts, size, hole, square, MissingColor); }
+
 
 // ---- panels (UI thread) ----
 // D2R keeps a panel's widgets after its first load, which is what makes a new
@@ -6412,62 +4896,37 @@ std::string ChartSprite(const std::vector<std::pair<int, Rgb>>& parts, int size,
 
 std::map<int, int> LastInMenu; // menu -> its category shown last; guarded by Lock
 
-struct ViewPanel {
-	std::string                         id;
-	D2RL::Panels::RegistrationHandle    panel  = D2RL::Panels::InvalidHandle;
-	D2RL::Resources::RegistrationHandle layout = D2RL::Resources::InvalidHandle;
-	bool                                opened {};
-	std::string                         key;    // what it shows, empty before the first use
-	unsigned long long                  used {}; // when it was last shown
-	ULONGLONG                           closedAt {}; // when it was last closed (GetTickCount64)
-	ULONGLONG                           preparedAt {}; // when its layout was last loaded (GetTickCount64)
-	bool                                loaded {};     // the game has its widgets (opened since its last unload)
-	ULONGLONG                           unloadedAt {}; // when the game was last told to let them go
-};
 constexpr int KeptLoaded = 8; // closed views the game keeps built; the others are let go (each holds many widgets)
 ULONGLONG     LastViewBuild {}; // when ShowView last built or picked a view
-ViewPanel                       Views[ViewCount];
+Gui::ViewCache                  Views; // ViewCount panels; group 1: over the open stash
 int                             ShownView = -1, PreparedView = -1;
 extern std::uintptr_t           Base; // the game's exe
 bool                            IsOverView(int i) { return i >= ViewCount - OverViews; }
 std::atomic<bool>               StashClosing {}; // the game's message that the stash closes (before its panel says so)
-// The stash is open (the game's stash panel, id 0x18: its shown byte +0x51),
-// on the builds whose code is known (checked once).
-constexpr std::uint64_t StashPanelRva = 0x846190;
-constexpr std::uint8_t  StashPanelCode[] {
-	0x48, 0x83, 0xEC, 0x28, 0x48, 0x83, 0x3D, 0xD4, 0x9F, 0xBF, 0x02, 0x00, 0x74, 0x18, 0xE8, 0xFD,
-	0x18, 0x88, 0xFF, 0x48, 0x8B, 0x0D, 0xC6, 0x9F, 0xBF, 0x02, 0x48, 0x8B, 0xD0, 0x48, 0x83, 0xC4,
-	0x28, 0xE9, 0xAA, 0x95, 0x05, 0x00, 0x33, 0xC0, 0x48, 0x83, 0xC4, 0x28, 0xC3,
-};
+// The stash is open (the game's stash panel), on the builds whose code is known (checked once).
 bool StashShown() {
-	static const int known = [] {
-		const bool ok = Base && std::memcmp(reinterpret_cast<const void*>(Base + StashPanelRva), StashPanelCode, sizeof(StashPanelCode)) == 0;
+	static const bool told = [] {
+		const bool ok = Gui::Hud::StashKnown();
 		Say(false, "grailon: stash panel code %s: the grail %s over the open stash", ok ? "known" : "not known", ok ? "opens" : "closes the stash; it cannot open");
-		return ok ? 1 : 0;
+		return true;
 	}();
-	if (!known) return false;
-	using PanelFn     = void*(__cdecl*)(std::uint32_t);
-	const auto* panel = static_cast<const std::uint8_t*>(reinterpret_cast<PanelFn>(Base + StashPanelRva)(0x18));
-	return panel && panel[0x51];
+	(void)told;
+	return Gui::Hud::StashShown();
 }
 unsigned                        OpenSequence {}; // the latest prepared view; older ones never open
-unsigned long long              UseClock {}, PrepareStart {};
+unsigned long long              PrepareStart {};
 bool                            PreparedNew {};
 std::atomic<bool>               RebuildWanted {}, ArrangeRunning {}, ViewIsOpen {}, PluginMoving {};
 std::atomic<D2RL::PlayerHandle> LocalPlayer {};
 std::atomic<std::uint32_t>      ArrangeAgain {}; // asked for while one was running: 1, or the runtime id to wait for
-D2RL::Resources::RegistrationHandle StringsHandle = D2RL::Resources::InvalidHandle;
 
-bool IsOpen(D2RL::Panels::RegistrationHandle handle) {
-	D2RL::Panels::PanelInfo info { .structSize = D2RL::Panels::PanelInfoSize };
-	return handle != D2RL::Panels::InvalidHandle && PanelApi->getPanelInfo(Context, handle, &info) == D2RL::Panels::Result::Success
-	    && info.presentationState == D2RL::Panels::PresentationState::Open;
-}
 
-bool ViewOpen() { return ShownView >= 0 && IsOpen(Views[ShownView].panel); }
+bool ViewOpen() { return Views.IsOpen(ShownView); }
 
 void Animate();
 std::set<int> LateClose; // views left open under the shown one while an item is on the cursor (UI thread)
+// A view that keeps its layout: on screen, being prepared, or left open under a cursor item.
+bool ViewBusy(int i) { return i == ShownView || i == PreparedView || LateClose.count(i); }
 
 // UI thread. Whether the local player has an item on the cursor.
 bool CursorHasItem() {
@@ -6485,23 +4944,20 @@ void Trace(const char* step, int value = 0) {
 void CloseLateViews() {
 	if (LateClose.empty() || CursorHasItem()) return;
 	for (const int view : LateClose)
-		if (view != ShownView && IsOpen(Views[view].panel)) (void)PanelApi->closePanel(Context, Views[view].panel), Views[view].closedAt = GetTickCount64(), Trace("late close", view);
+		if (view != ShownView && Views.IsOpen(view)) Views.Close(view), Trace("late close", view);
 	LateClose.clear();
 }
 
 void CloseScrollPanel();
 void SyncArea();
-D2RL::Panels::RegistrationHandle    ErrorPanel       = D2RL::Panels::InvalidHandle;
-D2RL::Resources::RegistrationHandle ErrorLayoutHandle = D2RL::Resources::InvalidHandle;
-bool                                ErrorLoaded {};
+Gui::SinglePanel ErrorPage; // what is switched off: made again each time it opens
 void CloseView() {
 	++OpenSequence; // a view being prepared stays closed
 	LateClose.clear();
 	CloseScrollPanel();
-	if (ErrorPanel != D2RL::Panels::InvalidHandle && IsOpen(ErrorPanel)) (void)PanelApi->closePanel(Context, ErrorPanel);
+	ErrorPage.Close();
 	PreparedView = -1;
-	for (auto& view : Views)
-		if (IsOpen(view.panel)) (void)PanelApi->closePanel(Context, view.panel), view.closedAt = GetTickCount64();
+	Views.CloseAll();
 	ShownView  = -1;
 	ViewIsOpen = false;
 	SyncArea();
@@ -6562,13 +5018,10 @@ struct ScrollAnimation {
 	int                                      queued {};      // wheel steps that came meanwhile
 	std::vector<D2RL::Widgets::WidgetHandle> frames;
 } Anim;
-D2RL::Panels::RegistrationHandle    ScrollPanel  = D2RL::Panels::InvalidHandle;
-D2RL::Resources::RegistrationHandle ScrollLayoutHandle = D2RL::Resources::InvalidHandle;
-bool                                ScrollLoaded {};
+Gui::SinglePanel ScrollPanel; // the scroll animation's frames: made again for each step
 void CloseScrollPanel() {
-	if (ScrollPanel != D2RL::Panels::InvalidHandle && IsOpen(ScrollPanel)) (void)PanelApi->closePanel(Context, ScrollPanel), Trace("scroll frames closed");
+	if (ScrollPanel.IsOpen()) ScrollPanel.Close(), Trace("scroll frames closed");
 }
-double UiScale();
 void   RunScroll(int rows, bool afterHold = false);
 
 std::size_t RecordCount();
@@ -6585,16 +5038,9 @@ bool QueueArrange(ArrangeJob* job) {
 // (its panel unloaded so the new layout is read).
 void ShowError() {
 	CloseView();
-	if (ErrorPanel == D2RL::Panels::InvalidHandle) return;
-	if (ErrorLoaded) {
-		const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = "grail-on/Error" };
-		(void)WidgetApi->dispatchUiAction(Context, &unload);
-	}
-	if (ErrorLayoutHandle != D2RL::Resources::InvalidHandle) (void)ResourceApi->unregisterResource(Context, ErrorLayoutHandle);
-	ErrorLayoutHandle = D2RL::Resources::InvalidHandle;
-	if (!RegisterResource("data/global/ui/layouts/grail-on/Errorhd.json", ErrorLayout(), &ErrorLayoutHandle)) return;
-	if (const auto result = PanelApi->openPanel(Context, ErrorPanel); result != D2RL::Panels::Result::Success) Say(true, "grailon: could not open the error page (result %u)", static_cast<unsigned>(result));
-	ErrorLoaded = true;
+	if (!ErrorPage.Ready()) return;
+	D2RL::Panels::Result result {};
+	if (!ErrorPage.Show(ErrorLayout(), &result) && result != D2RL::Panels::Result::Success) Say(true, "grailon: could not open the error page (result %u)", static_cast<unsigned>(result));
 }
 
 // Makes the view of the current category and scroll ready and has the items
@@ -6632,6 +5078,7 @@ void ShowView(const Drop& drop = {}) {
 	int         index = -1;
 	bool        settings {};
 	std::string layout;
+	std::string newKey; // the key of a view given a new layout
 	{
 		std::lock_guard guard(Lock);
 		if (JumpTo >= 0 && JumpTo < UniqueCount()) CurrentCategory = Uniques[JumpTo].category, ViewEth = JumpEth;
@@ -6668,9 +5115,8 @@ void ShowView(const Drop& drop = {}) {
 		const bool over = StashShown();
 		// The host's grid stays just under the view: it follows the view's priority.
 		if (OverShown.exchange(over) != over && Host::On()) (void)SetHostLayout(true);
-		for (int i = 0; i < ViewCount; ++i)
-			if (IsOverView(i) == over && Views[i].key == key && (Views[i].loaded || GetTickCount64() - Views[i].unloadedAt >= 1500)) index = i;
-		if (index >= 0 && index == ShownView && IsOpen(Views[index].panel) && !drop.wanted) {
+		index = Views.Find(key, over ? 1 : 0);
+		if (index >= 0 && index == ShownView && Views.IsOpen(index) && !drop.wanted) {
 			++OpenSequence; // the view on screen is already this one
 			PreparedView = -1;
 			ApplyHalfTiles();
@@ -6681,47 +5127,22 @@ void ShowView(const Drop& drop = {}) {
 			// (kept under a cursor item, its close pending), being prepared, or
 			// closed just now (the game may still be letting its widgets go);
 			// unloading such a panel crashed the game in its layout loader.
-			const ULONGLONG now = GetTickCount64();
-			for (const bool allowRecent : { false }) { // a panel closed under 1.5 s ago is never loaded again: the game's layout loader crashed on one
-				for (int i = 0; i < ViewCount; ++i) {
-					const auto& view = Views[i];
-					if (IsOverView(i) != over || i == ShownView || i == PreparedView || view.panel == D2RL::Panels::InvalidHandle || LateClose.count(i) || IsOpen(view.panel)) continue;
-					if (!allowRecent && view.opened && now - view.closedAt < 1500) continue;
-					// Nor one whose layout was loaded just now and never shown (a view
-					// made while the scroll bar is dragged, overtaken by the next):
-					// unloading it again at once crashed the game's layout loader.
-					if (!allowRecent && view.preparedAt && now - view.preparedAt < 1500) continue;
-					if (!allowRecent && view.unloadedAt && now - view.unloadedAt < 1500) continue;
-					if (index < 0 || view.used < Views[index].used) index = i;
-				}
-				if (index >= 0) break;
-			}
+			// unloading such a panel crashed the game in its layout loader (Settle).
+			index = Views.Free(over ? 1 : 0, ViewBusy);
 			if (index < 0) {
 				static int told = 0;
 				if (told++ < 3) Say(false, "grailon: no view panel is free yet; the view waits a moment");
 				ViewRetryAt = GetTickCount64() + 300;
 				return;
 			}
-			if (Views[index].opened) Say(false, "grailon: view panel %d recycled (unused for %llu views)", index, UseClock - Views[index].used);
-			layout                  = ViewLayout(Views[index].id, IsOverView(index));
-			Views[index].preparedAt = now;
-			Views[index].key = key;
+			if (Views[index].opened) Say(false, "grailon: view panel %d recycled (unused for %llu views)", index, Views.Clock() - Views[index].used);
+			layout   = ViewLayout(Views[index].id, IsOverView(index));
+			newKey   = key;
 		}
 	}
-	auto& next   = Views[index];
 	PrepareStart = GetTickCount64();
 	PreparedNew  = !layout.empty();
-	if (!layout.empty()) {
-		if (next.loaded && WidgetApi) {
-			const std::string             name = std::string("grail-on/") + next.id;
-			const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = name.c_str() };
-			(void)WidgetApi->dispatchUiAction(Context, &unload);
-			next.loaded = false, next.unloadedAt = GetTickCount64();
-		}
-		if (next.layout != D2RL::Resources::InvalidHandle) (void)ResourceApi->unregisterResource(Context, next.layout);
-		next.layout = D2RL::Resources::InvalidHandle;
-		if (!RegisterResource("data/global/ui/layouts/grail-on/" + next.id + "hd.json", layout, &next.layout)) Say(true, "grailon: could not register the view layout");
-	}
+	if (!layout.empty() && !Views.Load(index, layout, newKey)) Say(true, "grailon: could not register the view layout");
 	PreparedView        = index;
 	const auto sequence = ++OpenSequence;
 	// The settings show no tiles: their grid is off screen, the items stay.
@@ -6743,28 +5164,7 @@ void RetryViewIfDue() {
 // UI thread. Closed views beyond the newest KeptLoaded are let go by the game
 // (UnloadPanel): their layout stays registered, so showing one again loads it
 // back. Never one in use, closed under 1.5 s ago, or loading.
-bool IsOpen(D2RL::Panels::RegistrationHandle panel);
-void LetClosedViewsGo() {
-	if (!WidgetApi) return;
-	const ULONGLONG now = GetTickCount64();
-	std::vector<int> closed;
-	for (int i = 0; i < ViewCount; ++i) {
-		const auto& view = Views[i];
-		if (!view.loaded || i == ShownView || i == PreparedView || LateClose.count(i) || view.panel == D2RL::Panels::InvalidHandle || IsOpen(view.panel)) continue;
-		closed.push_back(i);
-	}
-	if (static_cast<int>(closed.size()) <= KeptLoaded) return;
-	std::sort(closed.begin(), closed.end(), [](int a, int b) { return Views[a].used > Views[b].used; });
-	for (std::size_t k = KeptLoaded; k < closed.size(); ++k) {
-		auto& view = Views[closed[k]];
-		if (now - view.closedAt < 1500 || now - view.preparedAt < 1500) continue;
-		const std::string             name = std::string("grail-on/") + view.id;
-		const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = name.c_str() };
-		(void)WidgetApi->dispatchUiAction(Context, &unload);
-		view.loaded = false, view.unloadedAt = now;
-		return; // one per tick
-	}
-}
+void LetClosedViewsGo() { Views.LetGo(KeptLoaded, ViewBusy); }
 
 void OpenPrepared(unsigned sequence) {
 	if (sequence != OpenSequence || PreparedView < 0) return; // a newer view is on its way
@@ -6794,31 +5194,27 @@ void OpenPrepared(unsigned sequence) {
 	const int index    = PreparedView;
 	const int previous = ShownView;
 	PreparedView       = -1;
-	auto&      next    = Views[index];
 	const bool holding = CursorHasItem();
 	Trace("view open", index);
 	{
 		std::lock_guard guard(Lock);
 		ApplyHalfTiles();
 	}
-	const auto result  = PanelApi->openPanel(Context, next.panel);
+	const auto result  = Views.Open(index);
 	Trace("view opened", index);
 	if (holding && !CursorHasItem()) Say(false, "grailon: the cursor item went when the next view opened");
 	// The new view opens first and the old one closes after, so the window never
 	// disappears between two views. With an item on the cursor the old one stays
 	// open under it until the cursor is empty (closing it may drop the item).
-	if (previous >= 0 && previous != index && IsOpen(Views[previous].panel)) {
+	if (previous >= 0 && previous != index && Views.IsOpen(previous)) {
 		if (holding && !Config.hold) LateClose.insert(previous);
-		else (void)PanelApi->closePanel(Context, Views[previous].panel), Views[previous].closedAt = GetTickCount64(), Trace("old view closed", previous);
+		else Views.Close(previous), Trace("old view closed", previous);
 	}
 	LateClose.erase(index);
 	CloseScrollPanel();
 	if (holding && !CursorHasItem()) Say(false, "grailon: the cursor item went when the scroll frames closed");
 	if (Config.timing) Say(false, "grailon: %s view, shown after %llu ms", PreparedNew ? "new" : "cached", static_cast<unsigned long long>(GetTickCount64() - PrepareStart));
 	if (result != D2RL::Panels::Result::Success) Say(true, "grailon: could not open the view (result %u)", static_cast<unsigned>(result));
-	next.opened = true;
-	next.loaded = true;
-	next.used   = ++UseClock;
 	ShownView   = index;
 	ViewIsOpen  = true;
 	SyncArea();
@@ -9450,8 +7846,6 @@ void KickPending() {
 // ---- admission (before any move) ----
 
 void Queue(const std::string& command);
-void LearnBar(int step);
-int  StepRow(int step, int maxScroll, int steps = ScrollSteps);
 Drop PendingDrop; // guarded by Lock
 
 // Any thread: arranges the page now instead of on the next tick, once the
@@ -10043,7 +8437,11 @@ bool MiddleClickNow(const char* from) {
 
 // UI thread, each frame: a middle click the window did not pass on (a panel
 // open over the game may take it) is seen by the button's state.
-bool GameInFront();
+bool GameInFront() {
+	const HWND front = GetForegroundWindow();
+	DWORD      pid   = 0;
+	return front && GetWindowThreadProcessId(front, &pid) && pid == GetCurrentProcessId();
+}
 bool ShowsInGrail(D2RL::ItemHandle handle);
 void WatchMiddleClick() {
 	static bool down = false;
@@ -10450,8 +8848,7 @@ void AddChecks(Rework& out, const unsigned char* row, int first, int count, cons
 // Each row's firstLadderSeason in a game table (0 for none), by compiled
 // row: the "Expansion" divider lines are not rows of the compiled table.
 std::vector<int> FirstSeasons(const char* path) {
-	std::string file = ArchiveFile(path);
-	if (file.empty()) file = ResourceFile(path);
+	std::string file = Gui::GameFile(path);
 	std::vector<int> out;
 	int              column = -1;
 	bool             head   = true;
@@ -10753,7 +9150,6 @@ void* CopyOf(int entry, bool eth) {
 	return nullptr;
 }
 
-HWND GameWindow {}; // the game's window (the wheel goes through it)
 
 // UI thread (the host grid's draw). The mouse over a picture tile (past the
 // host's rows) with its item stored: the game's tooltip for its copy, as the
@@ -10766,9 +9162,9 @@ int   HoveredPeek = -1; // UI thread: the picture tile under the mouse at the gr
 void PeekTooltip(void* widget) {
 	PeekShown   = nullptr;
 	HoveredPeek = -1;
-	if (!GameWindow || !ViewIsOpen || Anim.running || !Context) return;
+	if (!Gui::WindowHook::GameWindow() || !ViewIsOpen || Anim.running || !Context) return;
 	POINT mouse {};
-	if (!GetCursorPos(&mouse) || !ScreenToClient(GameWindow, &mouse)) return;
+	if (!GetCursorPos(&mouse) || !ScreenToClient(Gui::WindowHook::GameWindow(), &mouse)) return;
 	const auto cellAt = [](int x, int y) { return static_cast<std::uint32_t>(x) | (std::uint64_t { static_cast<std::uint32_t>(y) } << 32); };
 	const auto one    = cellAt(1, 1);
 	void*         copy = nullptr;
@@ -10796,7 +9192,7 @@ void PeekTooltip(void* widget) {
 	if (!copy || !*reinterpret_cast<void* const*>(static_cast<const std::uint8_t*>(copy) + 0x38) || CursorHasItem()) return;
 	// The grid shows the text it keeps for its hovered item (widget+0x558, a
 	// game string, built when the hover starts): the copy's text goes there
-	// for the call, and the copy's place is its tile (PeekCell, CellRect hook).
+	// for the call, and the copy's place is its tile (Gui::TileGrid::PeekAt).
 	static GameString  text {};
 	static bool        built = false;
 	const auto freeText = [] {
@@ -10836,11 +9232,10 @@ void PeekTooltip(void* widget) {
 	auto*      flags = static_cast<unsigned char*>(widget);
 	const auto compare = flags[Game::Compare];
 	flags[Game::Compare] = 0; // no Shift comparison for a copy
-	PeekCell   = cell;
-	PeekCellOn = true;
-	PeekShown  = copy;
+	Gui::TileGrid::PeekAt(true, cell);
+	PeekShown = copy;
 	ShowTooltip(widget, copy);
-	PeekCellOn = false;
+	Gui::TileGrid::PeekAt(false);
 	flags[Game::Compare] = compare;
 	std::memcpy(slot, saved, sizeof(saved));
 }
@@ -10879,7 +9274,7 @@ bool AssignBase(const Items::ItemInfo& item, bool commit, int target) {
 	};
 	int pick = -1, under = target;
 	if (target >= 0 && fits(target)) pick = target;
-	const auto cell = target >= 0 ? ~std::uint64_t { 0 } : HoverCell.load();
+	const auto cell = target >= 0 ? ~std::uint64_t { 0 } : Gui::TileGrid::HoverCell();
 	if (cell != ~std::uint64_t { 0 }) {
 		const int x = static_cast<std::int32_t>(cell) - OriginX(), y = static_cast<std::int32_t>(cell >> 32) - OriginY();
 		for (const auto& tile : Shown)
@@ -11080,7 +9475,7 @@ const char* HookResolve(const StringKey* key, void* a, void* b, void* c) noexcep
 void HookShowTooltip(void* widget, void* item) noexcept {
 	// The grid hovers a picture tile's copy too, now and then, with its own
 	// text: a second tooltip that flashes over PeekTooltip's.
-	if (item && item == PeekShown && !PeekCellOn) return;
+	if (item && item == PeekShown && !Gui::TileGrid::Peeking()) return;
 	// The item really under the mouse (the tooltip events also come for the
 	// texts the plugin builds itself: grail copies).
 	if (item) {
@@ -11888,77 +10283,11 @@ bool PerfectNow(int u, std::uint32_t runtimeId, bool eth) {
 	return Uniques[u].secret || (unit && IsPerfect(u, unit, eth));
 }
 
-// A perfect tile's glow, drawn over its slot and under its item: a gold halo
-// around the slot (GlowPad beyond it), a bright rim, and a glow fading in from
-// the edges. Frames: the light breathes and a brighter band runs around.
 
-std::vector<Picture> Glow(int width, int height) {
-	std::vector<Picture> frames;
-	const int            w = width + 2 * GlowPad, h = height + 2 * GlowPad;
-	const double         perimeter = 2.0 * (width + height), pi = 3.14159265358979;
-	for (int f = 0; f < GlowFrames; ++f) {
-		Picture      picture { w, h, std::vector<unsigned char>(static_cast<std::size_t>(w) * h * 4) };
-		const double breath = 0.78 + 0.22 * std::cos(2 * pi * f / GlowFrames);
-		for (int y = 0; y < h; ++y)
-			for (int x = 0; x < w; ++x) {
-				// Distance from the slot's edge: < 0 outside, > 0 inside.
-				const int    sx = x - GlowPad, sy = y - GlowPad;
-				const int    dx = sx < 0 ? sx : sx >= width ? width - 1 - sx : 0, dy = sy < 0 ? sy : sy >= height ? height - 1 - sy : 0;
-				const double outside = std::sqrt(static_cast<double>(dx * dx + dy * dy));
-				const double inside  = std::min({ sx, sy, width - 1 - sx, height - 1 - sy });
-				// Where the point is along the rim, 0..1 clockwise from the top left.
-				const double cx = std::clamp(sx, 0, width - 1), cy = std::clamp(sy, 0, height - 1);
-				const double edge = std::min({ cx, cy, width - 1 - cx, height - 1 - cy });
-				double       along = 0;
-				if (cy == edge) along = cx;
-				else if (width - 1 - cx == edge) along = width + cy;
-				else if (height - 1 - cy == edge) along = width + height + (width - cx);
-				else along = 2.0 * width + height + (height - cy);
-				const double phase = along / perimeter - static_cast<double>(f) / GlowFrames;
-				const double band  = std::pow(0.5 + 0.5 * std::cos(2 * pi * (phase - std::floor(phase))), 8);
-				double       alpha = 0, light = 0;
-				if (outside > 0) alpha = 235 * std::pow(std::max(0.0, 1 - outside / GlowPad), 1.6) * (breath + 0.35 * band), light = 0.4;
-				else if (inside < 3) alpha = 255, light = 0.55 + 0.45 * std::max(band, breath - 0.6);
-				else alpha = 150 * std::pow(std::max(0.0, 1 - (inside - 3) / 26.0), 2) * (breath + 0.3 * band), light = 0.25;
-				auto* px = picture.at(x, y);
-				px[0]    = static_cast<unsigned char>(std::min(255.0, 255 * (0.8 + 0.2 * light) + 30 * band));
-				px[1]    = static_cast<unsigned char>(std::min(255.0, 200 * (0.75 + 0.25 * light) + 40 * band));
-				px[2]    = static_cast<unsigned char>(std::min(255.0, 70 + 110 * light + 80 * band));
-				px[3]    = static_cast<unsigned char>(std::clamp(alpha, 0.0, 255.0));
-			}
-		frames.push_back(std::move(picture));
-	}
-	return frames;
-}
-
-void RegisterGlows() {
-	static std::set<std::pair<int, int>> done;
-	for (const auto& entry : Uniques) {
-		const int width = std::clamp(entry.width, 1, 4), height = std::clamp(entry.height, 1, 4);
-		if (!done.insert({ width, height }).second) continue;
-		if (!RegisterSprite("glow" + std::to_string(width) + "x" + std::to_string(height), Glow(width * Cell, height * Cell))) Say(true, "grailon: could not register a glow sprite");
-	}
-}
-
-
-// The number over the life globe (HUDPanel/HealthBall/ValueDisplay): the
-// game hides it under its own left panels; the grail view hides it too while
-// it is open (UI thread, every animation tick, since the game may show it again).
-bool LifeTextHidden {};
-void HideLifeText(bool hide) {
-	if (!WidgetApi || (!hide && !LifeTextHidden)) return;
-	D2RL::Widgets::WidgetHandle hud {}, ball {}, text {};
-	if (WidgetApi->findPanel(Context, "HUDPanel", &hud) != D2RL::Widgets::Result::Success
-	    || WidgetApi->findWidget(Context, hud, "HealthBall", &ball) != D2RL::Widgets::Result::Success
-	    || WidgetApi->findWidget(Context, ball, "ValueDisplay", &text) != D2RL::Widgets::Result::Success) {
-		static bool told = false;
-		if (!told) Say(false, "grailon: the life globe's number was not found");
-		told = true;
-		return;
-	}
-	(void)WidgetApi->setWidgetVisible(Context, text, !hide);
-	LifeTextHidden = hide;
-}
+// The number over the life globe: the game hides it under its own left
+// panels; the grail view hides it too while it is open (UI thread, every
+// animation tick, since the game may show it again).
+void HideLifeText(bool hide) { Gui::Hud::HideLifeNumber(hide); }
 
 // UI thread, on each animation tick while a view is open (the glows play by
 // themselves).
@@ -12109,169 +10438,60 @@ void ClickLower() {
 void CompactChanged();
 void MoveInventoryButton();
 
-// ---- the objectives' text box ----
-// The game's own input box doesn't get the keys in this panel (they go to the
-// game's key bindings). As Stash Search does: while the box is active, a
-// low-level keyboard hook on a thread of the plugin's own sends the keys to a
-// hidden Windows EDIT control there (so keyboard layouts, Shift, AltGr and
-// paste work) and keeps them from the game; the page shows its text.
+// ---- the text boxes (objectives, search, exclusions, a list's name) ----
+// D2R GUI's TextInput takes the keys while a box is active (the game's own
+// input box gets none in this panel); the plugin keeps each box's text and
+// the page shows it. One box at a time: TypeTarget.
 std::atomic<bool>  ObjTyping {}, ObjTypedChanged {}, ObjEnter {};
 std::atomic<int>   TypeTarget {};
-std::atomic<std::uint64_t> TypeClickAt {}, TypeHitAt {}; // the last mouse click, the last click on a text box
 std::mutex         ObjTypedLock;
 std::wstring       TypedTexts[4]; // by target
-std::wstring&      ObjTyped = TypedTexts[0];
-HWND               ObjEdit {};
-HHOOK              ObjHook {};
-HANDLE             ObjThread {};
-std::atomic<DWORD> ObjThreadId {};
-std::uint8_t       ObjForwarded[256] {};
-constexpr UINT     ObjMsgClear = WM_APP + 41, ObjMsgQuit = WM_APP + 42, ObjMsgLoad = WM_APP + 43;
-void __cdecl TypedOnUi(const D2RL::PluginContext*, void*) noexcept;
+void ObjInputTick();
 // The page follows a key at once (the UI tick alone came up to 250 ms later).
-void TypedNow() { (void)Threads->runOnUiThread(Context, TypedOnUi, nullptr); }
+void TypedNow() { (void)Gui::RunOnUi(ObjInputTick); }
 
 std::string TypedText(int target) {
 	std::lock_guard guard(ObjTypedLock);
-	const auto& typed = TypedTexts[TypeSlot(target)];
-	if (typed.empty()) return {};
-	const int   size = WideCharToMultiByte(CP_UTF8, 0, typed.c_str(), static_cast<int>(typed.size()), nullptr, 0, nullptr, nullptr);
-	std::string out(static_cast<std::size_t>(std::max(0, size)), '\0');
-	if (size > 0) WideCharToMultiByte(CP_UTF8, 0, typed.c_str(), static_cast<int>(typed.size()), out.data(), size, nullptr, nullptr);
-	return out;
+	return Gui::Narrow(TypedTexts[TypeSlot(target)]);
 }
 std::string ObjTypedText() { return TypedText(TypeObjective); }
+
+// The box lets the keys go.
+void StopTyping() {
+	ObjTyping = false;
+	Gui::TextInput::Stop();
+}
+
 void ClearTyped(int target) {
 	{
 		std::lock_guard guard(ObjTypedLock);
 		TypedTexts[TypeSlot(target)].clear();
 	}
-	if (const DWORD id = ObjThreadId.load(); id && TypeTarget == target) PostThreadMessageW(id, ObjMsgClear, 0, 0);
+	if (ObjTyping && TypeTarget == target) Gui::TextInput::SetText("");
 }
 void ObjClearTyped() { ClearTyped(TypeObjective); }
 
-bool GameInFront() {
-	const HWND front = GetForegroundWindow();
-	DWORD      pid   = 0;
-	return front && GetWindowThreadProcessId(front, &pid) && pid == GetCurrentProcessId();
-}
-
-LRESULT CALLBACK ObjKeyHook(int code, WPARAM wParam, LPARAM lParam) {
-	const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
-	if (code < 0 || !key || key->vkCode > 0xFF || (wParam != WM_KEYDOWN && wParam != WM_KEYUP)) return CallNextHookEx(ObjHook, code, wParam, lParam);
-	const DWORD vk = key->vkCode;
-	if (wParam == WM_KEYUP) {
-		if (!ObjForwarded[vk]) return CallNextHookEx(ObjHook, code, wParam, lParam);
-		ObjForwarded[vk] = 0;
-	} else if (!ObjTyping || !GameInFront()) return CallNextHookEx(ObjHook, code, wParam, lParam);
-	switch (vk) {
-	case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: case VK_MENU: case VK_LMENU: case VK_RMENU:
-	case VK_LWIN: case VK_RWIN: case VK_CAPITAL: case VK_NUMLOCK: case VK_SCROLL: return CallNextHookEx(ObjHook, code, wParam, lParam);
-	default: break;
-	}
-	const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0, alt = (key->flags & LLKHF_ALTDOWN) != 0;
-	if (alt && !ctrl) return CallNextHookEx(ObjHook, code, wParam, lParam); // Alt+Tab, Alt+F4, Alt+Enter
-	if (wParam == WM_KEYDOWN && vk == VK_RETURN) {
-		ObjForwarded[vk] = 1;
-		ObjEnter         = true;
-		TypedNow();
-		return 1;
-	}
-	if (wParam == WM_KEYDOWN && vk == VK_ESCAPE) {
-		ObjForwarded[vk] = 1;
-		ObjTyping        = false;
-		ObjTypedChanged  = true;
-		TypedNow();
-		return 1;
-	}
-	if (!ObjEdit) return CallNextHookEx(ObjHook, code, wParam, lParam);
-	LPARAM message = static_cast<LPARAM>(1 | (static_cast<std::uint64_t>(static_cast<std::uint8_t>(key->scanCode)) << 16) | ((key->flags & LLKHF_EXTENDED) ? 0x01000000ULL : 0));
-	if (wParam == WM_KEYUP) message |= static_cast<LPARAM>(0xC0000000ULL);
-	UINT   id    = static_cast<UINT>(wParam);
-	WPARAM value = vk;
-	if (wParam == WM_KEYDOWN && ctrl && !alt && (vk == 'A' || vk == 'C' || vk == 'V' || vk == 'X' || vk == 'Z')) id = WM_CHAR, value = vk - 'A' + 1;
-	if (!PostMessageW(ObjEdit, id, value, message)) return CallNextHookEx(ObjHook, code, wParam, lParam);
-	if (wParam == WM_KEYDOWN) ObjForwarded[vk] = 1;
-	return 1;
-}
-
-// The game window's keyboard layout and key states, so the EDIT control
-// makes the same characters the game would.
-void ObjSyncKeyboard() {
-	HWND game = GetForegroundWindow();
-	if (DWORD pid = 0; game && GetWindowThreadProcessId(game, &pid) && pid == GetCurrentProcessId())
-		if (const HKL layout = GetKeyboardLayout(GetWindowThreadProcessId(game, nullptr)); layout && layout != GetKeyboardLayout(0)) ActivateKeyboardLayout(layout, 0);
-	BYTE keys[256] {};
-	if (!GetKeyboardState(keys)) return;
-	for (const int vk : { VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU, VK_RMENU })
-		keys[vk] = (GetAsyncKeyState(vk) & 0x8000) ? 0x80 : 0;
-	for (const int vk : { VK_CAPITAL, VK_NUMLOCK })
-		keys[vk] = static_cast<BYTE>((GetKeyState(vk) & 1) | ((GetAsyncKeyState(vk) & 0x8000) ? 0x80 : 0));
-	SetKeyboardState(keys);
-}
-
-DWORD WINAPI ObjInputMain(void*) {
-	ObjThreadId = GetCurrentThreadId();
-	HMODULE self = nullptr;
-	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&ObjKeyHook), &self);
-	ObjEdit = CreateWindowExW(0, L"EDIT", L"", ES_AUTOHSCROLL, 0, 0, 0, 0, HWND_MESSAGE, nullptr, self, nullptr);
-	if (ObjEdit) SendMessageW(ObjEdit, EM_LIMITTEXT, 120, 0), SetFocus(ObjEdit);
-	ObjHook = SetWindowsHookExW(WH_KEYBOARD_LL, ObjKeyHook, self, 0);
-	if (!ObjEdit || !ObjHook) Say(true, "grailon: the objectives' text box could not start (edit %d, hook %d)", ObjEdit != nullptr, ObjHook != nullptr);
-	MSG message {};
-	while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-		if (message.message == ObjMsgQuit) break;
-		if (message.message == ObjMsgClear) {
-			if (ObjEdit) SetWindowTextW(ObjEdit, L"");
-			continue;
-		}
-		if (message.message == ObjMsgLoad) { // another box: its own text, the caret at its end
-			std::wstring text;
-			{
-				std::lock_guard guard(ObjTypedLock);
-				text = TypedTexts[TypeSlot(TypeTarget)];
-			}
-			if (ObjEdit) SetWindowTextW(ObjEdit, text.c_str()), SendMessageW(ObjEdit, EM_SETSEL, text.size(), text.size());
-			continue;
-		}
-		const bool key = message.message == WM_KEYDOWN || message.message == WM_KEYUP || message.message == WM_CHAR;
-		if (message.message == WM_KEYDOWN || message.message == WM_KEYUP) ObjSyncKeyboard();
-		TranslateMessage(&message);
-		DispatchMessageW(&message);
-		if (key && ObjEdit) {
-			// The text after the key (TranslateMessage's WM_CHAR comes next: read again then).
-			wchar_t buffer[256] {};
-			GetWindowTextW(ObjEdit, buffer, static_cast<int>(std::size(buffer)));
-			std::lock_guard guard(ObjTypedLock);
-			auto&           typed = TypedTexts[TypeSlot(TypeTarget)];
-			if (typed != buffer) typed = buffer, ObjTypedChanged = true, TypedNow();
-		}
-	}
-	if (ObjHook) UnhookWindowsHookEx(ObjHook), ObjHook = nullptr;
-	if (ObjEdit) DestroyWindow(ObjEdit), ObjEdit = nullptr;
-	ObjThreadId = 0;
-	return 0;
-}
-
-// The box activated: the thread started once, the keys taken from now on.
+// The box activated (its click): the keys taken from now on, Enter and Esc reported.
 void ObjStartTyping(int target = TypeObjective) {
-	if (!ObjThread) ObjThread = CreateThread(nullptr, 0, ObjInputMain, nullptr, 0, nullptr);
-	std::memset(ObjForwarded, 0, sizeof(ObjForwarded));
-	const bool other = TypeTarget.exchange(target) != target;
-	TypeHitAt        = GetTickCount64();
-	if (other)
-		for (int k = 0; k < 50 && !ObjThreadId; ++k) Sleep(2);
-	if (const DWORD id = ObjThreadId.load()) PostThreadMessageW(id, ObjMsgLoad, 0, 0);
-	ObjTyping = true;
-}
-void ObjStopThread() {
-	ObjTyping = false;
-	if (!ObjThread) return;
-	for (int k = 0; k < 50 && !ObjThreadId; ++k) Sleep(10);
-	if (const DWORD id = ObjThreadId.load()) PostThreadMessageW(id, ObjMsgQuit, 0, 0);
-	WaitForSingleObject(ObjThread, 2000);
-	CloseHandle(ObjThread);
-	ObjThread = nullptr;
+	TypeTarget = target;
+	ObjTyping  = true;
+	Gui::TextInput::Start(std::to_string(target), TypedText(target),
+	                      {
+	                          .changed =
+	                              [target](const std::string& text) {
+		                              {
+			                              std::lock_guard guard(ObjTypedLock);
+			                              TypedTexts[TypeSlot(target)] = Gui::Wide(text);
+		                              }
+		                              ObjTypedChanged = true;
+		                              ObjInputTick();
+	                              },
+	                          .enter = [](const std::string&) { ObjEnter = true, ObjInputTick(); },
+	                          .escape = [] { ObjTyping = false, ObjTypedChanged = true, ObjInputTick(); },
+	                          .away = [](const std::string&) { ObjTyping = false, ObjTypedChanged = true, ObjInputTick(); },
+	                          .keepOnEnter = true,
+	                      },
+	                      120);
 }
 
 // UI thread, each tick: the page follows the typing; Enter adds.
@@ -12279,15 +10499,9 @@ void ObjInputTick() {
 	const int  target = TypeTarget;
 	const bool search = target == TypeSearch;
 	const bool here   = search || (CurrentCategory == SettingsView && (SettingsPage == (target == TypeExclude || target == TypeListName ? 2 : 4) || (target == TypeExclude && VarEditing)));
-	if (ObjTyping && (!ViewOpen() || !here)) ObjTyping = false, ObjTypedChanged = true;
-	// A click anywhere but on the box: the box lets the keys go (the box's own
-	// click comes as its command right after the click).
-	if (const auto click = TypeClickAt.load(); ObjTyping && click && GetTickCount64() - click > 120) {
-		TypeClickAt = 0;
-		if (TypeHitAt.load() < click) ObjTyping = false, ObjTypedChanged = true;
-	}
+	if (ObjTyping && (!ViewOpen() || !here)) StopTyping(), ObjTypedChanged = true;
 	if (ObjEnter.exchange(false) && ObjTyping && target != TypeExclude) {
-		if (target == TypeListName) ObjTyping = false, ObjTypedChanged = true; // the name is done
+		if (target == TypeListName) StopTyping(), ObjTypedChanged = true; // the name is done
 		else Queue(search ? "searchnext" : "objadd");
 	}
 	if (!ObjTypedChanged.exchange(false) || !ViewOpen()) return;
@@ -12300,15 +10514,9 @@ void ObjInputTick() {
 		Queue("exlname"); // the list's name follows, the page with it
 		return;
 	}
-	// The label alone when the runtime can change it, else the page again.
-	namespace W = D2RL::Widgets;
-	W::WidgetHandle panel = W::InvalidHandle, label = W::InvalidHandle;
-	const std::string typed = ObjTypedText();
-	(void)panel, (void)label, (void)typed; // setText left the drawn text unchanged: the page again (its key has the text)
-	ShowView();
+	ShowView(); // the page again (its key has the text)
 }
 
-void __cdecl TypedOnUi(const D2RL::PluginContext*, void*) noexcept { ObjInputTick(); }
 
 void RunCommand(const std::string& command) {
 	// The objectives' box: active on its click, inactive on any other.
@@ -12324,7 +10532,7 @@ void RunCommand(const std::string& command) {
 		ExclDeleteArmed = -1;
 		++Config.version;
 	}
-	if ((command.rfind("menu", 0) == 0 || command.rfind("toggle", 0) == 0 || (command.rfind("obj", 0) == 0 && command != "objadd" && command != "objtype")) && ObjTyping) ObjTyping = false, ObjTypedChanged = true;
+	if ((command.rfind("menu", 0) == 0 || command.rfind("toggle", 0) == 0 || (command.rfind("obj", 0) == 0 && command != "objadd" && command != "objtype")) && ObjTyping) StopTyping(), ObjTypedChanged = true;
 	if (command == "search" || command == "searchnext" || command == "searchprev" || command == "searchclear") {
 		{
 			std::lock_guard guard(Lock);
@@ -12378,7 +10586,7 @@ void RunCommand(const std::string& command) {
 		return;
 	}
 	if (command == "open") {
-		if (ViewOpen() || PreparedView >= 0 || (ErrorPanel != D2RL::Panels::InvalidHandle && IsOpen(ErrorPanel))) CloseView();
+		if (ViewOpen() || PreparedView >= 0 || ErrorPage.IsOpen()) CloseView();
 		else ShowView();
 		return;
 	}
@@ -12389,7 +10597,7 @@ void RunCommand(const std::string& command) {
 	if (command == "settings") { // I Hate TOMLs' Open button: the grail on its settings
 		{
 			std::lock_guard guard(Lock);
-			BarMax          = 0;
+			GridBar.Clear();
 			CurrentCategory = SettingsView;
 			Scroll          = 0;
 		}
@@ -12543,16 +10751,13 @@ void RunCommand(const std::string& command) {
 	// The Loot page's exclusions: a group opened or closed, a group's or an
 	// item's box, a step of the list's scroll bar, another list chosen, the
 	// list cleared (a built-in one: back to its preset).
-	if (command.rfind("exs", 0) == 0 && command.size() > 3) {
-		const int step = std::atoi(command.c_str() + 3);
-		{
-			std::lock_guard guard(Lock);
-			if (step < 0 || step >= ExclSteps) return;
-			LearnBar(step);
-			ExclFirst = StepRow(step, ExclMax, ExclSteps);
+	{
+		std::unique_lock guard(Lock);
+		if (ExclBar.Handle(command)) { // a step of the list's scroll bar
+			guard.unlock();
+			ShowView();
+			return;
 		}
-		ShowView();
-		return;
 	}
 	// The lists: switched on or off, renamed (its name typed in place),
 	// moved, added, deleted, opened in the editor; the editor saved or left.
@@ -12610,7 +10815,7 @@ void RunCommand(const std::string& command) {
 				ExclFirst = 0;
 				ExclOpen.clear();
 				ClearTyped(TypeExclude);
-				if (ObjTyping && TypeTarget == TypeExclude) ObjTyping = false;
+				if (ObjTyping && TypeTarget == TypeExclude) StopTyping();
 			} else {
 				if (command == "exlsave") {
 					auto& off = VarEditing == 1 ? AffixOff : GraphicOff;
@@ -12641,7 +10846,7 @@ void RunCommand(const std::string& command) {
 				OpenDrop        = -1;
 				const int count = static_cast<int>(ExclLists.size());
 				const int armed = std::exchange(ExclDeleteArmed, -1);
-				if (ObjTyping && TypeTarget == TypeListName) ObjTyping = false;
+				if (ObjTyping && TypeTarget == TypeListName) StopTyping();
 				if (on >= 0 && on < count) ExclLists[on].active = !ExclLists[on].active, changed = true;
 				else if (up > 0 && up < count) std::swap(ExclLists[up], ExclLists[up - 1]), changed = true;
 				else if (down >= 0 && down + 1 < count) std::swap(ExclLists[down], ExclLists[down + 1]), changed = true;
@@ -12679,7 +10884,7 @@ void RunCommand(const std::string& command) {
 		{
 			std::lock_guard guard(Lock);
 			ClearTyped(TypeExclude);
-			if (ObjTyping && TypeTarget == TypeExclude) ObjTyping = false;
+			if (ObjTyping && TypeTarget == TypeExclude) StopTyping();
 			ExclFirst = 0;
 		}
 		ShowView();
@@ -12804,7 +11009,7 @@ void RunCommand(const std::string& command) {
 			}
 			if (pick == none && menu == ObjMenu) pick = SettingsView, SettingsPage = 4; // no objective yet: where they are made
 			if (pick == none || (pick == CurrentCategory && (pick < 0 || ViewEth == IsEthMenu(menu)))) return;
-			if (pick < 0) BarMax = 0;
+			if (pick < 0) GridBar.Clear();
 			CurrentCategory = pick;
 			ViewEth         = IsEthMenu(menu);
 			Scroll          = 0;
@@ -12813,11 +11018,8 @@ void RunCommand(const std::string& command) {
 			if (CurrentCategory == SettingsView && (SettingsPage == 2 || VarEditing)) ExclFirst = std::clamp(std::atoi(command.c_str() + 3), 0, ExclMax);
 			else Scroll = std::clamp(std::atoi(command.c_str() + 3), 0, MaxScroll);
 		}
-		else if (command.rfind("step", 0) == 0) {
-			const int step = std::clamp(std::atoi(command.c_str() + 4), 0, ScrollSteps - 1);
-			LearnBar(step);
-			Scroll = StepRow(step, MaxScroll);
-		}
+		else if (GridBar.Handle(command)) {} // a step of the view's scroll bar: Scroll set
+
 		else if (command.rfind("stats", 0) == 0) {
 			StatsPage       = std::clamp(std::atoi(command.c_str() + 5), 0, KindCountAll);
 			if (!StatsPageShown(StatsPage)) StatsPage = 0;
@@ -12864,7 +11066,7 @@ void __cdecl ScrollFrame(const D2RL::PluginContext*, void*) noexcept {
 // Opens the scroll panel for one row down (or up) from Scroll, its first frame
 // showing. False when it cannot (the step then just jumps).
 bool AnimateScroll(bool down) {
-	if (ShownView < 0 || !WidgetApi || !Config.scrollAnimations || ScrollPanel == D2RL::Panels::InvalidHandle) return false;
+	if (ShownView < 0 || !WidgetApi || !Config.scrollAnimations || !ScrollPanel.Ready()) return false;
 	std::string layout;
 	{
 		std::lock_guard guard(Lock);
@@ -12872,23 +11074,13 @@ bool AnimateScroll(bool down) {
 		layout = ScrollLayout(down);
 	}
 	if (layout.empty()) return false;
-	CloseScrollPanel();
-	if (ScrollLoaded) {
-		const D2RL::Widgets::UiAction unload { .structSize = D2RL::Widgets::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = "grail-on/Scroll" };
-		(void)WidgetApi->dispatchUiAction(Context, &unload);
-	}
-	if (ScrollLayoutHandle != D2RL::Resources::InvalidHandle) (void)ResourceApi->unregisterResource(Context, ScrollLayoutHandle);
-	ScrollLayoutHandle = D2RL::Resources::InvalidHandle;
-	if (!RegisterResource("data/global/ui/layouts/grail-on/Scrollhd.json", layout, &ScrollLayoutHandle)) return false;
 	Trace("scroll frames open", down ? 1 : -1);
-	if (PanelApi->openPanel(Context, ScrollPanel) != D2RL::Panels::Result::Success) return false;
+	if (!ScrollPanel.Show(layout)) return false;
 	Trace("scroll frames opened");
-	ScrollLoaded = true;
-	D2RL::Widgets::WidgetHandle panel {}, widget {};
+	D2RL::Widgets::WidgetHandle widget {};
 	ScrollAnimation             anim { .running = true, .down = down };
-	if (WidgetApi->findPanel(Context, "grail-on/Scroll", &panel) == D2RL::Widgets::Result::Success)
-		for (int k = 1; k < ScrollFrames; ++k)
-			if (WidgetApi->findWidget(Context, panel, ("Frame" + std::to_string(k)).c_str(), &widget) == D2RL::Widgets::Result::Success) anim.frames.push_back(widget);
+	for (int k = 1; k < ScrollFrames; ++k)
+		if (ScrollPanel.Find("Frame" + std::to_string(k), &widget)) anim.frames.push_back(widget);
 	if (anim.frames.empty()) {
 		CloseScrollPanel();
 		return false;
@@ -12952,81 +11144,17 @@ void RunScroll(int rows, bool afterHold) {
 }
 
 // ---- mouse wheel and scroll bar dragging ----
-// No plugin service reports the wheel or the mouse moving, so the game window
-// is subclassed: while the view is open, the wheel over the left part of the
-// screen scrolls it, and the left button held on the scroll bar drags it.
+// D2R GUI's WindowHook: while the view is open, the wheel over the left part
+// of the screen scrolls it, and the left button held on a scroll bar drags it.
+// The plugin's own mouse handling (middle click, a stored item picked up)
+// sees every message first.
 
-WNDPROC GameProc {};
-
-// Where the panel is in the window: window = panel * scale + offset. The game
-// draws the UI at the window's height / 2160; the panel hangs from
-// the vanilla $LeftPanelAnchor place (x 0, y 39.7% of the height) at x 236, y -856. A click on a
-// scroll step puts the offset where the click was.
-std::atomic<bool>   BarLearned {};
-std::atomic<double> BarOffsetX {}, BarOffsetY {};
-std::atomic<int>    DragLast { -1 };
-bool                Dragging {}; // window thread
-
-double UiScale() {
-	RECT client {};
-	return GameWindow && GetClientRect(GameWindow, &client) && client.bottom > 0 ? client.bottom / 2160.0 : 0;
-}
-
-std::pair<double, double> PanelOffset() {
-	if (BarLearned) return { BarOffsetX, BarOffsetY };
-	RECT client {};
-	if (!GameWindow || !GetClientRect(GameWindow, &client)) return {};
-	const double scale = client.bottom / 2160.0;
-	return { WindowX() * scale, client.bottom * 0.397 + PanelY * scale };
-}
-
-// UI thread, on a click on step `step`: the cursor is on that step.
-void LearnBar(int step) {
-	POINT        cursor {};
-	const double scale = UiScale();
-	if (!scale || !GetCursorPos(&cursor) || !ScreenToClient(GameWindow, &cursor)) return;
-	BarOffsetX = cursor.x - (BarLeft + BarWidth / 2.0) * scale;
-	BarOffsetY = cursor.y - (BarY + (step + 0.5) * StepHeight) * scale;
-	if (!BarLearned.exchange(true)) Say(false, "grailon: scroll bar found at %ld, %ld in the window", cursor.x, cursor.y);
-}
-
-int StepRow(int step, int maxScroll, int steps) { return steps > 1 ? (maxScroll * step + (steps - 1) / 2) / (steps - 1) : 0; }
-
-// The step under a window point, or -1 when the point is off the bar (with
-// `loose`, any height counts: a drag goes on above and below the bar).
-int StepAt(POINT point, bool loose) {
-	const double scale = UiScale();
-	if (!scale) return -1;
-	const auto [ox, oy] = PanelOffset();
-	const int    steps = BarSteps;
-	const double x = (point.x - ox) / scale, y = (point.y - oy) / scale - BarY;
-	if (!loose && (x < BarLeft - 12 || x > BarLeft + BarWidth + 12 || y < 0 || y >= steps * StepHeight)) return -1;
-	return std::clamp(static_cast<int>(std::floor(y / StepHeight)), 0, steps - 1);
-}
-
-void DragTo(POINT point) {
-	const int max  = BarMax;
-	const int step = StepAt(point, true);
-	if (max <= 0 || step < 0) return;
-	const int row = StepRow(step, max, BarSteps);
-	if (DragLast.exchange(row) != row) Queue("row" + std::to_string(row));
-}
-
-LRESULT CALLBACK WheelProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+bool WindowMessage(UINT message, WPARAM wParam, LPARAM) {
 	// Middle click on a hovered grail item: shown in the grail.
 	if (message == WM_MBUTTONDOWN && Config.middleClick && ListsReady && !ScrollTestOpen) {
 		MiddleSeenAt = GetTickCount64(); // seen here: the poll leaves it
-		if (MiddleClickNow("window")) return 0;
+		if (MiddleClickNow("window")) return true;
 	}
-	if (message == WM_MOUSEWHEEL && ViewIsOpen) {
-		POINT point { static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) };
-		RECT  client {};
-		if (ScreenToClient(window, &point) && GetClientRect(window, &client) && point.x < client.right * 55 / 100) {
-			Queue(static_cast<short>(HIWORD(wParam)) > 0 ? "up" : "down");
-			return 0;
-		}
-	}
-	const POINT point { static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) };
 	// A press with an item in hand is a new click, never the one that took it
 	// out: the item may go back in.
 	if (message == WM_LBUTTONDOWN && ViewIsOpen && CursorHasItem()) TakenNow = 0;
@@ -13046,43 +11174,18 @@ LRESULT CALLBACK WheelProc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
 		}
 		if (refresh) Queue("refresh");
 	}
-	if (message == WM_LBUTTONDOWN && ViewIsOpen && BarMax > 0 && StepAt(point, false) >= 0) {
-		Dragging = true;
-		DragLast = -1;
-	} else if (message == WM_MOUSEMOVE && Dragging) {
-		if ((wParam & MK_LBUTTON) && ViewIsOpen) DragTo(point);
-		else Dragging = false;
-	} else if (message == WM_LBUTTONUP) Dragging = false;
-	if ((message == WM_LBUTTONUP || message == WM_RBUTTONUP) && ObjTyping) TypeClickAt = GetTickCount64();
-	return CallWindowProcW(GameProc, window, message, wParam, lParam);
+	return false;
 }
 
-BOOL CALLBACK FindWindowOfGame(HWND window, LPARAM found) {
-	DWORD process = 0;
-	GetWindowThreadProcessId(window, &process);
-	if (process != GetCurrentProcessId() || !IsWindowVisible(window) || GetWindow(window, GW_OWNER)) return TRUE;
-	RECT rect {}, best {};
-	auto* result = reinterpret_cast<HWND*>(found);
-	GetWindowRect(window, &rect);
-	if (*result) GetWindowRect(*result, &best);
-	if (!*result || (rect.right - rect.left) * (rect.bottom - rect.top) > (best.right - best.left) * (best.bottom - best.top)) *result = window;
-	return TRUE;
-}
-
+// UI thread, once the view first opens in a game.
 void HookWheel() {
-	if (GameWindow) return;
-	HWND window {};
-	EnumWindows(FindWindowOfGame, reinterpret_cast<LPARAM>(&window));
-	if (!window) return;
-	GameProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(WheelProc)));
-	if (GameProc) GameWindow = window;
-	else Problem(false, "grailon: could not watch the mouse wheel (error %lu); use the arrows", GetLastError());
-}
-
-void UnhookWheel() {
-	if (GameWindow && reinterpret_cast<WNDPROC>(GetWindowLongPtrW(GameWindow, GWLP_WNDPROC)) == WheelProc)
-		SetWindowLongPtrW(GameWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(GameProc));
-	GameWindow = {};
+	Gui::WindowHook::Start({
+	    .active     = [] { return ViewIsOpen.load(); },
+	    .wheel      = [](int notches) { for (int k = 0; k < std::abs(notches); ++k) Queue(notches > 0 ? "down" : "up"); },
+	    .wheelRight = 0.55,
+	    .extra      = WindowMessage,
+	});
+	GridBar.Attach();
 }
 
 // ---- ticks, buttons and console ----
@@ -13117,248 +11220,36 @@ void __cdecl RunPending(const D2RL::PluginContext*, void*) noexcept {
 // Registers every text the views use, replacing the previous ones.
 bool RegisterStrings() {
 	GrailHeader = Tr("Currently in Grail");
-	if (StringsHandle != D2RL::Resources::InvalidHandle) (void)ResourceApi->unregisterResource(Context, StringsHandle);
-	StringsHandle = D2RL::Resources::InvalidHandle;
-	if (RegisterResource(StringsPath, StringsJson(), &StringsHandle)) return true;
-	StringsHandle = D2RL::Resources::InvalidHandle;
+	static Gui::StringTable strings("view"); // data/local/lng/strings/d2rloader/grail-on/view.json
+	if (strings.Register(StringsTable())) return true;
 	Say(true, "grailon: could not register the texts");
 	return false;
 }
 
-// One empty slot sprite per tile size the lists need.
-// The rune stones, one sprite per cell of the Chronicle's sheet, once.
+// The rune stones, one sprite per cell of the Chronicle's sheet (grune<k>), and the blank stone (grune-blank), once.
 void RegisterRunes() {
-	const std::string& file = ChronicleRunesFile;
-	if (GenericRunes || file.size() < 0x28 || file.compare(0, 4, "SpA1")) return;
-	const auto u32 = [&](std::size_t at) { std::uint32_t v; std::memcpy(&v, file.data() + at, 4); return v; };
-	const int  width = static_cast<int>(u32(8)), height = static_cast<int>(u32(12));
-	if (width < Cell || height < Cell || file.size() < 0x28 + static_cast<std::size_t>(width) * height * 4) return;
-	const int columns = width / Cell, count = columns * (height / Cell);
-	int       made    = 0;
-	for (int k = 0; k < count; ++k) {
-		Picture cell { Cell, Cell, std::vector<unsigned char>(static_cast<std::size_t>(Cell) * Cell * 4) };
-		bool    empty = true;
-		for (int y = 0; y < Cell; ++y) {
-			std::memcpy(cell.at(0, y), file.data() + 0x28 + (static_cast<std::size_t>((k / columns) * Cell + y) * width + (k % columns) * Cell) * 4, static_cast<std::size_t>(Cell) * 4);
-			for (int x = 0; x < Cell && empty; ++x) empty = cell.at(x, y)[3] == 0;
-		}
-		if (empty || !RegisterSprite("grune" + std::to_string(k), { cell })) break;
-		made = k + 1;
-	}
-	// The blank stone: each pixel the brighter quarter's edge of all the
-	// stones' (the glyphs are dark and never in the same place).
-	if (made >= 8) {
-		Picture blank { Cell, Cell, std::vector<unsigned char>(static_cast<std::size_t>(Cell) * Cell * 4) };
-		std::vector<unsigned char> values(made);
-		for (int y = 0; y < Cell; ++y)
-			for (int x = 0; x < Cell; ++x)
-				for (int c = 0; c < 4; ++c) {
-					for (int k = 0; k < made; ++k) values[k] = static_cast<unsigned char>(file[0x28 + (static_cast<std::size_t>((k / columns) * Cell + y) * width + (k % columns) * Cell + x) * 4 + c]);
-					std::nth_element(values.begin(), values.begin() + made * 3 / 4, values.end());
-					blank.at(x, y)[c] = values[made * 3 / 4];
-				}
-		if (!RegisterSprite("grune-blank", { blank })) made = 0;
-	}
-	GenericRunes = made;
-}
-
-void RegisterSlots() {
-	static bool peeks = false;
-	if (!peeks) {
-		peeks = true;
-		for (int width = 1; width <= 2; ++width)
-			for (int halves = 1; halves <= 8; ++halves)
-				if (!RegisterSprite("peek" + std::to_string(width) + "x" + std::to_string(halves), { PeekBox(width * Cell, halves * Cell / 2) })) Say(true, "grailon: could not register a cut slot sprite");
-		Picture clear { 4, 4, std::vector<unsigned char>(64) };
-		if (!RegisterSprite("blank", { clear, clear })) Say(true, "grailon: could not register the blank button");
-	}
-	static std::set<std::pair<int, int>> done;
-	for (const auto& entry : Uniques) {
-		const int width = std::clamp(entry.width, 1, 4), height = std::clamp(entry.height, 1, 4);
-		if (!done.insert({ width, height }).second) continue;
-		if (!RegisterSprite("slot" + std::to_string(width) + "x" + std::to_string(height), { Slot(width * Cell, height * Cell) })) Say(true, "grailon: could not register a slot sprite");
-	}
-	// The search's veils, one per tile size (any size a tile can have).
-	static bool veils = false;
-	if (!veils) {
-		veils = true;
-		for (int width = 1; width <= 4; ++width)
-			for (int height = 1; height <= 4; ++height) {
-				Picture veil { width * Cell, height * Cell, std::vector<unsigned char>(static_cast<std::size_t>(width) * Cell * height * Cell * 4) };
-				for (std::size_t p = 3; p < veil.rgba.size(); p += 4) veil.rgba[p] = 175;
-				if (!RegisterSprite("dim" + std::to_string(width) + "x" + std::to_string(height), { veil })) Say(true, "grailon: could not register a search veil");
-			}
-	}
+	if (GenericRunes) return;
+	GenericRunes = Gui::ItemArt::RegisterRuneStones(ChronicleRunesFile, Cell, "grune");
 }
 
 // The grail button on the inventory's left edge, in the same stone and gold
 // mold as Charm Inventory's and Automatic Materials Deposit's (3, 813), by
 // default under the deposit's, where the settings put it.
-D2RL::Resources::RegistrationHandle ButtonLayout = D2RL::Resources::InvalidHandle;
-std::atomic<bool>                   ButtonReload {}; // moved: the inventory loads its layout again once it is closed
-void RegisterInventoryButton() {
-	char button[1024] {};
-	std::snprintf(button, sizeof(button),
-	              R"({"type": "ImageWidget", "name": "grail-on/InventoryButton", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "filename": "d2rloader/grail-on/mold"}, "children": [)"
-	              R"({"type": "ButtonWidget", "name": "grail-on/GrailButton", "fields": {"rect": {"x": 1, "y": 39}, "filename": "d2rloader/grail-on/grailbutton", "normalFrame": 0, "pressedFrame": 1, "hoveredFrame": 3, )"
-	              R"("pressLabelOffset": {"x": 0, "y": 2}, "tooltipString": "@grail-on:GrailTip", "sound": "cursor_menu_select_hd", "onClickMessage": %s}}]})",
-	              Config.buttonX, Config.buttonY, MoldWidth, MoldHeight, Command("open").c_str());
-	if (ButtonLayout != D2RL::Resources::InvalidHandle) (void)ResourceApi->unregisterResource(Context, ButtonLayout);
-	ButtonLayout = D2RL::Resources::InvalidHandle;
-	if (!RegisterResource("data/global/ui/layouts/grail-on/InventoryButtonhd.json", button, &ButtonLayout)) ButtonLayout = D2RL::Resources::InvalidHandle;
-}
-
-constexpr const char* InventoryPanels[] { "PlayerInventoryExpansionLayout", "PlayerInventoryOriginalLayout", "PlayerInventoryExpansionLayoutHD", "PlayerInventoryOriginalLayoutHD" };
-
-// UI thread. The settings moved the button: at once where D2RLoader can move
-// a widget (setWidgetRect), else in the game's own widget: the next time the
-// inventory's grid is drawn (HookGridDraw), the mold is found in the
-// inventory's widget tree (its size, its place, its one child at 1, 39) and
-// its local rect (+0x70, read at every draw) is written. The layout is
-// registered again too, for the next time the game loads it.
-std::atomic<bool> ButtonMoveWanted {};
-int               ButtonShownX = 0, ButtonShownY = 0; // where the game's widget is (the layout's place when it was loaded); UI thread
-bool              ButtonShownKnown = false;
-void MoveInventoryButton() {
-	RegisterInventoryButton();
-	namespace W = D2RL::Widgets;
-	bool moved = false;
-	if (WidgetApi && D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceSetWidgetRectFieldEnd) && WidgetApi->setWidgetRect)
-		for (const char* name : InventoryPanels) {
-			W::WidgetHandle panel {}, widget {};
-			if (WidgetApi->findPanel(Context, name, &panel) != W::Result::Success || WidgetApi->findWidget(Context, panel, "grail-on/InventoryButton", &widget) != W::Result::Success) continue;
-			const W::Rect rect { Config.buttonX, Config.buttonY, MoldWidth, MoldHeight };
-			if (WidgetApi->setWidgetRect(Context, widget, &rect) == W::Result::Success) moved = true;
-		}
-	if (!moved) ButtonMoveWanted = true;
-}
-
-// UI thread (a grid's draw). The mold in the widget tree under `root`, at
-// (x, y): a widget of the mold's size with one child at 1, 39.
-constexpr std::size_t WidgetParent = 0x30, WidgetChildren = 0x58, WidgetChildCount = 0x60, WidgetFills = 0x52, WidgetRect = 0x70;
-std::uint8_t* FindMold(std::uint8_t* widget, int x, int y, int depth) {
-	if (!widget || depth > 8) return nullptr;
-	const auto* rect = reinterpret_cast<const std::int32_t*>(widget + WidgetRect);
-	auto**      children = *reinterpret_cast<std::uint8_t***>(widget + WidgetChildren);
-	const auto  count    = *reinterpret_cast<const std::uint64_t*>(widget + WidgetChildCount);
-	if (!children || count > 512) return nullptr;
-	if (!widget[WidgetFills] && rect[0] == x && rect[1] == y && rect[2] == MoldWidth && rect[3] == MoldHeight && count == 1 && children[0]) {
-		const auto* inner = reinterpret_cast<const std::int32_t*>(children[0] + WidgetRect);
-		if (inner[0] == 1 && inner[1] == 39) return widget;
-	}
-	for (std::uint64_t i = 0; i < count; ++i)
-		if (auto* found = FindMold(children[i], x, y, depth + 1)) return found;
-	return nullptr;
-}
-void MoveMoldFrom(void* grid) {
-	if (!ButtonMoveWanted) return;
-	auto* root = static_cast<std::uint8_t*>(grid);
-	for (int up = 0; up < 12; ++up) {
-		auto* parent = *reinterpret_cast<std::uint8_t**>(root + WidgetParent);
-		if (!parent) break;
-		root = parent;
-	}
-	// Already at the new place (the layout was loaded again): nothing to do.
-	if (FindMold(root, Config.buttonX, Config.buttonY, 0)) {
-		ButtonShownX = Config.buttonX, ButtonShownY = Config.buttonY, ButtonShownKnown = true;
-		ButtonMoveWanted = false;
-		return;
-	}
-	if (!ButtonShownKnown) return;
-	auto* mold = FindMold(root, ButtonShownX, ButtonShownY, 0);
-	if (!mold) return; // not this grid's panel
-	auto* rect = reinterpret_cast<std::int32_t*>(mold + WidgetRect);
-	rect[0] = Config.buttonX, rect[1] = Config.buttonY;
-	Say(false, "grailon: grail button moved from %d,%d to %d,%d", ButtonShownX, ButtonShownY, Config.buttonX, Config.buttonY);
-	ButtonShownX = Config.buttonX, ButtonShownY = Config.buttonY;
-	ButtonMoveWanted = false;
-}
-
-// UI thread. A moved button's inventory layout, unloaded while the inventory
-// is closed: when D2RLoader tells whether it is shown, else once out of a game.
-void ReloadInventoryButton() {
-	if (!ButtonReload || !WidgetApi) return;
-	namespace W = D2RL::Widgets;
-	const bool stateKnown = D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceGetWidgetStateFieldEnd) && WidgetApi->getWidgetState;
-	if (!stateKnown && LocalPlayer.load()) return;
-	std::vector<const char*> loaded;
-	for (const char* name : InventoryPanels) {
-		W::WidgetHandle panel {};
-		if (WidgetApi->findPanel(Context, name, &panel) != W::Result::Success) continue;
-		W::State state {};
-		if (stateKnown && (WidgetApi->getWidgetState(Context, panel, &state) != W::Result::Success || state.visible)) return; // open: after it closes
-		loaded.push_back(name);
-	}
-	ButtonReload = false;
-	for (const char* name : loaded) {
-		const W::UiAction unload { .structSize = W::UiActionSize, .flags = 0, .target = "PanelManager", .command = "UnloadPanel", .text = name };
-		const auto        result = WidgetApi->dispatchUiAction(Context, &unload);
-		Say(false, "grailon: the inventory (%s) loads again with the grail button at %d, %d (result %u)", name, Config.buttonX, Config.buttonY, static_cast<unsigned>(result));
-	}
-}
-
-// The inventory button, looked up each time the inventory opens: whether the
-// game loaded it, where, and whether it is shown (logged once per change; shown
-// again when something hid it).
-void WatchInventoryButton() {
-	if (!WidgetApi) return;
-	namespace W = D2RL::Widgets;
-	static std::string told;
-	W::WidgetHandle    panel {};
-	const char*        panelName = nullptr;
-	for (const char* name : InventoryPanels)
-		if (WidgetApi->findPanel(Context, name, &panel) == W::Result::Success) {
-			panelName = name;
-			break;
-		}
-	if (!panelName) return;
-	if (D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceGetWidgetStateFieldEnd)) {
-		W::State state {};
-		if (WidgetApi->getWidgetState(Context, panel, &state) != W::Result::Success || !state.visible) return;
-	}
-	std::string report = std::string("inventory button in ") + panelName + ":";
-	for (const char* name : { "grail-on/InventoryButton", "grail-on/GrailButton", "bulk-currency-deposit/inventory-button" }) {
-		W::WidgetHandle widget {};
-		W::Result       found = WidgetApi->findWidget(Context, panel, name, &widget);
-		W::WidgetHandle inner {};
-		if (found != W::Result::Success && !std::strcmp(name, "grail-on/GrailButton")) {
-			W::WidgetHandle root {};
-			if (WidgetApi->findWidget(Context, panel, "grail-on/InventoryButton", &root) == W::Result::Success
-			    && WidgetApi->findWidget(Context, root, name, &inner) == W::Result::Success)
-				widget = inner, found = W::Result::Success;
-		}
-		char line[256];
-		if (found != W::Result::Success) {
-			std::snprintf(line, sizeof(line), " %s not found (%u);", name, static_cast<unsigned>(found));
-			report += line;
-			continue;
-		}
-		W::Rect rect {};
-		(void)WidgetApi->getWidgetRect(Context, widget, &rect);
-		W::State state { true, true, false };
-		const bool stateKnown = D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceGetWidgetStateFieldEnd) && WidgetApi->getWidgetState(Context, widget, &state) == W::Result::Success;
-		W::ScreenRect screen {};
-		const bool    screenKnown = D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceGetWidgetScreenRectFieldEnd) && WidgetApi->getWidgetScreenRect(Context, widget, &screen) == W::Result::Success;
-		std::snprintf(line, sizeof(line), " %s at %d,%d %dx%d, %s, screen %s%.0f,%.0f %.0fx%.0f;", name, rect.x, rect.y, rect.width, rect.height,
-		              stateKnown ? (state.visible ? "visible" : "HIDDEN") : "visibility unknown", screenKnown ? "" : "unknown ", screen.x, screen.y, screen.width, screen.height);
-		report += line;
-		if (stateKnown && !state.visible && !std::strncmp(name, "grail-on/", 9)) (void)WidgetApi->setWidgetVisible(Context, widget, true);
-	}
-	if (report != told) Say(false, "grailon: %s", report.c_str());
-	told = report;
-}
+Gui::InventoryButton GrailInvButton;
+void MoveInventoryButton() { GrailInvButton.Move(Config.buttonX, Config.buttonY); }
+void MoveMoldFrom(void* grid) { GrailInvButton.MoveFromGrid(grid); }
 
 void RemoteSweep();
 void __cdecl UiTick(const D2RL::PluginContext* context, void*) noexcept {
 	UiThread = GetCurrentThreadId();
 	UnmuteSoundsWhenDue();
-	ReloadInventoryButton();
-	WatchInventoryButton();
+	GrailInvButton.Reload(LocalPlayer.load() != D2RL::PlayerHandle {});
+	GrailInvButton.Watch({ "bulk-currency-deposit/inventory-button" });
 	D2RL::PlayerHandle player {};
 	LocalPlayer = Inventory->getLocalPlayer(context, &player) == D2RL::Inventory::Result::Success ? player : D2RL::PlayerHandle {};
 	// Open over the stash: the stash closing (walking away, its close button)
 	// closes the grail too, as it does the cube.
-	if (const bool closing = StashClosing.exchange(false); ShownView >= 0 && IsOverView(ShownView) && PreparedView < 0 && IsOpen(Views[ShownView].panel) && (closing || !StashShown())) {
+	if (const bool closing = StashClosing.exchange(false); ShownView >= 0 && IsOverView(ShownView) && PreparedView < 0 && Views.IsOpen(ShownView) && (closing || !StashShown())) {
 		static int told = 0;
 		if (told++ < 3) Say(false, "grailon: the stash closed (%s): the grail over it closes", closing ? "message" : "panel");
 		CloseView();
@@ -13426,12 +11317,6 @@ void __cdecl UiTick(const D2RL::PluginContext* context, void*) noexcept {
 		RegisterRunes();
 		// The grail button stays the icon alone in the mold: the Advanced Stats
 		// button under it drew a second square frame.
-		if (static bool settingsDone = false; !settingsDone && SettingsArtRead) {
-			settingsDone = true;
-			RegisterSettingsArt();
-		}
-		RegisterSlots();
-		RegisterGlows();
 		(void)RegisterStrings();
 		if (ViewAfterStrings.exchange(false)) ShowView();
 	}
@@ -13456,7 +11341,7 @@ void __cdecl UiTick(const D2RL::PluginContext* context, void*) noexcept {
 	}
 	heldBefore = heldNow;
 	RunPending(context, nullptr);
-	if (!ViewIsOpen && LifeTextHidden) HideLifeText(false);
+	if (!ViewIsOpen) HideLifeText(false); // nothing when it is shown
 	// The scroll panel only lives through a scroll: an open one blocks the game
 	// world (chests, NPCs), so it never stays once the frames are done and no
 	// view is on its way (or the view was closed with Escape).
@@ -13522,11 +11407,12 @@ void Queue(const std::string& command) {
 	}
 }
 
-auto __cdecl OnUiMessage(const D2RL::PluginContext*, const Events::UiMessageEvent* event, void*) noexcept -> Events::UiMessageAction {
-	// The stash closing (its panel, or its close message): a grail over it closes at once.
-	if (event && event->target && event->command
-	    && ((!std::strcmp(event->target, "BankPanelMessage") && !std::strcmp(event->command, "Close"))
-	        || (!std::strcmp(event->target, "PanelManager") && event->text && !std::strncmp(event->text, "Bank", 4) && (!std::strcmp(event->command, "ClosePanel") || !std::strcmp(event->command, "UnloadPanel")))))
+// Any thread: every UI message. The stash closing (its panel, or its close
+// message): a grail over it closes at once.
+void WatchUiMessage(const Events::UiMessageEvent& event) {
+	if (event.target && event.command
+	    && ((!std::strcmp(event.target, "BankPanelMessage") && !std::strcmp(event.command, "Close"))
+	        || (!std::strcmp(event.target, "PanelManager") && event.text && !std::strncmp(event.text, "Bank", 4) && (!std::strcmp(event.command, "ClosePanel") || !std::strcmp(event.command, "UnloadPanel")))))
 	{
 		// At once, with the game's own panels (the next UI tick comes later).
 		if (ShownView >= 0 && IsOverView(ShownView) && PreparedView < 0 && GetCurrentThreadId() == UiThread) {
@@ -13535,18 +11421,6 @@ auto __cdecl OnUiMessage(const D2RL::PluginContext*, const Events::UiMessageEven
 			CloseView();
 		} else StashClosing = true;
 	}
-	if (!event || !event->text) return Events::UiMessageAction::Continue;
-	const std::size_t prefix = std::strlen(CommandPrefix);
-	if (std::strncmp(event->text, CommandPrefix, prefix) != 0) return Events::UiMessageAction::Continue;
-	// D2R reports a button's message twice, about a millisecond apart.
-	static std::string last;
-	static ULONGLONG   lastMs {};
-	const ULONGLONG    now = GetTickCount64();
-	if (last == event->text && now - lastMs < 150) return Events::UiMessageAction::Consume;
-	last   = event->text;
-	lastMs = now;
-	Queue(event->text + prefix);
-	return Events::UiMessageAction::Consume;
 }
 
 // The "Open/close the grail" action of the game's Controls menu (unbound by
@@ -13603,18 +11477,11 @@ D2RL::ConsoleCommandResult __cdecl OnCommand(D2R::Game::Client*, const D2RL::Con
 // Expanded Stash Plus's stash frame ships inside the plugin (PNGs compiled in,
 // full and low-end size), decoded at load and registered as the panel sprite.
 
-bool DecodePng(const unsigned char* begin, const unsigned char* end, Picture& out) {
-	int width = 0, height = 0;
-	if (!PngLite::Decode(begin, static_cast<std::size_t>(end - begin), width, height, out.rgba)) return false;
-	out.width = width, out.height = height;
-	return true;
-}
-
 bool RegisterPanelArt() {
 	Picture full, lowEnd;
-	if (!DecodePng(grailon_panel_png, grailon_panel_png_end, full) || !DecodePng(grailon_panel_lowend_png, grailon_panel_lowend_png_end, lowEnd)) return false;
+	if (!Gui::DecodePng(grailon_panel_png, grailon_panel_png_end, full) || !Gui::DecodePng(grailon_panel_lowend_png, grailon_panel_lowend_png_end, lowEnd)) return false;
 	const std::string path = "data/hd/global/ui/d2rloader/grail-on/panel";
-	return RegisterResource(path + ".sprite", SpriteFile({ full })) && RegisterResource(path + ".lowend.sprite", SpriteFile({ lowEnd }));
+	return RegisterResource(path + ".sprite", Gui::WriteSprite({ full })) && RegisterResource(path + ".lowend.sprite", Gui::WriteSprite({ lowEnd }));
 }
 
 // ---- scroll test ----
@@ -13630,8 +11497,7 @@ bool RegisterPanelArt() {
 // widget), 3 the grid alone in the clip widget, 4 the grid alone in the panel
 // (like the views). Which one opens tells which widget a plain panel refuses.
 constexpr int                    ScrollTestVariants = 5;
-D2RL::Panels::RegistrationHandle ScrollTestPanels[ScrollTestVariants] { D2RL::Panels::InvalidHandle, D2RL::Panels::InvalidHandle, D2RL::Panels::InvalidHandle,
-	                                                                     D2RL::Panels::InvalidHandle, D2RL::Panels::InvalidHandle };
+Gui::SinglePanel                 ScrollTestPanels[ScrollTestVariants];
 int                              ScrollTestVariant {};
 int                              ScrollTestTries {}; // ticks left to open it
 #define ScrollTestPanel ScrollTestPanels[ScrollTestVariant]
@@ -13640,58 +11506,35 @@ constexpr int ScrollTestRows = 48;
 std::string ScrollTestName(int variant) { return "ScrollTest" + std::to_string(variant); }
 
 std::string ScrollTestLayout(int variant) {
-	char head[3072] {};
-	std::snprintf(head, sizeof(head),
-	              R"({"type": "Panel", "name": "grail-on/ScrollTest%d", "fields": {"priority": 10, "rect": {"x": 236, "y": -856, "width": %d, "height": %d}, "anchor": {"x": 0.0, "y": 0.397}}, "children": [)"
-	              R"({"type": "ClickCatcherWidget", "name": "PanelClickCatcher", "fields": {"rect": {"x": 0, "y": 0, "width": %d, "height": %d}}})"
-	              R"(, {"type": "ImageWidget", "name": "Background", "fields": {"rect": {"x": 0, "y": 0}, "filename": "d2rloader\\grail-on\\panel"}})"
-	              R"(, {"type": "ImageWidget", "name": "Cover", "fields": {"rect": {"x": 57, "y": 175}, "filename": "d2rloader\\grail-on\\cover"}})"
-	              R"(, {"type": "TextBoxWidget", "name": "Title", "fields": {"rect": {"x": 416, "y": 50, "width": 855, "height": 60}, "style": "$StyleTitleBlock", "text": "@grail-on:ScrollTest"}})"
-	              R"(, {"type": "ButtonWidget", "name": "CloseButton", "fields": {"rect": {"x": 1600, "y": 9}, "filename": "PANEL\\closebtn_4x", "hoveredFrame": 3, "tooltipString": "@d2r:strClose", "sound": "cursor_close_window_hd", "onClickMessage": %s}})"
-	              ,
-	              variant, PanelWidth, PanelHeight, PanelWidth, PanelHeight, Command("scrolltest").c_str());
-	std::string layout = head;
-	const char* grid   = R"({"type": "InventoryGridWidget", "name": "grail-on/Grid", "fields": {"rect": {"x": %d, "y": %d}, "cellCount": {"x": 16, "y": 16}, "cellSize": "$ItemCellSize", "gemSocketFilename": "PANEL\\gemsocket"}})";
-	char        text[512] {};
-	if (variant == 4) {
-		std::snprintf(text, sizeof(text), grid, GridLeft, GridTop);
-		return layout + ", " + text + "]}";
-	}
-	std::snprintf(text, sizeof(text), R"(, {"type": "Widget", "name": "Viewport", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}}, "children": [)", GridLeft, GridTop,
-	              PageSize * Cell, PageSize * Cell);
-	layout += text;
-	if (variant == 3) {
-		std::snprintf(text, sizeof(text), grid, 0, 0);
-		return layout + text + "]}]}";
-	}
-	if (variant == 0)
-		layout += R"({"type": "ImageWidget", "name": "ScrollBarBackground", "fields": {"rect": {"x": -20, "y": 0}, "anchor": {"x": 1.0}, "filename": "PauseMenu\\VerticalScroll"}, "children": [)"
-		          R"({"type": "ScrollControllerWidget", "name": "ScrollController", "fields": {"rect": {"x": -31, "y": 29, "width": 26, "height": 1208}, "anchor": {"x": 1.0}, "upArrowFilepath": "FrontEnd\\HD\\Final\\FrontEnd_ScrollUpBtn", "downArrowFilepath": "FrontEnd\\HD\\Final\\FrontEnd_ScrollDownBtn", "barFilepath": "PauseMenu\\VerticalIndicator", "viewName": "ScrollView", "wheelScrollSound": "cursor_scroll_hd", "buttonScrollSound": "cursor_scroll_hd"}}]}, )";
-	if (variant == 0) layout += R"({"type": "ScrollViewWidget", "name": "ScrollView", "fields": {"fitToParent": true, "scrollControllerName": "ScrollController"}, "children": [)";
-	if (variant == 1) layout += R"({"type": "ScrollViewWidget", "name": "ScrollView", "fields": {"fitToParent": true}, "children": [)";
-	char table[256] {};
-	std::snprintf(table, sizeof(table), R"({"type": "TableWidget", "name": "Rows", "fields": {"columns": [{"width": %d, "alignment": {"h": "left", "v": "top"}}], "rowHeight": %d}, "children": [)",
-	              PageSize * Cell - 60, Cell);
-	layout += table;
+	std::string layout = Gui::ClickCatcher("PanelClickCatcher", 0, 0, PanelWidth, PanelHeight) + Gui::Image("Background", 0, 0, Gui::SpriteName("panel")) + Gui::Image("Cover", 57, 175, CoverSprite())
+	                   + Gui::Node("TextBoxWidget", "Title", Gui::Rect(416, 50, 855, 60) + R"(, "style": "$StyleTitleBlock", "text": "@grail-on:ScrollTest")") + Gui::CloseButton("CloseButton", 1600, 9, "scrolltest");
+	const auto panel = [&](const std::string& children) { return Gui::Panel("grail-on/ScrollTest" + std::to_string(variant), 236, -856, PanelWidth, PanelHeight, children, 10, Gui::LeftAnchor); };
+	if (variant == 4) return panel(layout + Gui::ItemGrid("grail-on/Grid", GridLeft, GridTop, 16, 16));
+	if (variant == 3) return panel(layout + Gui::Node("Widget", "Viewport", Gui::Rect(GridLeft, GridTop, PageSize * Cell, PageSize * Cell), Gui::ItemGrid("grail-on/Grid", 0, 0, 16, 16)));
+	std::string rows;
 	for (int r = 0; r < ScrollTestRows; ++r) {
-		char row[1024] {};
-		std::snprintf(row, sizeof(row),
-		              R"(%s{"type": "TableRowWidget", "name": "Row%d", "children": [{"type": "Widget", "name": "Cell%d", "fields": {"rect": {"x": 0, "y": 0, "width": %d, "height": %d}}, "children": [)"
-		              R"({"type": "ImageWidget", "name": "Slot%d", "fields": {"rect": {"x": %d, "y": 0}, "filename": "d2rloader\\grail-on\\slot1x1"}})"
-		              R"(, {"type": "TextBoxWidget", "name": "Text%d", "fields": {"rect": {"x": 1000, "y": 0, "width": 400, "height": %d}, "text": "@grail-on:Row%d", "style": {"fontColor": "$FontColorGoldYellow", "pointSize": 30, "alignment": {"h": "left", "v": "center"}}}})",
-		              r ? ", " : "", r, r, PageSize * Cell - 60, Cell, r, (r % 8) * Cell, r, Cell, r);
-		layout += row;
+		const auto n = std::to_string(r);
 		// The page's grid in the first row, drawn over the rows below it.
-		if (r == 0)
-			layout += R"(, {"type": "InventoryGridWidget", "name": "grail-on/Grid", "fields": {"rect": {"x": 0, "y": 0}, "cellCount": {"x": 16, "y": 16}, "cellSize": "$ItemCellSize", "gemSocketFilename": "PANEL\\gemsocket"}})";
-		layout += "]}]}";
+		const std::string cell = Gui::Image("Slot" + n, (r % 8) * Cell, 0, SlotSprite(1, 1))
+		                       + Gui::Node("TextBoxWidget", "Text" + n, Gui::Rect(1000, 0, 400, Cell) + R"(, "text": "@grail-on:Row)" + n + R"(", "style": {"fontColor": "$FontColorGoldYellow", "pointSize": 30, "alignment": {"h": "left", "v": "center"}})")
+		                       + (r == 0 ? Gui::ItemGrid("grail-on/Grid", 0, 0, 16, 16) : std::string());
+		rows += Gui::Node("TableRowWidget", "Row" + n, {}, Gui::Node("Widget", "Cell" + n, Gui::Rect(0, 0, PageSize * Cell - 60, Cell), cell));
 	}
-	return layout + (variant < 2 ? "]}]}]}]}" : "]}]}]}");
+	const std::string table = Gui::Node("TableWidget", "Rows", R"("columns": [{"width": )" + std::to_string(PageSize * Cell - 60) + R"(, "alignment": {"h": "left", "v": "top"}}], "rowHeight": )" + std::to_string(Cell), rows);
+	std::string view;
+	if (variant == 0)
+		view = Gui::Node("ImageWidget", "ScrollBarBackground", R"("rect": {"x": -20, "y": 0}, "anchor": {"x": 1.0}, "filename": "PauseMenu\\VerticalScroll")",
+		                 Gui::Node("ScrollControllerWidget", "ScrollController",
+		                           R"("rect": {"x": -31, "y": 29, "width": 26, "height": 1208}, "anchor": {"x": 1.0}, "upArrowFilepath": "FrontEnd\\HD\\Final\\FrontEnd_ScrollUpBtn", "downArrowFilepath": "FrontEnd\\HD\\Final\\FrontEnd_ScrollDownBtn", "barFilepath": "PauseMenu\\VerticalIndicator", "viewName": "ScrollView", "wheelScrollSound": "cursor_scroll_hd", "buttonScrollSound": "cursor_scroll_hd")"))
+		     + Gui::Node("ScrollViewWidget", "ScrollView", R"("fitToParent": true, "scrollControllerName": "ScrollController")", table);
+	else if (variant == 1) view = Gui::Node("ScrollViewWidget", "ScrollView", R"("fitToParent": true)", table);
+	else view = table;
+	return panel(layout + Gui::Node("Widget", "Viewport", Gui::Rect(GridLeft, GridTop, PageSize * Cell, PageSize * Cell), view));
 }
 
 void ToggleScrollTest() {
-	if (IsOpen(ScrollTestPanel)) {
-		(void)PanelApi->closePanel(Context, ScrollTestPanel);
+	if (ScrollTestPanel.IsOpen()) {
+		ScrollTestPanel.Close();
 		ScrollTestOpen = false;
 		return;
 	}
@@ -13705,8 +11548,9 @@ void ToggleScrollTest() {
 void TryScrollTest() {
 	const bool last = --ScrollTestTries == 0;
 	for (ScrollTestVariant = 0; ScrollTestVariant < ScrollTestVariants; ++ScrollTestVariant) {
-		const auto result = ScrollTestPanel == D2RL::Panels::InvalidHandle ? D2RL::Panels::Result::NotFound : PanelApi->openPanel(Context, ScrollTestPanel);
-		ScrollTestOpen    = result == D2RL::Panels::Result::Success;
+		auto result = D2RL::Panels::Result::NotFound;
+		if (ScrollTestPanel.Ready()) (void)ScrollTestPanel.Open(&result);
+		ScrollTestOpen = result == D2RL::Panels::Result::Success;
 		if (ScrollTestOpen || last)
 			Say(!ScrollTestOpen, "grailon: scroll test variant %d %s (result %u)", ScrollTestVariant, ScrollTestOpen ? "open: scroll it, drop items on it, then close it" : "did not open",
 			    static_cast<unsigned>(result));
@@ -13722,7 +11566,7 @@ void TryScrollTest() {
 void WatchScrollTest() {
 	if (ScrollTestTries > 0) TryScrollTest();
 	if (!ScrollTestOpen) return;
-	if (!IsOpen(ScrollTestPanel)) {
+	if (!ScrollTestPanel.IsOpen()) {
 		ScrollTestOpen = false;
 		return;
 	}
@@ -13767,17 +11611,14 @@ auto __cdecl OnAreaPolicy(PageHost::AreaHandle, const D2RL::Inventory::ItemPolic
 // The host's grid panel, at the window's grid (it moves with the compact
 // setting; `now`: an open grid moves at once).
 bool SetHostLayout(bool now) {
-	char layout[1024] {};
-	std::snprintf(layout, sizeof(layout),
-	              R"({"type": "Panel", "name": "@PANEL@", "fields": {"priority": %d, "rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "anchor": {"x": 0.0, "y": 0.397}}, "children": [@GRID@]})",
-	              OverShown ? OverPriority - 1 : 9, WindowX() + GridLeft, PanelY + GridTop, StageCols * Cell, StageRows * Cell);
-	const PageHost::LayoutRequest overlay { .structSize = sizeof(overlay), .flags = now ? PageHost::LayoutApplyNow : 0U, .layout = layout, .gridX = 0, .gridY = 0 };
+	const std::string layout = Gui::Panel("@PANEL@", WindowX() + GridLeft, PanelY + GridTop, StageCols * Cell, StageRows * Cell, "@GRID@", OverShown ? OverPriority - 1 : 9, Gui::LeftAnchor);
+	const PageHost::LayoutRequest overlay { .structSize = sizeof(overlay), .flags = now ? PageHost::LayoutApplyNow : 0U, .layout = layout.c_str(), .gridX = 0, .gridY = 0 };
 	return Host::Service->setAreaLayout(Host::Area, &overlay) == PageHost::Result::Success;
 }
 
 // The compact setting changed: the window moved, so did the scroll bar and the host's grid.
 void CompactChanged() {
-	BarLearned = false;
+	GridBar.SetPanel(WindowX(), PanelY), ExclBar.SetPanel(WindowX(), PanelY);
 	if (Host::On()) (void)SetHostLayout(true);
 }
 
@@ -13851,13 +11692,7 @@ void Register() {
 
 	// The grid cover, the square buttons, the scroll bar and the inventory
 	// button. The slots wait for the lists, which say which sizes are needed.
-	if (!RegisterSprite("cover", { Stone(1571, ViewRows * Cell + 2, BackgroundColor, 12, 3) })) Say(true, "grail-on: could not register the cover sprite");
 	if (!RegisterPanelArt()) Say(true, "grail-on: could not unpack the stash frame");
-	if (!RegisterSprite("category", CategoryButton(false, CatSize, CatSize)) || !RegisterSprite("categoryOn", CategoryButton(true, CatSize, CatSize))
-	    || !RegisterSprite("menu", CategoryButton(false, MenuSize, MenuSize)) || !RegisterSprite("menuOn", CategoryButton(true, MenuSize, MenuSize))
-	    || !RegisterSprite("stattile", CategoryButton(false, StatTile, StatTile)) || !RegisterSprite("squarebtn", CategoryButton(false, DropHeight, DropHeight))
-	    || !RegisterSprite("check", CheckBox(false)) || !RegisterSprite("checkOn", CheckBox(true)) || !RegisterSprite("divider", { Divider(HeaderWidth, 4) }))
-		Say(true, "grail-on: could not register the buttons");
 	// The menu and category icons (game-icons.net), in the game's gold text colour.
 	for (const auto& mask : IconMasks) {
 		Picture icon { IconSize, IconSize, std::vector<unsigned char>(static_cast<std::size_t>(IconSize) * IconSize * 4) };
@@ -13881,14 +11716,8 @@ void Register() {
 			}
 			return icon;
 		};
-		const auto pad = [](const Picture& in, int box, int inner) {
-			const Picture small = Fit(in, inner, inner);
-			Picture       out { box, box, std::vector<unsigned char>(static_cast<std::size_t>(box) * box * 4) };
-			for (int y = 0; y < small.height; ++y)
-				std::memcpy(out.at((box - small.width) / 2, (box - small.height) / 2 + y), small.rgba.data() + static_cast<std::size_t>(y) * small.width * 4, static_cast<std::size_t>(small.width) * 4);
-			return out;
-		};
-		const Picture icon = own ? tint(215, 200, 150) : Resize(tint(215, 200, 150), ObjIconSize, ObjIconSize);
+		const auto pad = [](const Picture& in, int box, int inner) { return Gui::Padded(in, box, inner); };
+		const Picture icon = own ? tint(215, 200, 150) : Gui::ResizeBox(tint(215, 200, 150), ObjIconSize, ObjIconSize);
 		if (!RegisterSprite("objicon" + std::to_string(k), { icon })) Say(true, "grail-on: could not register objective icon %d", k);
 		if (!RegisterSprite("objpick" + std::to_string(k), { pad(tint(215, 200, 150), PickCell, PickIcon), pad(tint(255, 240, 190), PickCell, PickIcon) }))
 			Say(true, "grail-on: could not register objective picker icon %d", k);
@@ -13899,10 +11728,7 @@ void Register() {
 		const Picture tile = pad(tint(215, 200, 150), Cell, ObjTileIcon);
 		if (!RegisterSprite("objtile" + std::to_string(k), { tile })) Say(true, "grail-on: could not register objective tile %d", k);
 	}
-	bool bar = RegisterSprite("track", { Slot(BarWidth, BarHeight) }) && RegisterSprite("step", ScrollStep());
-	for (int steps = 1; steps < ScrollSteps; ++steps) bar = RegisterSprite("thumb" + std::to_string(steps), { ScrollThumb(steps) }) && bar;
-	if (!bar) Say(true, "grail-on: could not register the scroll bar");
-	if (!RegisterSprite("mold", { Mold() }) || !RegisterGrailButton()) Say(true, "grail-on: could not register the button sprite");
+	if (!RegisterSprite("mold", { Gui::MoldPicture() }) || !RegisterGrailButton()) Say(true, "grail-on: could not register the button sprite");
 	// The button's text now; the rest once the lists are built.
 	(void)RegisterStrings();
 	// The panels, with a first layout each (replaced before their first open).
@@ -13913,92 +11739,32 @@ void Register() {
 		ApplyHalfTiles();
 		layout = ViewLayout("View");
 	}
-	for (int i = 0; i < ViewCount; ++i) {
-		auto& view = Views[i];
-		view.id    = "View" + std::to_string(i);
-		(void)RegisterResource("data/global/ui/layouts/grail-on/" + view.id + "hd.json", layout, &view.layout);
-		// The over-the-stash views take no left slot: the stash stays open under them.
-		const D2RL::Panels::PanelRegistration registration {
-			.structSize = D2RL::Panels::PanelRegistrationSize,
-			.flags      = IsOverView(i) ? D2RL::Panels::PanelFlags::CloseOnEscape : D2RL::Panels::PanelFlags::CloseOnEscape | D2RL::Panels::PanelFlags::GameplayLeftSlot,
-			.localId    = view.id.c_str(),
-		};
-		if (PanelApi->registerPanel(Context, &registration, &view.panel) != D2RL::Panels::Result::Success) {
-			Say(true, "grail-on: could not register panel %s", view.id.c_str());
-			view.panel = D2RL::Panels::InvalidHandle;
-			continue;
-		}
-		const D2RL::Panels::PlayerPageGridBinding binding {
-			.structSize = D2RL::Panels::PlayerPageGridBindingSize,
-			.panel      = view.panel,
-			.page       = Page,
-			.childName  = "grail-on/Grid",
-		};
-		if (Page == D2RL::Inventory::InvalidHandle) continue;
-		if (const auto bound = PanelApi->bindPlayerPageGrid(Context, &binding); bound != D2RL::Panels::Result::Success)
-			Say(true, "grail-on: could not bind the grid of %s (result %u)", view.id.c_str(), static_cast<unsigned>(bound));
-	}
+	// The over-the-stash views take no left slot: the stash stays open under them.
+	if (!Views.Register(
+	        "View", ViewCount, layout, [](int i) { return IsOverView(i) ? 1 : 0; },
+	        [](int i) { return IsOverView(i) ? D2RL::Panels::PanelFlags::CloseOnEscape : D2RL::Panels::PanelFlags::CloseOnEscape | D2RL::Panels::PanelFlags::GameplayLeftSlot; }, Page, "grail-on/Grid"))
+		Say(true, "grail-on: could not register every view panel");
 	// The scroll animation's panel, over the view (its layout is made for each step).
-	{
-		(void)RegisterResource("data/global/ui/layouts/grail-on/Scrollhd.json", R"({"type": "Panel", "name": "grail-on/Scroll", "fields": {"priority": 12}, "children": []})", &ScrollLayoutHandle);
-		const D2RL::Panels::PanelRegistration registration {
-			.structSize = D2RL::Panels::PanelRegistrationSize,
-			.flags      = D2RL::Panels::PanelFlags::None,
-			.localId    = "Scroll",
-		};
-		if (PanelApi->registerPanel(Context, &registration, &ScrollPanel) != D2RL::Panels::Result::Success) {
-			Problem(false, "grail-on: could not register the scroll panel; wheel steps jump");
-			ScrollPanel = D2RL::Panels::InvalidHandle;
-		}
-	}
+	if (!ScrollPanel.Register("Scroll", Gui::EmptyPanel("grail-on/Scroll", 12), D2RL::Panels::PanelFlags::None)) Problem(false, "grail-on: could not register the scroll panel; wheel steps jump");
 	// The page that says what is switched off (its layout is made when it opens).
-	{
-		(void)RegisterResource("data/global/ui/layouts/grail-on/Errorhd.json", ErrorLayout(), &ErrorLayoutHandle);
-		const D2RL::Panels::PanelRegistration registration {
-			.structSize = D2RL::Panels::PanelRegistrationSize,
-			.flags      = D2RL::Panels::PanelFlags::CloseOnEscape | D2RL::Panels::PanelFlags::GameplayLeftSlot,
-			.localId    = "Error",
-		};
-		if (PanelApi->registerPanel(Context, &registration, &ErrorPanel) != D2RL::Panels::Result::Success) {
-			Say(true, "grail-on: could not register the error page");
-			ErrorPanel = D2RL::Panels::InvalidHandle;
-		}
-	}
+	if (!ErrorPage.Register("Error", ErrorLayout(), D2RL::Panels::PanelFlags::CloseOnEscape | D2RL::Panels::PanelFlags::GameplayLeftSlot)) Say(true, "grail-on: could not register the error page");
 	// The scroll test panels, bound to the same page.
-	for (ScrollTestVariant = 0; ScrollTestVariant < ScrollTestVariants; ++ScrollTestVariant) {
-		const std::string name = ScrollTestName(ScrollTestVariant);
-		(void)RegisterResource(("data/global/ui/layouts/grail-on/" + name + "hd.json").c_str(), ScrollTestLayout(ScrollTestVariant));
-		const D2RL::Panels::PanelRegistration registration {
-			.structSize = D2RL::Panels::PanelRegistrationSize,
-			.flags      = D2RL::Panels::PanelFlags::CloseOnEscape | D2RL::Panels::PanelFlags::GameplayLeftSlot,
-			.localId    = name.c_str(),
-		};
-		if (PanelApi->registerPanel(Context, &registration, &ScrollTestPanel) == D2RL::Panels::Result::Success) {
-			const D2RL::Panels::PlayerPageGridBinding binding {
-				.structSize = D2RL::Panels::PlayerPageGridBindingSize,
-				.panel      = ScrollTestPanel,
-				.page       = Page,
-				.childName  = "grail-on/Grid",
-			};
-			if (const auto bound = PanelApi->bindPlayerPageGrid(Context, &binding); bound != D2RL::Panels::Result::Success)
-				Say(true, "grail-on: scroll test %d: could not bind its grid (result %u)", ScrollTestVariant, static_cast<unsigned>(bound));
-		} else ScrollTestPanel = D2RL::Panels::InvalidHandle;
-	}
+	for (int variant = 0; variant < ScrollTestVariants; ++variant)
+		if (!ScrollTestPanels[variant].Register(ScrollTestName(variant), ScrollTestLayout(variant), D2RL::Panels::PanelFlags::CloseOnEscape | D2RL::Panels::PanelFlags::GameplayLeftSlot, Page, "grail-on/Grid"))
+			Say(true, "grail-on: scroll test %d: could not register its panel", variant);
 	ScrollTestVariant = 0;
-	RegisterInventoryButton();
-	ButtonShownX = Config.buttonX, ButtonShownY = Config.buttonY, ButtonShownKnown = true; // the game loads the layout as registered now
-	const D2RL::Panels::ChildLayoutRegistration child {
-		.structSize = D2RL::Panels::ChildLayoutRegistrationSize,
-		.flags      = D2RL::Panels::ChildLayoutFlags::KeyboardMouseOnly,
-		.stockPanel = D2RL::Panels::StockPanel::PlayerInventory,
-		.localId    = "InventoryButton",
-	};
-	D2RL::Panels::ChildLayoutHandle childHandle {};
-	if (PanelApi->registerChildLayout(Context, &child, &childHandle) != D2RL::Panels::Result::Success) Problem(false, "grail-on: could not add the inventory button; use the grailon command");
+	if (!GrailInvButton.Register("InventoryButton", { .moldSprite = "mold", .buttonSprite = "grailbutton", .button = "GrailButton", .tooltip = "@grail-on:GrailTip", .command = "open" }, Config.buttonX, Config.buttonY))
+		Problem(false, "grail-on: could not add the inventory button; use the grailon command");
 
-	const Events::UiMessageListener listener { .structSize = Events::UiMessageListenerSize, .priority = 100, .callback = OnUiMessage };
-	Events::ListenerHandle          handle = Events::InvalidHandle;
-	if (EventApi->registerUiMessageListener(Context, &listener, &handle) != Events::Result::Success) Problem(true, "grail-on: could not listen to button clicks");
+	// The buttons' clicks (D2R GUI's commands), queued as the wheel's and the console's are.
+	Gui::Commands::Watch(WatchUiMessage);
+	if (!Gui::Commands::Listen(Queue, 100, true)) Problem(true, "grail-on: could not listen to button clicks");
+	GridBar.SetLook(BarLook()), ExclBar.SetLook(BarLook());
+	GridBar.SetPanel(WindowX(), PanelY), ExclBar.SetPanel(WindowX(), PanelY);
+	GridBar.OnScroll([](int row) { Scroll = std::clamp(row, 0, MaxScroll); });
+	ExclBar.OnScroll([](int row) { ExclFirst = std::clamp(row, 0, ExclMax); });
+	GridBar.OnDrag([](int row) { Queue("row" + std::to_string(row)); });
+	ExclBar.OnDrag([](int row) { Queue("row" + std::to_string(row)); });
 	// Ctrl+click: the item listener when D2RLoader has one, the hovered item otherwise.
 	const Events::ItemTooltipListener tooltip {
 		.structSize = Events::ItemTooltipListenerSize,
@@ -14072,6 +11838,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	TextApi     = Query<D2RL::LocalizationService>("localization");
 	if (Context->QueryService(&ClickApi) != D2RL::ServiceQueryResult::Success) ClickApi = nullptr;
 	if (!Inventory || !ItemApi || !Threads || !PanelApi || !WidgetApi || !ResourceApi || !EventApi) return true;
+	(void)Gui::Init(context, PluginId);
+	Gui::Api().plainText = true; // the plugin translates its own texts
 	if (!TableApi) Problem(true, "grail-on: no data table service, so no item lists (D2RLoader 1.3.1 or newer is needed)");
 	LoadSettings();
 	Register();
@@ -14117,10 +11885,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
 	SettingsMenu.Stop();
-	ObjStopThread();
+	Gui::TextInput::Shutdown();
 	Running = false;
 	if (Ticker.joinable()) Ticker.join();
-	UnhookWheel();
+	Gui::WindowHook::Stop();
 	UnhookComparison();
 	UnhookLoot();
 	UnhookPlacement();

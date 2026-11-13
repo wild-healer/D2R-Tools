@@ -1,4 +1,4 @@
-// A small PNG reader for the plugin's own art (8-bit RGBA or RGB, not
+// D2R GUI: a small PNG reader for a plugin's own art (8-bit RGBA or RGB, not
 // interlaced): zlib inflate (RFC 1951) and the PNG row filters. The art is
 // compiled into the DLL's code section, so no resources and no Windows image
 // codecs are used (antivirus scanners took the resource + WIC decoding for a
@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "picture.h"
 
 namespace PngLite {
 
@@ -196,3 +197,16 @@ inline bool Decode(const std::uint8_t* png, std::size_t size, int& width, int& h
 }
 
 } // namespace PngLite
+
+namespace D2RGui {
+
+// A PNG compiled into the plugin (begin .. end) as a picture; false when it
+// is not one this reader takes.
+inline bool DecodePng(const unsigned char* begin, const unsigned char* end, Picture& out) {
+	int width = 0, height = 0;
+	if (!PngLite::Decode(begin, static_cast<std::size_t>(end - begin), width, height, out.rgba)) return false;
+	out.width = width, out.height = height;
+	return true;
+}
+
+} // namespace D2RGui

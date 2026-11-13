@@ -15,8 +15,12 @@ namespace D2RGui::Commands {
 
 using Handler = std::function<void(const std::string& command)>;
 
+using Watcher = std::function<void(const D2RL::SharedEvents::UiMessageEvent& event)>;
+
 struct State {
 	Handler                 handler;
+	Watcher                 watcher;
+	bool                    direct {};
 	std::mutex              lock;
 	std::deque<std::string> queue;
 	std::string             last;
@@ -65,6 +69,7 @@ inline void Post(const std::string& command) {
 }
 
 inline auto OnUiMessage(const D2RL::PluginContext*, const D2RL::SharedEvents::UiMessageEvent* event, void*) noexcept -> D2RL::SharedEvents::UiMessageAction {
+	if (event && Get().watcher) Get().watcher(*event);
 	if (!event || !event->text || !event->target || std::strcmp(event->target, "PanelManager") != 0) return D2RL::SharedEvents::UiMessageAction::Continue;
 	const std::string prefix = CommandPrefix();
 	if (std::strncmp(event->text, prefix.c_str(), prefix.size()) != 0) return D2RL::SharedEvents::UiMessageAction::Continue;
@@ -74,13 +79,22 @@ inline auto OnUiMessage(const D2RL::PluginContext*, const D2RL::SharedEvents::Ui
 	if (s.last == event->text && now - s.lastMs < 150) return D2RL::SharedEvents::UiMessageAction::Consume;
 	s.last   = event->text;
 	s.lastMs = now;
-	Post(event->text + prefix.size());
+	if (s.direct) {
+		if (s.handler) s.handler(event->text + prefix.size());
+	} else Post(event->text + prefix.size());
 	return D2RL::SharedEvents::UiMessageAction::Consume;
 }
 
-// While the plugin loads, after Init.
-inline bool Listen(Handler handler, int priority = 100) {
+// Every UI message the game sends (the plugin's own commands too), first, on
+// the thread that sends it (the game's own panels closing, say). Before Listen.
+inline void Watch(Watcher watcher) { Get().watcher = std::move(watcher); }
+
+// While the plugin loads, after Init. `direct`: the handler runs at once on the
+// thread that reported the click (the plugin queues it itself), else on the UI
+// thread after it.
+inline bool Listen(Handler handler, int priority = 100, bool direct = false) {
 	Get().handler    = std::move(handler);
+	Get().direct     = direct;
 	const auto& api = Api();
 	if (!api.events) return false;
 	const D2RL::SharedEvents::UiMessageListener listener {

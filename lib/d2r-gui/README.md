@@ -47,6 +47,15 @@ button and a long scrolling list. Console command `guidemo`.
 | `font.h` | the game's font metrics and text sizes, Low Vision Mode | I Hate TOMLs |
 | `widgets.h` | text box, drop-down, number with arrows, section title | both |
 | `left_panel.h` | behave like a game left panel: close them, close for them, shift the view | I Hate TOMLs |
+| `json_reader.h` | a small JSON reader for the game's data files | Grail On! |
+| `png.h` | PNG decoding (art compiled into the DLL) | Grail On! |
+| `strings.h` | a plugin's translated strings table, all 13 game languages | Grail On! |
+| `hud.h` | hide the life number on the HUD; whether the stash is open | Grail On! |
+| `inventory_button.h` | a button on the inventory panel, its mold, moved by settings | Grail On! |
+| `item_art.h` | item colours, quality backgrounds, socket spots, rune stones | Grail On! |
+| `stash_art.h`, `stash_kit.h` | the stash and settings art at any size (ticks, arrows, boxes, tiles, table rows, chart) | Grail On! |
+| `item_grid.h` | the plugin's item grid drawn its way: half-cell tiles, peeking past the grid, no cannot-wear colour | Grail On! |
+| `panels.h` | `SinglePanel` (one panel, a new layout per show) and `ViewCache` (many panels that each keep a view) | Grail On! |
 
 ## Rules the library follows
 
@@ -65,8 +74,8 @@ button and a long scrolling list. Console command `guidemo`.
 
 ## Status
 
-Grail On! and I Hate TOMLs are unchanged and keep their own copies of this
-code. Moving them onto the library is a separate step (see CHANGELOG).
+I Hate TOMLs (1.1.1-dev-1) and Grail On! (1.2.2-dev-1) draw everything
+through the library; neither has window code of its own left.
 
 ## Versioning
 

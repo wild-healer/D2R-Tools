@@ -18,7 +18,7 @@
 
 namespace D2RGui::Kit {
 
-enum Part { DropLeft, DropCenter, DropRight, TileLeft, TileCenter, TileRight, ListRow, ListUp, ListDown, Close, Background, PartCount };
+enum Part { DropLeft, DropCenter, DropRight, TileLeft, TileCenter, TileRight, ListRow, ListUp, ListDown, Close, Background, CheckArt, Divider, ListColumn, AddArt, PartCount };
 
 inline constexpr const char* PartPaths[PartCount] {
 	"data/hd/global/ui/panel/dropdownbutton_left.sprite",
@@ -32,6 +32,10 @@ inline constexpr const char* PartPaths[PartCount] {
 	"data/hd/global/ui/panel/loot_filter/slot_large_list_btn_2.sprite",
 	"data/hd/global/ui/panel/closebtn_4x.sprite",
 	"data/hd/global/ui/panel/character_sheet/character_background.sprite",
+	"data/hd/global/ui/panel/loot_filter/lootfilter_large_list_btn_checkbox.sprite",
+	"data/hd/global/ui/pausemenu/divider.sprite",
+	"data/hd/global/ui/panel/loot_filter/slot_large_list_vertical_divider.sprite",
+	"data/hd/global/ui/panel/loot_filter/chronicle_btn_add.sprite",
 };
 
 // Native image names a layout can use as they are (no plugin sprite needed).
@@ -65,7 +69,7 @@ inline void Read() {
 	std::vector<Picture>  parts[PartCount];
 	for (int k = 0; k < PartCount; ++k) {
 		std::string trouble;
-		const auto  file = ArchiveFile(PartPaths[k], &trouble);
+		const auto  file = GameFile(PartPaths[k], &trouble);
 		if (!file.empty()) parts[k] = ReadSprite(file, &trouble);
 		if (parts[k].empty()) Log(true, "d2r-gui: game art %s not used: %s", PartPaths[k], trouble.c_str());
 	}
@@ -231,6 +235,11 @@ inline std::string Check(bool on, int size = 56) {
 // The invisible button's sprite (0 clear, 1 faintly lit).
 inline std::string Hover() {
 	return Detail::Once("blank", [] { return HoverBlank(); });
+}
+
+// An invisible button's sprite that stays clear when hovered (two clear frames).
+inline std::string Clear() {
+	return Detail::Once("clear", [] { return std::vector<Picture> { Blank(4, 4), Blank(4, 4) }; });
 }
 
 // A recessed scroll track and a bronze thumb.

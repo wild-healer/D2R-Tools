@@ -26,6 +26,7 @@ struct Callbacks {
 	std::function<void(const std::string& text)> enter;
 	std::function<void()>                        escape;
 	std::function<void(const std::string& text)> away;    // a click elsewhere (default: as enter)
+	bool                                         keepOnEnter = false; // Enter calls `enter` and the box stays active (a search: the next match)
 };
 
 struct State {
@@ -74,7 +75,7 @@ inline void Task() {
 	if (!s.typing) return;
 	if (s.changed.exchange(false) && s.callbacks.changed) s.callbacks.changed(Text());
 	if (s.enterHit.exchange(false)) {
-		s.typing = false;
+		if (!s.callbacks.keepOnEnter) s.typing = false;
 		if (s.callbacks.enter) s.callbacks.enter(Text());
 	}
 }
@@ -209,6 +210,16 @@ inline void Start(const std::string& key, const std::string& text, Callbacks cal
 		PostThreadMessageW(id, MsgLoad, 0, 0);
 	}
 	s.typing = true;
+}
+
+// UI thread: the active box's text replaced (cleared by its button); no callback.
+inline void SetText(const std::string& text) {
+	auto& s = Get();
+	{
+		std::lock_guard guard(s.lock);
+		s.typed = Wide(text);
+	}
+	if (const DWORD id = s.threadId.load(); id && s.typing) PostThreadMessageW(id, MsgLoad, 0, 0);
 }
 
 // UI thread: the box lets the keys go (no callback).

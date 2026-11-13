@@ -2,6 +2,7 @@
 #pragma once
 #include <windows.h>
 #include <algorithm>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -111,6 +112,61 @@ inline std::string Fit(const std::string& text, int width, bool end, int charWid
 	if (starts.size() <= room) return text;
 	if (end) return ellipsis + text.substr(starts[starts.size() - room + 1]);
 	return text.substr(0, starts[room - 1]) + ellipsis;
+}
+
+// A tooltip's text in lines of about `width` characters (the game does not
+// wrap tooltips). Widths count characters, Chinese, Japanese and Korean ones
+// as two; Chinese and Japanese lines break between any two of their
+// characters, others at spaces. Line breaks in the text stay.
+inline std::string WrapLines(const std::string& text, std::size_t width = 46) {
+	struct Piece {
+		std::string text;
+		std::size_t width {};
+		bool        space {}; // a space before it
+	};
+	std::vector<Piece> pieces;
+	Piece              word;
+	const auto         flush = [&]() {
+        if (!word.text.empty()) pieces.push_back(word);
+        word = {};
+	};
+	for (std::size_t at = 0; at < text.size();) {
+		const auto    c    = static_cast<unsigned char>(text[at]);
+		const int     size = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
+		std::uint32_t code = size == 1 ? c : c & (0x3F >> (size - 1));
+		for (int k = 1; k < size && at + k < text.size(); ++k) code = (code << 6) | (static_cast<unsigned char>(text[at + k]) & 0x3F);
+		if (c == ' ' || c == '\n') {
+			flush();
+			if (c == '\n') pieces.push_back({ "\n" });
+			else word.space = true;
+			++at;
+			continue;
+		}
+		const bool hangul = (code >= 0x1100 && code <= 0x115F) || (code >= 0xAC00 && code <= 0xD7A3);
+		const bool wide   = hangul || (code >= 0x2E80 && code <= 0xA4CF) || (code >= 0xF900 && code <= 0xFAFF) || (code >= 0xFE30 && code <= 0xFE4F) || (code >= 0xFF00 && code <= 0xFF60)
+		               || (code >= 0xFFE0 && code <= 0xFFE6);
+		if (wide && !hangul) {
+			const bool space = word.space && word.text.empty();
+			flush();
+			word = { text.substr(at, size), 2, space };
+			flush();
+		} else word.text += text.substr(at, size), word.width += wide ? 2 : 1;
+		at += size;
+	}
+	flush();
+	std::string out, line;
+	std::size_t used = 0;
+	for (const auto& piece : pieces) {
+		if (piece.text == "\n") {
+			out += line + "\n", line.clear(), used = 0;
+			continue;
+		}
+		const std::size_t gap = !line.empty() && piece.space ? 1 : 0;
+		if (!line.empty() && used + gap + piece.width > width) out += line + "\n", line.clear(), used = 0;
+		else if (gap) line += ' ', ++used;
+		line += piece.text, used += piece.width;
+	}
+	return out + line;
 }
 
 } // namespace D2RGui
