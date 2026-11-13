@@ -28,5 +28,17 @@ engage_range = 10
 # monsters, hitting and running.
 danger_range = 10
 
+# Melee mercenaries drop what they're doing and regroup on you when a monster
+# gets this close to you (2 to 12).
+protect_range = 5
+
+# Safe mode: a mercenary below safe_life percent of its life, or losing
+# safe_burst percent within safe_window seconds, keeps away from monsters,
+# dodges missiles, uses its crowd control on what gets close and lets its life
+# come back (10 to 90, 10 to 90, 1 to 5).
+safe_life = 35
+safe_burst = 25
+safe_window = 2
+
 # Write mercenary decisions to the plugin log.
 log = true

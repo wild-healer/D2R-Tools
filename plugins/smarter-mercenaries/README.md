@@ -12,11 +12,23 @@ dice roll.
 - Ranged mercenaries stay in formation and shoot from there; a place up to 3
   off their spot is good enough. When you get within `danger_range` (10) of
   enemies they position themselves: the place closest to you that keeps 5
-  from every monster, then shoot again (hit and run). They only shoot at monsters they have a
+  from every monster (more from fast ones, up to 11), then shoot again (hit and run). They only shoot at monsters they have a
   clear line to from where they stand; when every target is behind a wall they
   step next to you instead of looking for a shot.
 - Mercenaries run whenever you run or when more than 3 off their spot.
-- Targets: what you're attacking first, then monsters attacking you, then
+- Your intent, from how you move: pushing toward monsters, mercenaries favour
+  what's ahead of you and ranged ones hold the formation longer; backing off,
+  they back off with you and stop chasing what you leave behind.
+- Protection: when a monster gets within `protect_range` (5) of you, melee
+  mercenaries regroup on you and fight what is around you.
+- Surrounded (monsters on every side within 4): the mercenary breaks out to
+  the free spot with the most room, toward you.
+- Safe mode: below `safe_life` (35%) life, or losing `safe_burst` (25%) of
+  its life within `safe_window` (2) seconds, a mercenary keeps well away from
+  monsters, dodges missiles, uses its crowd control on what gets close
+  (Freezing/Cold Arrow, Glacial Spike, Stun, Bash, Taunt) and lets its life
+  come back; it fights again once back over safe_life + 25.
+- Targets: what you're attacking first (only a slight lean for melee), then monsters attacking you, then
   monsters attacking the mercenary, then the closest, never farther than
   `leash` (14) from you; targets immune to all its damage come last.
 - Rogue: Exploding/Freezing Arrow on groups, Fire/Cold Arrow on single
@@ -35,7 +47,8 @@ dice roll.
 
 Settings, in game with I Hate TOMLs or in `d2rloader/config/smarter-mercenaries.toml`:
 `enabled`, `rogue`, `desert_mercenary`, `iron_wolf`, `barbarian`, `leash` (14),
-`engage_range` (10), `danger_range` (10), all 4 to 24, `log` (decisions to
+`engage_range` (10), `danger_range` (10), all 4 to 24, `protect_range` (5, 2 to
+12), `safe_life` (35), `safe_burst` (25), both 10 to 90, `safe_window` (2, 1 to 5), `log` (decisions to
 `mods/D2RMM/d2rloader/logs/smarter-mercenaries.log`, plus a line every few seconds per mercenary on whether the new AI ran).
 
 How it works (Steam 3.3.94995): hooks the Hireable think function

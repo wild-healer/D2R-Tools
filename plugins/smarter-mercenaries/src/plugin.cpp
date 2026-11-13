@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.29";
+constexpr const char* PluginVersion = "0.0.30";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -77,6 +77,10 @@ struct Settings {
 	std::atomic<int>  leash { 14 };     // how far from you mercenaries pick fights
 	std::atomic<int>  engage { 10 };    // melee mercenaries leave the formation for enemies this close
 	std::atomic<int>  danger { 10 };    // ranged mercenaries start positioning when you are this close to enemies
+	std::atomic<int>  safeLife { 35 };  // safe mode below this life percent
+	std::atomic<int>  safeBurst { 25 }; // ... or when it loses this percent of its life
+	std::atomic<int>  safeWindow { 2 }; // ... within this many seconds
+	std::atomic<int>  protect { 5 };    // melee mercenaries regroup on you when enemies get this close to you
 	std::atomic<bool> log { true };     // one line per decision change (test builds)
 } Config;
 
@@ -123,6 +127,7 @@ constexpr Code FindPathCode     { 0x340E70, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48
 constexpr Code PathTargetCode   { 0x342A50, { 0x48, 0x85, 0xC9, 0x74, 0x11, 0x66, 0x89, 0x51, 0x10, 0x66, 0x44, 0x89, 0x41, 0x12, 0x48, 0xC7 }, 0 };
 constexpr Code PathTypeCode     { 0x342A70, { 0x48, 0x63, 0xC2, 0x4C, 0x8D, 0x15, 0x86, 0xD5, 0xCB, 0xFF, 0x4C, 0x8D, 0x0C, 0x85, 0x00, 0x00 }, 0 };
 constexpr Code RefreshCode      { 0x34DC80, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x8B, 0xFA, 0x48, 0x8B, 0xD9, 0x85 }, 0 };
+constexpr Code GridCode         { 0x364C70, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57 }, 0 }; // collision grid check
 constexpr Code GetPathCode      { 0x34AE80, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C }, 0 };
 constexpr Code SetStepsCode     { 0x342890, { 0x48, 0x85, 0xC9, 0x74, 0x13, 0xFE, 0xCA, 0x33, 0xC0, 0x0F, 0xB6, 0xD2, 0x80, 0xFA, 0x12, 0x0F }, 0 };
 constexpr Code UnitRoomCode     { 0x34B440, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x85, 0xC9, 0x75, 0x13, 0x88, 0x4C }, 0 };
@@ -180,6 +185,7 @@ using WalkToFn       = int (*)(void* game, void* unit, int x, int y) noexcept;
 using PetMoveFn      = int (*)(void* game, void* owner, void* unit, int motion, int run, int speed, std::uint8_t steps) noexcept;
 using MoveFn         = int (*)(void* game, void* unit, void* target, int mode, int x, int y, std::uint8_t flag, std::uint16_t extra) noexcept;
 using GetPathFn      = void* (*)(void* unit) noexcept;
+using GridFn         = int (*)(void* room, int x, int y, int pattern, int mask) noexcept; // nonzero: something with that mask there
 using FindPathFn     = int (*)(void* path, void* unit, int allowTown, int server) noexcept; // number of points
 using PathTargetFn   = void (*)(void* path, int x, int y) noexcept;
 using PathTypeFn     = void (*)(void* path, int type) noexcept;
@@ -224,6 +230,7 @@ PetMoveFn      PetMove {};
 MoveFn         Move {};
 GetPathFn      GetPath {};
 FindPathFn     FindPath {};
+GridFn         Grid {};
 PathTargetFn   PathTarget {};
 PathTypeFn     PathType {};
 RefreshFn      Refresh {};
@@ -420,8 +427,24 @@ void Note(void* merc, Role role, void* target, int skill, const char* why) noexc
 		Log(false, "%s %u: %s", RoleName(role), id, why);
 }
 
+// What you are doing, read from how you move (see ReadIntent): it changes
+// what the mercenaries go for, where they stand and when they back off.
+enum class Intent { Hold, Travel, Advance, Retreat };
+const char* IntentName(Intent intent) noexcept {
+	return intent == Intent::Advance ? "advance" : intent == Intent::Retreat ? "retreat" : intent == Intent::Travel ? "travel" : "hold";
+}
+struct View {
+	Intent intent  = Intent::Hold;
+	double hx = 0, hy = 0;   // your heading while you move
+	bool   protect = false;  // enemies right next to you: melee regroups on you
+	bool   safe    = false;  // this mercenary is in safe mode
+};
+thread_local View Now {};
+
 // Set by ChooseTarget: a ranged mercenary saw targets, but only behind walls.
 bool OnlyBlocked = false;
+
+bool Position(void* unit, int& x, int& y) noexcept;
 
 void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 	OnlyBlocked = false;
@@ -441,7 +464,10 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 		const int   fromOwner   = Distance(owner, unit);
 		void* const itsTarget   = SkillTarget(game, unit);
 		const bool  selfDefense = itsTarget == merc && fromMerc <= 6;
-		if ((fromOwner > leash || (melee && fromMerc > engage)) && !selfDefense) continue;
+		// Protecting you: melee only looks at what is right around you.
+		if (melee && Now.protect) {
+			if (fromOwner > Config.protect.load() + 2 && !(selfDefense && fromMerc <= 2)) continue;
+		} else if ((fromOwner > leash || (melee && fromMerc > (Now.intent == Intent::Retreat ? 3 : engage))) && !selfDefense) continue;
 		// Ranged: only targets it can shoot from where it stands (missile line,
 		// as the game's own ranged target choice checks), so it never runs
 		// around looking for a shot.
@@ -453,7 +479,21 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 		// meet threats before they reach you. Everyone else: closest to itself.
 		const bool tank = role == Role::BashBarb || role == Role::FrenzyBarb;
 		int        score = tank ? fromOwner * 3 + fromMerc : fromMerc * 4;
-		if (unit == wanted) score -= 60;
+		if (melee && Now.protect) score = fromOwner * 6 + fromMerc;
+		// Your own target: ranged mercenaries focus it, melee ones only lean
+		// toward it (they deal with what is around you first).
+		if (unit == wanted) score -= melee ? 15 : 60;
+		// Where you're going: monsters ahead of you count more when you push
+		// in, monsters left behind count less when you back off.
+		if (Now.intent == Intent::Advance || Now.intent == Intent::Retreat) {
+			int ox = 0, oy = 0, ux = 0, uy = 0;
+			if (Position(owner, ox, oy) && Position(unit, ux, uy)) {
+				const double dx = ux - ox, dy = uy - oy, length = std::sqrt(dx * dx + dy * dy);
+				const double ahead = length > 0 ? (dx * Now.hx + dy * Now.hy) / length : 0;
+				if (Now.intent == Intent::Advance && ahead > 0.5) score -= 20;
+				if (Now.intent == Intent::Retreat && ahead < 0 && itsTarget != owner && itsTarget != merc) score += 40;
+			}
+		}
 		if (itsTarget == owner) score -= melee ? 60 : 40;
 		if (itsTarget == merc) score -= 20;
 		if (ImmuneToAll(unit, elements)) score += role == Role::IronWolf ? 200 : 30;
@@ -911,6 +951,241 @@ bool Go(void* game, void* merc, void* target, int x, int y, bool run) noexcept {
 	return ok;
 }
 
+
+// ---- awareness: enemy speed, mercenary health, your intent ----
+
+// How fast each monster moves, from where it was seen before (tiles a
+// second). The top speed seen fades over a second and a half, so a monster
+// that charged a moment ago still counts as fast.
+struct Track {
+	std::uint32_t id;
+	int           x, y;
+	DWORD         at;
+	double        speed;
+};
+std::array<Track, 256> Tracks {};
+
+double SpeedOf(void* unit) noexcept {
+	const std::uint32_t id = Field<std::uint32_t>(unit, UnitIdOffset);
+	Track&              track = Tracks[id & 255];
+	int                 x = 0, y = 0;
+	if (!Position(unit, x, y)) return 0;
+	const DWORD now = GetTickCount();
+	if (track.id != id || !track.at) {
+		track = { id, x, y, now, 0.0 };
+		return 0;
+	}
+	const DWORD elapsed = now - track.at;
+	if (elapsed >= 150) {
+		const double moved   = std::sqrt(double(x - track.x) * (x - track.x) + double(y - track.y) * (y - track.y));
+		const double current = std::min(moved * 1000.0 / elapsed, 30.0); // a teleport is not a speed
+		track.speed = elapsed > 3000 ? current : std::max(current, track.speed * std::pow(0.5, elapsed / 1500.0));
+		track.x = x, track.y = y, track.at = now;
+	}
+	return track.speed;
+}
+
+// Room a ranged mercenary keeps from a monster: more for a fast one, since it
+// covers the gap before the mercenary can step away again.
+double Exclusion(void* unit, double base) noexcept {
+	return std::clamp(base + SpeedOf(unit) * 0.4, base, base + 6.0);
+}
+
+// Life over the last seconds, to see a mercenary in trouble.
+struct Vitals {
+	std::uint32_t id;
+	int           life[32];
+	DWORD         at[32];
+	int           head;
+	bool          safe;
+	DWORD         troubleAt; // last time it was low or losing life fast
+	DWORD         dodgeAt, breakAt;
+};
+std::array<Vitals, 24> VitalsTable {};
+
+Vitals& VitalsOf(void* merc) noexcept {
+	const std::uint32_t id = Field<std::uint32_t>(merc, UnitIdOffset);
+	Vitals*             oldest = &VitalsTable[0];
+	for (auto& entry : VitalsTable) {
+		if (entry.id == id) return entry;
+		const DWORD seen = entry.at[(entry.head + 31) & 31];
+		if (seen < oldest->at[(oldest->head + 31) & 31]) oldest = &entry;
+	}
+	*oldest    = {};
+	oldest->id = id;
+	return *oldest;
+}
+
+// Safe mode: below the life setting, or losing the burst setting's worth of
+// life within the window. It ends once its life is back up (25 over the
+// setting) and nothing hurt it badly for 2 seconds.
+bool UpdateSafe(void* merc, Role role) noexcept {
+	Vitals&     vitals = VitalsOf(merc);
+	const DWORD now    = GetTickCount();
+	const int   life   = LifePercent(merc);
+	if (now - vitals.at[(vitals.head + 31) & 31] >= 200) {
+		vitals.life[vitals.head] = life, vitals.at[vitals.head] = now;
+		vitals.head = (vitals.head + 1) & 31;
+	}
+	const DWORD window = static_cast<DWORD>(Config.safeWindow.load()) * 1000;
+	int         peak   = life;
+	for (int index = 0; index < 32; ++index)
+		if (vitals.at[index] && now - vitals.at[index] <= window) peak = std::max(peak, vitals.life[index]);
+	const int  lost    = peak - life;
+	const int  low     = Config.safeLife.load();
+	const bool trouble = life < low || lost >= Config.safeBurst.load();
+	if (trouble) {
+		if (!vitals.safe) Note(merc, role, nullptr, -10, life < low ? "safe mode: life is low" : "safe mode: losing life fast");
+		vitals.safe = true, vitals.troubleAt = now;
+	} else if (vitals.safe && life >= std::min(95, low + 25) && now - vitals.troubleAt >= 2000) {
+		vitals.safe = false;
+		Note(merc, role, nullptr, -11, "safe mode over, back to fighting");
+	}
+	if (vitals.safe) Mv(merc, " vitals: life %d%%, lost %d%% in %lus, safe mode", life, lost, static_cast<unsigned long>(window / 1000));
+	return vitals.safe;
+}
+
+// Your intent, from how you move against the monsters around you: pushing
+// in (advance), backing off (retreat), moving with nothing in the way
+// (travel) or standing (hold).
+Intent ReadIntent(void* owner, const OwnerState& state, const Scan& scan) noexcept {
+	if (!state.moving || state.stopped || (state.hx == 0 && state.hy == 0)) return Intent::Hold;
+	int ox = 0, oy = 0;
+	if (!Position(owner, ox, oy)) return Intent::Hold;
+	double cx = 0, cy = 0;
+	int    count = 0;
+	const int leash = Config.leash.load();
+	for (std::size_t index = 0; index < scan.count; ++index) {
+		int x = 0, y = 0;
+		if (!Position(scan.units[index], x, y) || Cheb(x, y, ox, oy) > leash) continue;
+		cx += x - ox, cy += y - oy, ++count;
+	}
+	if (!count) return Intent::Travel;
+	const double length = std::sqrt(cx * cx + cy * cy);
+	if (length < 1.0) return Intent::Advance; // you're in the middle of them
+	const double toward = (cx * state.hx + cy * state.hy) / length;
+	return toward > 0.4 ? Intent::Advance : toward < -0.2 ? Intent::Retreat : Intent::Travel;
+}
+
+// Missiles mark the collision grid (0x40), as the game's own mercenary
+// dodge checks. A free spot: no missile, no wall.
+constexpr int GridWall = 0x01, GridMissile = 0x40;
+
+bool GridAt(void* merc, int x, int y, int mask) noexcept {
+	void* const path = GetPath(merc);
+	void* const room = path ? Field<void*>(path, 0x20) : nullptr;
+	return room && Grid(room, x, y, static_cast<int>(Field<std::uint32_t>(path, 0x5C)), mask) != 0;
+}
+
+void* Nearest(void* merc, const Scan& scan, int& distance) noexcept {
+	void* nearest = nullptr;
+	distance      = INT_MAX;
+	for (std::size_t index = 0; index < scan.count; ++index)
+		if (scan.distance[index] < distance) distance = scan.distance[index], nearest = scan.units[index];
+	return nearest;
+}
+
+// A missile on it or coming from the nearest monster: a quick step sideways
+// (or back), to the free side closest to you.
+bool Dodge(void* game, void* merc, void* owner, const Scan& scan, Role role) noexcept {
+	Vitals&     vitals = VitalsOf(merc);
+	const DWORD now    = GetTickCount();
+	if (now - vitals.dodgeAt < 600) return false;
+	int distance = 0, mx = 0, my = 0, ex = 0, ey = 0, ox = 0, oy = 0;
+	void* const enemy = Nearest(merc, scan, distance);
+	if (!enemy || distance > 16 || !Position(merc, mx, my) || !Position(enemy, ex, ey) || !Position(owner, ox, oy)) return false;
+	const double dx = ex - mx, dy = ey - my, length = std::max(1.0, std::sqrt(dx * dx + dy * dy));
+	const double ux = dx / length, uy = dy / length;
+	bool incoming = GridAt(merc, mx, my, GridMissile);
+	for (const double step : { 2.0, 3.5 })
+		incoming = incoming || GridAt(merc, mx + static_cast<int>(std::lround(ux * step)), my + static_cast<int>(std::lround(uy * step)), GridMissile);
+	if (!incoming) return false;
+	const double sides[3][2] = { { -uy * 3, ux * 3 }, { uy * 3, -ux * 3 }, { -ux * 3, -uy * 3 } };
+	int  bx = 0, by = 0, best = INT_MAX;
+	for (const auto& side : sides) {
+		const int x = mx + static_cast<int>(std::lround(side[0])), y = my + static_cast<int>(std::lround(side[1]));
+		if (GridAt(merc, x, y, GridWall | GridMissile)) continue;
+		const int score = Cheb(x, y, ox, oy);
+		if (score < best) best = score, bx = x, by = y;
+	}
+	if (best == INT_MAX) return false;
+	vitals.dodgeAt = now;
+	DeleteEvent(game, merc, 2, 0);
+	if (!Go(game, merc, nullptr, bx, by, true)) return false;
+	Note(merc, role, enemy, -12, "dodges a missile");
+	return true;
+}
+
+// Crowd control on a monster that gets close: freezing or slowing arrows and
+// spikes, Stun and Bash (knockback), Taunt. The Desert mercenary has none.
+bool CrowdControl(void* game, void* merc, Role role, void* target) noexcept {
+	const bool cold = !Immune(target, Cold);
+	switch (role) {
+	case Role::Rogue:
+		if (cold && (Cast(game, merc, ModeAttack1, SkillFreezingArrow, target) || Cast(game, merc, ModeAttack1, SkillColdArrow, target)))
+			return Note(merc, role, target, SkillFreezingArrow, "safe mode: slows a monster that got close"), true;
+		return false;
+	case Role::IronWolf:
+		if (cold && Cast(game, merc, ModeCast, SkillGlacialSpike, target)) return Note(merc, role, target, SkillGlacialSpike, "safe mode: freezes a monster that got close"), true;
+		return false;
+	case Role::BashBarb:
+		if (!CheckState(target, StateStunned) && Cast(game, merc, ModeAttack1, SkillStun, target)) return Note(merc, role, target, SkillStun, "safe mode: stuns a monster that got close"), true;
+		if (Cast(game, merc, ModeAttack1, SkillBash, target)) return Note(merc, role, target, SkillBash, "safe mode: bashes a monster back"), true;
+		return false;
+	case Role::FrenzyBarb:
+		if (!CheckState(target, StateTaunt) && Cast(game, merc, ModeAttack2, SkillTaunt, target)) return Note(merc, role, target, SkillTaunt, "safe mode: taunts a monster that got close"), true;
+		return false;
+	default: return false;
+	}
+}
+
+// Getting surrounded: monsters within 4 on every side but one narrow gap
+// (melee: 4 monsters and no gap of 120 degrees; ranged: 3 and 150). It moves
+// out to the free spot with the most room, toward you.
+bool BreakOut(void* game, void* merc, void* owner, const Scan& scan, Role role) noexcept {
+	const bool  melee  = IsMelee(role);
+	Vitals&     vitals = VitalsOf(merc);
+	const DWORD now    = GetTickCount();
+	if (now - vitals.breakAt < 1500) return false;
+	int mx = 0, my = 0, ox = 0, oy = 0;
+	if (!Position(merc, mx, my) || !Position(owner, ox, oy)) return false;
+	double angles[MaxCandidates];
+	int    count = 0;
+	for (std::size_t index = 0; index < scan.count; ++index) {
+		int x = 0, y = 0;
+		if (scan.distance[index] > 4 || !Position(scan.units[index], x, y) || (x == mx && y == my)) continue;
+		angles[count++] = std::atan2(double(y - my), double(x - mx));
+	}
+	if (count < (melee ? 4 : 3)) return false;
+	std::sort(angles, angles + count);
+	double gap = angles[0] + 2 * 3.14159265358979 - angles[count - 1];
+	for (int index = 1; index < count; ++index) gap = std::max(gap, angles[index] - angles[index - 1]);
+	if (gap >= (melee ? 2.09 : 2.62)) return false;
+	double bestScore = -1e9;
+	int    bx = 0, by = 0;
+	for (const double radius : { 4.0, 6.0 })
+		for (int step = 0; step < 16; ++step) {
+			const double angle = step * 3.14159265358979 / 8.0;
+			const int    x = mx + static_cast<int>(std::lround(radius * std::cos(angle))), y = my + static_cast<int>(std::lround(radius * std::sin(angle)));
+			if (GridAt(merc, x, y, GridWall)) continue;
+			double room = 1e9;
+			for (std::size_t index = 0; index < scan.count; ++index) {
+				int ux = 0, uy = 0;
+				if (Position(scan.units[index], ux, uy)) room = std::min(room, std::sqrt(double(ux - x) * (ux - x) + double(uy - y) * (uy - y)));
+			}
+			if (room < 3.0) continue;
+			const double score = room * 3.0 - std::sqrt(double(x - ox) * (x - ox) + double(y - oy) * (y - oy)) * 0.7;
+			if (score > bestScore) bestScore = score, bx = x, by = y;
+		}
+	if (bestScore <= -1e9) return Mv(merc, " surrounded (%d monsters, gap %.0f deg), no way out", count, gap * 57.3), false;
+	vitals.breakAt = now;
+	Mv(merc, " surrounded (%d monsters, widest gap %.0f deg): breaks out to (%d,%d)", count, gap * 57.3, bx, by);
+	DeleteEvent(game, merc, 2, 0);
+	if (!Go(game, merc, nullptr, bx, by, true)) return false;
+	Note(merc, role, nullptr, -13, "breaks out of a ring of monsters");
+	return true;
+}
+
 // Goes to (or keeps going to) its formation spot. Returns false when already there.
 // Standing on you (they all start the game on top of you): not a place to stay.
 bool Crowded(const MercState& state, int ox, int oy) noexcept {
@@ -1031,16 +1306,22 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 // Self positioning: the place closest to you (then to where it stands) that
 // keeps at least `exclusion` from every monster. False when where it stands
 // already does.
-bool Reposition(void* game, void* merc, void* owner, const Scan& scan, Role role) noexcept {
-	constexpr double exclusion = 5.0;
+// Each monster's room grows with its speed (Exclusion); `scale` widens it
+// all (safe mode keeps further away).
+bool Reposition(void* game, void* merc, void* owner, const Scan& scan, Role role, double scale = 1.0) noexcept {
 	int ox = 0, oy = 0, mx = 0, my = 0;
 	if (!Position(owner, ox, oy) || !Position(merc, mx, my)) return false;
-	int ex[MaxCandidates], ey[MaxCandidates], count = 0;
+	int    ex[MaxCandidates], ey[MaxCandidates], count = 0;
+	double room[MaxCandidates], widest = 0;
 	for (std::size_t index = 0; index < scan.count; ++index)
-		if (Position(scan.units[index], ex[count], ey[count])) ++count;
+		if (Position(scan.units[index], ex[count], ey[count])) {
+			room[count] = Exclusion(scan.units[index], 5.0) * scale;
+			widest      = std::max(widest, room[count]);
+			++count;
+		}
 	const auto clear = [&](double x, double y) {
 		for (int index = 0; index < count; ++index)
-			if ((ex[index] - x) * (ex[index] - x) + (ey[index] - y) * (ey[index] - y) < exclusion * exclusion) return false;
+			if ((ex[index] - x) * (ex[index] - x) + (ey[index] - y) * (ey[index] - y) < room[index] * room[index]) return false;
 		return true;
 	};
 	const auto fromOwner = [&](double x, double y) { return std::sqrt((x - ox) * (x - ox) + (y - oy) * (y - oy)); };
@@ -1048,13 +1329,13 @@ bool Reposition(void* game, void* merc, void* owner, const Scan& scan, Role role
 	// distances: no hopping between two nearly equal places.
 	const auto loose = [&](double x, double y) {
 		for (int index = 0; index < count; ++index)
-			if ((ex[index] - x) * (ex[index] - x) + (ey[index] - y) * (ey[index] - y) < (exclusion - 1) * (exclusion - 1)) return false;
+			if ((ex[index] - x) * (ex[index] - x) + (ey[index] - y) * (ey[index] - y) < (room[index] - 1) * (room[index] - 1)) return false;
 		return true;
 	};
-	if (loose(mx, my) && fromOwner(mx, my) <= 9.0) return Mv(merc, " safe: current place ok (%d monsters)", count), false;
+	if (loose(mx, my) && fromOwner(mx, my) <= 9.0) return Mv(merc, " safe: current place ok (%d monsters, widest room %.1f)", count, widest), false;
 	double bestScore = 1e9;
 	int    bx = 0, by = 0;
-	for (const double radius : { 2.0, 3.5, 5.0, 6.5, 8.0, 10.0 }) {
+	for (const double radius : { 2.0, 3.5, 5.0, 6.5, 8.0, 10.0, 12.0 }) {
 		for (int step = 0; step < 16; ++step) {
 			const double angle = step * 3.14159265358979 / 8.0;
 			const double x = ox + radius * std::cos(angle), y = oy + radius * std::sin(angle);
@@ -1109,6 +1390,30 @@ void Params(void* tick, std::uint16_t (&params)[4]) noexcept {
 	for (int index = 0; index < 4; ++index) params[index] = record ? Field<std::uint16_t>(record, 0x90 + index * 6 + level * 2) : 0;
 }
 
+// Safe mode: keeps away from monsters (further than usual), dodges
+// missiles, uses its crowd control on what gets close and lets its life come
+// back. Ranged mercenaries still shoot when nothing is near them.
+void SafeThink(void* game, void* merc, void* owner, MercState& state, int sx, int sy, bool walking, void* target, Role role, const Scan& scan, void* tick,
+               const std::uint16_t* params) noexcept {
+	if (walking) return Mv(merc, " safe mode: still moving");
+	state.moving = false;
+	if (Dodge(game, merc, owner, scan, role)) return;
+	int         distance = 0;
+	void* const nearest  = Nearest(merc, scan, distance);
+	if (nearest && distance <= 4 && AttackRoll(merc, tick, IsMelee(role)) && CrowdControl(game, merc, role, nearest)) return;
+	if (Reposition(game, merc, owner, scan, role, 1.6)) return;
+	if (nearest && distance <= 3) {
+		DeleteEvent(game, merc, 2, 0);
+		if (Escape(game, merc, nearest, 5, 1)) return Note(merc, role, nearest, -14, "safe mode: backs away from a monster");
+	}
+	if (!IsMelee(role) && target && distance >= 8) return Mv(merc, " safe mode: shoots from a distance"), Attack(game, merc, owner, target, role, scan, tick, params);
+	if (!nearest || distance > 10) {
+		if (KeepFormation(game, merc, owner, state, sx, sy, walking)) return;
+	}
+	Mv(merc, " safe mode: waits, life coming back");
+	Idle(game, merc, 5);
+}
+
 void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept {
 	const std::uint32_t mode    = Field<std::uint32_t>(merc, UnitModeOffset);
 	const bool          walking = mode == ModeWalk || mode == ModeRun;
@@ -1141,8 +1446,18 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	Params(tick, params);
 	Scan scan;
 	Gather(game, merc, scan);
+	// What you're doing and how things stand, for the choices below.
+	Now        = {};
+	Now.intent = ReadIntent(owner, ownerState, scan);
+	Now.hx = ownerState.hx, Now.hy = ownerState.hy;
+	for (std::size_t index = 0; index < scan.count; ++index)
+		if (Distance(owner, scan.units[index]) <= Config.protect.load()) Now.protect = true;
+	Now.safe = UpdateSafe(merc, role);
 	void* const target  = ChooseTarget(game, merc, owner, role);
 	const bool  blocked = OnlyBlocked;
+	Mv(merc, " view: you %s%s%s", IntentName(Now.intent), Now.protect ? ", enemies on you" : "", Now.safe ? ", it is in safe mode" : "");
+	if (Now.safe) return SafeThink(game, merc, owner, mercState, sx, sy, walking, target, role, scan, tick, params);
+	if (!walking && BreakOut(game, merc, owner, scan, role)) return;
 	if (melee) {
 		if (target) {
 			mercState.moving = false;
@@ -1161,7 +1476,8 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 				int tx = 0, ty = 0;
 				const bool placed = Position(target, tx, ty);
 				if (int ux = 0, uy = 0; placed && Position(merc, ux, uy)) tx += (ux > tx) - (ux < tx), ty += (uy > ty) - (uy < ty); // next to it
-				if (placed ? Go(game, merc, nullptr, tx, ty, true) : Go(game, merc, target, 0, 0, true)) return Note(merc, role, target, -4, "leaves the formation for an enemy in range");
+				if (placed ? Go(game, merc, nullptr, tx, ty, true) : Go(game, merc, target, 0, 0, true))
+					return Note(merc, role, target, Now.protect ? -15 : -4, Now.protect ? "regroups on you against a monster at you" : "leaves the formation for an enemy in range");
 			}
 			if (walking) return Mv(merc, " melee: in reach but still moving");
 			Mv(merc, " melee: attacks %u", Field<std::uint32_t>(target, UnitIdOffset));
@@ -1178,14 +1494,22 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 		nearOwner = std::min(nearOwner, Distance(owner, scan.units[index]));
 		if (scan.distance[index] < nearMerc) nearMerc = scan.distance[index], closest = scan.units[index];
 	}
-	const bool danger = nearOwner <= Config.danger.load(std::memory_order_relaxed);
+	// Pushing in, they hold the formation a little longer; backing off, they
+	// back off with you (the formation moves away) instead of standing to
+	// hit and run, unless something is in their face.
+	const int  dangerRange = Config.danger.load(std::memory_order_relaxed) - (Now.intent == Intent::Advance ? 3 : 0);
+	const bool danger      = Now.intent != Intent::Retreat && nearOwner <= dangerRange;
+	if (Now.intent == Intent::Retreat && closest && nearMerc <= 3 && !walking) {
+		DeleteEvent(game, merc, 2, 0);
+		if (Escape(game, merc, closest, 5, 1)) return Note(merc, role, closest, -16, "backs off with you, away from a monster in its face");
+	}
 	Mv(merc, " ranged: %zu monsters, nearest to you %d, to it %d, danger %d, target %u%s", scan.count, nearOwner == INT_MAX ? -1 : nearOwner,
 	   nearMerc == INT_MAX ? -1 : nearMerc, danger, target ? Field<std::uint32_t>(target, UnitIdOffset) : 0, blocked ? " (all blocked)" : "");
 	if (danger) {
 		mercState.moving = false;
 		if (walking) return Mv(merc, " ranged: still moving");
 		if (Reposition(game, merc, owner, scan, role)) return;
-		if (closest && nearMerc <= 4) {
+		if (closest && nearMerc <= (Now.intent == Intent::Advance ? 3 : 4)) {
 			// Nowhere safe near you: the game's own step away from the monster.
 			DeleteEvent(game, merc, 2, 0);
 			if (Escape(game, merc, closest, 5, 1)) return Note(merc, role, closest, -5, "runs from a monster (hit and run)");
@@ -1273,6 +1597,7 @@ void HookHireable(void* game, void* unit, void* tick) noexcept {
 
 void* HookSelectTarget(void* game, void* unit, int* distance, int* inMelee) noexcept {
 	if (!unit || unit != ThinkingMerc || !Enabled()) return SelectTarget(game, unit, distance, inMelee);
+	Now = {};
 	const Role  role  = RoleOf(unit);
 	void* const owner = role == Role::None ? nullptr : PlayerOwner(unit);
 	if (!owner) return SelectTarget(game, unit, distance, inMelee);
@@ -1319,7 +1644,7 @@ void HookCombat(void* game, void* unit, std::uint16_t classId, void* owner, void
 // ---- version check ----
 
 bool Locate() noexcept {
-	const std::array<const Code*, 39> checks { &FindPathCode, &PathTargetCode, &PathTypeCode, &RefreshCode, &SetEventCode, &RemoveFootCode, &BlockedCode, &VelocityCode, &WalkToCode, &PetMoveCode, &MoveCode, &GetPathCode, &SetStepsCode, &UnitRoomCode, &InTownCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
+	const std::array<const Code*, 40> checks { &GridCode, &FindPathCode, &PathTargetCode, &PathTypeCode, &RefreshCode, &SetEventCode, &RemoveFootCode, &BlockedCode, &VelocityCode, &WalkToCode, &PetMoveCode, &MoveCode, &GetPathCode, &SetStepsCode, &UnitRoomCode, &InTownCode, &HireableCode, &SelectTargetCode, &CombatCode, &UseSkillCode, &DefaultAtkCode, &IdleCode,
 		                                       &EscapeCode, &WalkToOwnerCode, &DeleteEventCode, &DistanceCode, &InMeleeCode, &GetStatCode,
 		                                       &CheckStateCode, &GetSkillCode, &SkillLevelCode, &SkillsTxtCode, &MonStatsCode, &AllyForBuffCode,
 		                                       &FindTargetCode, &CanTargetCode, &OwnerCode, &UnitTypeCode, &PetInfoCode, &SkillTargetCode };
@@ -1357,6 +1682,7 @@ bool Locate() noexcept {
 	Move            = reinterpret_cast<MoveFn>(at(MoveCode));
 	GetPath         = reinterpret_cast<GetPathFn>(at(GetPathCode));
 	FindPath        = reinterpret_cast<FindPathFn>(at(FindPathCode));
+	Grid            = reinterpret_cast<GridFn>(at(GridCode));
 	PathTarget      = reinterpret_cast<PathTargetFn>(at(PathTargetCode));
 	PathType        = reinterpret_cast<PathTypeFn>(at(PathTypeCode));
 	Refresh         = reinterpret_cast<RefreshFn>(at(RefreshCode));
@@ -1392,10 +1718,10 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 		target = value == "true";
 		return true;
 	};
-	const auto range = [&](std::atomic<int>& target) {
+	const auto range = [&](std::atomic<int>& target, long low = MinLeash, long high = MaxLeash) {
 		char*      end    = nullptr;
 		const long number = std::strtol(value.c_str(), &end, 10);
-		if (value.empty() || *end || number < MinLeash || number > MaxLeash) return error = "4 to 24", false;
+		if (value.empty() || *end || number < low || number > high) return error = std::to_string(low) + " to " + std::to_string(high), false;
 		target = static_cast<int>(number);
 		return true;
 	};
@@ -1407,6 +1733,10 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 	if (key == "leash") return range(Config.leash);
 	if (key == "engage_range") return range(Config.engage);
 	if (key == "danger_range") return range(Config.danger);
+	if (key == "safe_life") return range(Config.safeLife, 10, 90);
+	if (key == "safe_burst") return range(Config.safeBurst, 10, 90);
+	if (key == "safe_window") return range(Config.safeWindow, 1, 5);
+	if (key == "protect_range") return range(Config.protect, 2, 12);
 	if (key == "aura_leash") return true; // 0.0.1-0.0.4 setting, no longer used
 	if (key == "log") return flag(Config.log);
 	return error = "unknown setting", false;
@@ -1422,6 +1752,10 @@ std::string ValueOf(const std::string& key) {
 	if (key == "leash") return std::to_string(Config.leash.load());
 	if (key == "engage_range") return std::to_string(Config.engage.load());
 	if (key == "danger_range") return std::to_string(Config.danger.load());
+	if (key == "safe_life") return std::to_string(Config.safeLife.load());
+	if (key == "safe_burst") return std::to_string(Config.safeBurst.load());
+	if (key == "safe_window") return std::to_string(Config.safeWindow.load());
+	if (key == "protect_range") return std::to_string(Config.protect.load());
 	if (key == "log") return flag(Config.log);
 	return {};
 }
@@ -1456,6 +1790,18 @@ engage_range = )" + ValueOf("engage_range") + R"(
 # until you get this close to enemies; then they position themselves away from
 # monsters, hitting and running.
 danger_range = )" + ValueOf("danger_range") + R"(
+
+# Melee mercenaries drop what they're doing and regroup on you when a monster
+# gets this close to you (2 to 12).
+protect_range = )" + ValueOf("protect_range") + R"(
+
+# Safe mode: a mercenary below safe_life percent of its life, or losing
+# safe_burst percent within safe_window seconds, keeps away from monsters,
+# dodges missiles, uses its crowd control on what gets close and lets its life
+# come back (10 to 90, 10 to 90, 1 to 5).
+safe_life = )" + ValueOf("safe_life") + R"(
+safe_burst = )" + ValueOf("safe_burst") + R"(
+safe_window = )" + ValueOf("safe_window") + R"(
 
 # Write mercenary decisions to the plugin log.
 log = )" + ValueOf("log") + "\n";
@@ -1555,6 +1901,46 @@ max = 24
 step = 1
 shift_step = 2
 ctrl_step = 4
+[[setting]]
+key = "protect_range"
+type = "int"
+label = "Protect range"
+note = "Melee mercenaries regroup on you when a monster gets this close to you. 2 to 12."
+min = 2
+max = 12
+step = 1
+shift_step = 2
+ctrl_step = 4
+[[setting]]
+key = "safe_life"
+type = "int"
+label = "Safe mode below life %"
+note = "A mercenary under this much life keeps away from monsters and lets its life come back. 10 to 90."
+min = 10
+max = 90
+step = 5
+shift_step = 10
+ctrl_step = 20
+[[setting]]
+key = "safe_burst"
+type = "int"
+label = "Safe mode on life lost %"
+note = "Also safe mode when a mercenary loses this much of its life within the time below. 10 to 90."
+min = 10
+max = 90
+step = 5
+shift_step = 10
+ctrl_step = 20
+[[setting]]
+key = "safe_window"
+type = "int"
+label = "Life lost within (seconds)"
+note = "The time for the setting above. 1 to 5."
+min = 1
+max = 5
+step = 1
+shift_step = 1
+ctrl_step = 2
 [[setting]]
 key = "log"
 type = "bool"
