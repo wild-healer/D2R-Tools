@@ -80,7 +80,7 @@ inline std::string Layout(const std::string& panelName, const std::string& probe
 	c += R"(, {"type": "ButtonWidget", "name": "CloseButton", "fields": {"rect": {"x": )" + std::to_string(CloseX) + R"(, "y": )" + std::to_string(CloseY)
 	   + R"(}, "filename": "PANEL\\closebtn_4x", "hoveredFrame": 3, "tooltipString": "@d2r:strClose", "sound": "cursor_close_window_hd", "onClickMessage": )" + Command(closeCommand) + "}}";
 	c += Probe(probe);
-	return Panel(panelName, X, Y, Width, Height, c + children, priority, R"(, "anchor": "$LeftPanelAnchor")");
+	return Panel(panelName, X, Y, Width, Height, c + children, priority, LeftAnchor);
 }
 
 } // namespace D2RGui::CharacterWindow

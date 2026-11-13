@@ -157,7 +157,7 @@ inline std::string ClickCatcher(const std::string& name, int x, int y, int width
 inline std::string Probe(const std::string& name) { return Rectangle(name, 0, 0, 1, 1, 0, 0, 0, 0); }
 
 // A panel's JSON: `name` must be "<plugin id>/<local id>" of a registered
-// panel. `fields` adds to its fields (", \"anchor\": \"$LeftPanelAnchor\"").
+// panel. `fields` adds to its fields (LeftAnchor: the vanilla left-panel place written out).
 inline std::string Panel(const std::string& name, int x, int y, int width, int height, const std::string& children, int priority = 10, const std::string& fields = {}) {
 	return R"({"type": "Panel", "name": )" + Json(name) + R"(, "fields": {"priority": )" + std::to_string(priority) + ", " + Rect(x, y, width, height) + fields + R"(}, "children": [)"
 	     + Children(children) + "]}";
