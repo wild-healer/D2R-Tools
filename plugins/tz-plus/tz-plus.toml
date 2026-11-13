@@ -1,0 +1,38 @@
+# TZ Plus
+#
+# Nightmare: one whole act is a terror zone, the act changing every 30 minutes.
+# Hell: every level is a terror zone, up to level 99.
+# The mods roll once per game. Changes apply from the next game.
+
+[tz-plus]
+enabled = true
+nightmare = true
+hell = true
+
+# Mods that can roll
+extra_strong = true
+extra_fast = true
+cursed = true
+magic_resistant = true
+fire_enchanted = true
+lightning_enchanted = true
+cold_enchanted = true
+venomous = true
+mana_burn = true
+teleportation = true
+spectral_hit = true
+stone_skin = true
+multiple_shots = true
+tough = true
+vampiric = true
+regenerating = true
+might = true
+holy_fire = true
+blessed_aim = true
+holy_freeze = true
+conviction = true
+fanaticism = true
+holy_shock = true
+concentration = true
+vigor = true
+thorns = true
