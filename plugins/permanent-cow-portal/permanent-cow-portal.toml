@@ -1,0 +1,23 @@
+# Permanent Cow Portal
+#
+# A red portal to the Moo Moo Farm stands in the Rogue Encampment, next to
+# the waypoint, in every game you play once you have beaten Baal on that
+# difficulty (Diablo in a Classic game). No Wirt's Leg needed, offline and in
+# games you host, like the online Legacy of Terror event. The cow level opens
+# even after the Cow King was killed.
+#
+# D2RLoader writes this file to d2rloader/config/permanent-cow-portal.toml on
+# first launch. Every setting can also be changed in game with I Hate TOMLs;
+# changes apply to the next game.
+
+[permanent-cow-portal]
+enabled = true
+
+# Only open the portal once you have beaten Baal on the game's difficulty
+# (Diablo in a Classic game). false: the portal is always there.
+require_baal = true
+
+# Where the portal stands, in tiles from the waypoint (-30 to 30). The game
+# moves it to the nearest free spot.
+offset_x = 4
+offset_y = 4
