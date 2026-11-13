@@ -56,7 +56,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.6";
+constexpr const char* PluginVersion = "0.0.7";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -266,6 +266,10 @@ void SetField(void* base, std::uintptr_t offset, T value) noexcept {
 
 std::int32_t GetStat(void* unit, int stat) noexcept {
 	return At<GetStatFn>(GetStatRva)(unit, stat, 0);
+}
+// Without the items and skills: what our rewards set.
+std::int32_t GetBaseStat(void* unit, int stat) noexcept {
+	return At<GetStatFn>(0x2F48C0)(unit, stat, 0);
 }
 void SetStat(void* unit, int stat, std::int32_t value) noexcept {
 	At<SetStatFn>(SetStatRva)(unit, stat, value, 0);
@@ -586,7 +590,7 @@ int GiveRewards(std::uint8_t* game, const GameMods& g, bool on, int level = -1) 
 	int players = 0, given = 0;
 	for (auto* client = Field<std::uint8_t*>(game, GameClients); client && players < 64; client = Field<std::uint8_t*>(client, ClientNext), ++players) {
 		void* unit = ClientUnitOf(client);
-		if (RewardLogs < 12)
+		if (RewardLogs < 2)
 			++RewardLogs, Log(false, "rewards: client %p (state %u, flags 0x%X) -> player %p", client, Field<std::uint32_t>(client, 4),
 			                  Field<std::uint32_t>(client, ClientFlags), unit);
 		if (!unit) continue;
@@ -595,12 +599,13 @@ int GiveRewards(std::uint8_t* game, const GameMods& g, bool on, int level = -1) 
 			if (!room || At<RoomLevelFn>(0x2EFC10)(room) != level) continue;
 		}
 		const std::int32_t gold = on ? g.gold : 0, magic = on ? g.magic : 0;
-		const std::int32_t gold0 = GetStat(unit, StatGoldFind), magic0 = GetStat(unit, StatMagicFind);
+		const std::int32_t gold0 = GetBaseStat(unit, StatGoldFind), magic0 = GetBaseStat(unit, StatMagicFind);
+		const std::int32_t total0 = GetStat(unit, StatGoldFind), totalMagic0 = GetStat(unit, StatMagicFind);
 		if (gold0 != gold) SetStat(unit, StatGoldFind, gold);
 		if (magic0 != magic) SetStat(unit, StatMagicFind, magic);
 		if ((gold0 != gold || magic0 != magic) && RewardLogs < 24)
-			++RewardLogs, Log(false, "rewards on server player %p: gold find %d -> %d, magic find %d -> %d", unit, gold0, GetStat(unit, StatGoldFind), magic0,
-			                  GetStat(unit, StatMagicFind));
+			++RewardLogs, Log(false, "rewards on server player %p: gold find %d -> %d (bonus %d -> %d), magic find %d -> %d (bonus %d -> %d)", unit, total0,
+			                  GetStat(unit, StatGoldFind), gold0, gold, totalMagic0, GetStat(unit, StatMagicFind), magic0, magic);
 		++given;
 	}
 	return given;
@@ -661,7 +666,8 @@ void ApplyUMod(void* unit, std::uint8_t mode, int id, int tier, bool elite) noex
 
 	list[slot] = static_cast<std::uint8_t>(id);
 	const auto start = *reinterpret_cast<UModStartFn*>(Base + UModTableRva + static_cast<std::uint64_t>(id) * 8);
-	if (start) start(unit, id, elite ? 1 : 0);
+	// Teleportation only gives the teleport skill to "unique" monsters (its start skips the others).
+	if (start) start(unit, id, elite || id == 26 ? 1 : 0);
 
 	// Resist mods: our values replace the game's (no limit on new immunities).
 	const int t = tier - 1;
@@ -1105,13 +1111,14 @@ void ShowRewards(int level) noexcept {
 	ReleaseSRWLockShared(&Lock);
 	if (!difficulty) return;
 	const bool on = difficulty == 2 || (level > 0 && At<InZoneListFn>(InZoneListRva)(level));
-	const std::int32_t gold0 = GetStat(player, StatGoldFind), magic0 = GetStat(player, StatMagicFind);
+	const std::int32_t gold0 = GetBaseStat(player, StatGoldFind), magic0 = GetBaseStat(player, StatMagicFind);
+	const std::int32_t total0 = GetStat(player, StatGoldFind), totalMagic0 = GetStat(player, StatMagicFind);
 	if (gold0 != (on ? gold : 0)) SetStat(player, StatGoldFind, on ? gold : 0);
 	if (magic0 != (on ? magic : 0)) SetStat(player, StatMagicFind, on ? magic : 0);
-	static int logs = 0;
-	if ((gold0 != (on ? gold : 0) || magic0 != (on ? magic : 0)) && logs < 12)
-		++logs, Log(false, "rewards on client player %p (index %d, level %d): gold find %d -> %d, magic find %d -> %d", player, index, level, gold0,
-		            GetStat(player, StatGoldFind), magic0, GetStat(player, StatMagicFind));
+	static int logs = 0; // a change after the first one means something reset it
+	if ((gold0 != (on ? gold : 0) || magic0 != (on ? magic : 0)) && logs < 30)
+		++logs, Log(false, "rewards on client player %p (index %d, level %d): gold find %d -> %d (bonus %d), magic find %d -> %d (bonus %d)", player, index,
+		            level, total0, GetStat(player, StatGoldFind), gold0, totalMagic0, GetStat(player, StatMagicFind), magic0);
 }
 
 void* HookMapLine(void* text, char c) noexcept {
@@ -1174,6 +1181,14 @@ D2RL::ConsoleCommandResult __cdecl Command(D2R::Game::Client*, const D2RL::Conso
 	}
 	ReleaseSRWLockShared(&Lock);
 	Context->WriteConsoleMessage(text.c_str());
+	const int index = At<LocalIndexFn>(0x8B2D0)();
+	if (void* player = index >= 0 && index < 8 ? At<PlayerByIndexFn>(0x9A480)(index) : nullptr) {
+		char line[160];
+		std::snprintf(line, sizeof(line), "You: gold find %d (TZ Plus %d), magic find %d (TZ Plus %d)", GetStat(player, StatGoldFind),
+		              GetBaseStat(player, StatGoldFind), GetStat(player, StatMagicFind), GetBaseStat(player, StatMagicFind));
+		Context->WriteConsoleMessage(line);
+		Log(false, "%s", line);
+	}
 	return D2RL::ConsoleCommandResult::Handled;
 }
 
