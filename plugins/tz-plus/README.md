@@ -11,6 +11,6 @@ D2RLoader plugin. Bigger terror zones, with mods that have tiers and give more l
 
 Mods: Extra Strong, Extra Fast, Cursed, Magic Resistant, Fire / Lightning / Cold Enchanted, Venomous, Mana Burn, Teleportation, Spectral Hit, Stone Skin, Multiple Shots, Tough, Vampiric, Regenerating, and every monster aura (Might, Holy Fire, Blessed Aim, Holy Freeze, Conviction, Fanaticism, Holy Shock, Concentration, Vigor, Thorns; at most one aura per game).
 
-While you are in a terror zone, the game's mods and rewards are shown on screen (top right by default; position and size in the settings). The console command `tzplus` shows the game's mods and rewards. Settings: `d2rloader/config/tz-plus.toml`, or in game with I Hate TOMLs. Runs where the game's server runs: single player and games you host.
+The game's mods and rewards are listed in the map's text (top right, map open), under "Terrorized". The console command `tzplus` shows the game's mods and rewards. Settings: `d2rloader/config/tz-plus.toml`, or in game with I Hate TOMLs. Runs where the game's server runs: single player and games you host.
 
 Build: `./build.sh` (MinGW-w64).

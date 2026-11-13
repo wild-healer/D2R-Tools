@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.3";
+constexpr const char* PluginVersion = "0.0.4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -151,9 +151,6 @@ struct Settings {
 	std::atomic<bool> hell { true };
 	std::atomic<bool> allowed[ModCount] {};
 	std::atomic<bool>  show { true };
-	std::atomic<float> showX { 0.99f }; // right edge of the text, share of the screen width
-	std::atomic<float> showY { 0.10f }; // top of the text, share of the screen height
-	std::atomic<float> showSize { 1.0f };
 	Settings() {
 		for (auto& on : allowed) on = true;
 	}
@@ -195,9 +192,9 @@ constexpr Check Calls[] {
 	{ 0x3AEFF0, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83 } }, // BossKind
 	{ 0x35DB10, { 0x40, 0x53, 0x57, 0x41, 0x57, 0x48, 0x83, 0xEC } }, // ConfigAt
 	{ 0x34B440, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B } }, // UnitRoom
-	{ 0x34B240, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B } }, // UnitGame
 	{ 0x3AF200, { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B } }, // TerrorCheck
 	{ 0x49AEB0, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74 } }, // LevelUp
+	{ 0x1475050, { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74 } }, // AppendChar (map text)
 };
 constexpr std::uint64_t GetStatRva = 0x2F5020, SetStatRva = 0x2F7D10; // jmp qword ptr [rip+x]
 
@@ -212,7 +209,6 @@ using UModStartFn     = void (*)(void* unit, std::int32_t mod, std::int32_t uniq
 using AddSkillFn      = void* (*)(void* unit, std::int32_t skill, std::int32_t level, std::int32_t one) noexcept;
 using UseSkillFn      = void (*)(void* unit, std::int32_t hand, std::int32_t skill, std::int32_t minusOne) noexcept;
 using UnitRoomFn      = void* (*)(void* unit) noexcept;
-using UnitGameFn      = void* (*)(void* unit) noexcept;
 using RoomLevelFn     = std::int32_t (*)(void* room) noexcept;
 using LevelTzFn       = bool (*)(void* game, std::int32_t level) noexcept;
 using FindUnitFn      = void* (*)(void* game, std::int32_t type, std::uint32_t id) noexcept;
@@ -380,9 +376,10 @@ void Roll(GameMods& g) noexcept {
 }
 
 GameMods* Find(const std::uint8_t* game) noexcept {
-	const std::uint64_t seed = Field<std::uint64_t>(game, GameSeed);
+	// By the game's memory and difficulty (its seed at +0x1A8 is the game's random state, it changes).
+	// Forgotten when the local player leaves a game (OnGameplayEvent).
 	for (GameMods* g : Games)
-		if (g->game == game && g->seed == seed) return g;
+		if (g->game == game && g->difficulty == Field<std::uint8_t>(game, GameDifficulty)) return g;
 	return nullptr;
 }
 
@@ -774,8 +771,9 @@ using TerrorCheckFn = bool (*)(void* unit) noexcept;
 using LevelUpFn     = std::uint64_t (*)(void* unit, void* info, std::uint16_t flags) noexcept;
 
 // 0x54375B: call 0x3AF200 (monster has the terror state?), reached by every monster.
-bool HookTerrorCheck(void* unit) noexcept {
-	AddMods(static_cast<std::uint8_t*>(At<UnitGameFn>(0x34B240)(unit)), unit);
+// The stub passes the game too (r14 there, see PatchCall).
+bool HookTerrorCheck(void* unit, std::uint8_t* game) noexcept {
+	AddMods(game, unit);
 	return At<TerrorCheckFn>(0x3AF200)(unit);
 }
 
@@ -787,7 +785,7 @@ std::uint64_t HookMonInit(std::uint8_t* game, std::uint8_t* unit, void* room, st
 }
 std::uint64_t HookLevelUp(void* unit, void* info, std::uint16_t flags) noexcept {
 	const std::uint64_t result = At<LevelUpFn>(0x49AEB0)(unit, info, flags);
-	if (unit && ModsOf(static_cast<std::uint8_t*>(At<UnitGameFn>(0x34B240)(unit)))) CapLevel(unit);
+	if (unit) CapLevel(unit); // only reached through monster init; the cap is a no-op under 100
 	return result;
 }
 
@@ -813,18 +811,21 @@ std::uint8_t* StubPage {};
 std::size_t   StubUsed = 0;
 
 // Redirects "call target" at site to hook (through a jump near the game code).
-bool PatchCall(std::uint64_t siteRva, std::uint64_t targetRva, const void* hook) noexcept {
+bool PatchCall(std::uint64_t siteRva, std::uint64_t targetRva, const void* hook, bool gameInRdx = false) noexcept {
 	const std::uintptr_t site = Base + siteRva;
 	if (!StubPage) StubPage = static_cast<std::uint8_t*>(AllocNear(site, 4096));
-	if (!StubPage || StubUsed + 16 > 4096) return false;
+	if (!StubPage || StubUsed + 32 > 4096) return false;
 	std::uint8_t* stub = StubPage + StubUsed;
-	StubUsed += 16;
+	StubUsed += 32;
 	const auto         target = reinterpret_cast<std::uint64_t>(hook);
 	const std::uint8_t jump[6] { 0xFF, 0x25, 0, 0, 0, 0 }; // jmp [rip]
+	const std::uint8_t gameArg[3] { 0x4C, 0x89, 0xF2 };      // mov rdx, r14
 	DWORD old = 0;
 	if (!VirtualProtect(StubPage, 4096, PAGE_READWRITE, &old)) return false;
-	std::memcpy(stub, jump, 6);
-	std::memcpy(stub + 6, &target, 8);
+	std::size_t at = 0;
+	if (gameInRdx) std::memcpy(stub, gameArg, 3), at = 3;
+	std::memcpy(stub + at, jump, 6);
+	std::memcpy(stub + at + 6, &target, 8);
 	if (!VirtualProtect(StubPage, 4096, PAGE_EXECUTE_READ, &old)) return false;
 	FlushInstructionCache(GetCurrentProcess(), StubPage, 4096);
 	const auto from = static_cast<std::int64_t>(targetRva) - static_cast<std::int64_t>(siteRva + 5);
@@ -882,17 +883,7 @@ bool ApplySetting(const std::string& key, const std::string& value, std::string&
 	if (key == "enabled") return flag(Config.enabled);
 	if (key == "nightmare") return flag(Config.nightmare);
 	if (key == "hell") return flag(Config.hell);
-	const auto number = [&](std::atomic<float>& target, float low, float high) {
-		char* end         = nullptr;
-		const float v     = std::strtof(value.c_str(), &end);
-		if (end == value.c_str() || !std::isfinite(v)) return error = "a number", false;
-		target = std::clamp(v, low, high);
-		return true;
-	};
 	if (key == "show_mods") return flag(Config.show);
-	if (key == "show_x") return number(Config.showX, 0.0f, 1.0f);
-	if (key == "show_y") return number(Config.showY, 0.0f, 1.0f);
-	if (key == "show_size") return number(Config.showSize, 0.5f, 3.0f);
 	if (const int m = ModKey(key); m >= 0) return flag(Config.allowed[m]);
 	return error = "unknown setting", false;
 }
@@ -902,15 +893,7 @@ std::string ValueOf(const std::string& key) {
 	if (key == "enabled") return flag(Config.enabled);
 	if (key == "nightmare") return flag(Config.nightmare);
 	if (key == "hell") return flag(Config.hell);
-	const auto number = [](float v) {
-		char text[32];
-		std::snprintf(text, sizeof(text), "%.2f", v);
-		return std::string(text);
-	};
 	if (key == "show_mods") return flag(Config.show);
-	if (key == "show_x") return number(Config.showX);
-	if (key == "show_y") return number(Config.showY);
-	if (key == "show_size") return number(Config.showSize);
 	if (const int m = ModKey(key); m >= 0) return flag(Config.allowed[m]);
 	return {};
 }
@@ -925,8 +908,7 @@ std::string Render() {
 [tz-plus]
 enabled = )" + ValueOf("enabled") +
 	                   "\nnightmare = " + ValueOf("nightmare") + "\nhell = " + ValueOf("hell") +
-	                   "\n\n# The game's mods and rewards on screen, in a terror zone.\n# show_x: right edge, show_y: top, as a share of the screen (0 to 1).\nshow_mods = " +
-	                   ValueOf("show_mods") + "\nshow_x = " + ValueOf("show_x") + "\nshow_y = " + ValueOf("show_y") + "\nshow_size = " + ValueOf("show_size") +
+	                   "\n\n# The game's mods and rewards under \"Terrorized\" in the map's text.\nshow_mods = " + ValueOf("show_mods") +
 	                   "\n\n# Mods that can roll\n";
 	for (int m = 0; m < ModCount; ++m) toml += std::string(Mods[m].key) + " = " + ValueOf(Mods[m].key) + "\n";
 	return toml;
@@ -982,37 +964,10 @@ type = "bool"
 label = "Hell: every level"
 note = "Up to level 99. 1 to 3 mods, tier 1 to 3."
 [[setting]]
-type = "header"
-label = "On screen"
-[[setting]]
 key = "show_mods"
 type = "bool"
-label = "Show the mods"
-note = "The game's mods and rewards, while you are in a terror zone."
-[[setting]]
-key = "show_x"
-type = "float"
-label = "Right edge"
-min = 0
-max = 1
-step = 0.01
-decimals = 2
-[[setting]]
-key = "show_y"
-type = "float"
-label = "Top"
-min = 0
-max = 1
-step = 0.01
-decimals = 2
-[[setting]]
-key = "show_size"
-type = "float"
-label = "Text size"
-min = 0.5
-max = 3
-step = 0.1
-decimals = 1
+label = "Show the mods on the map"
+note = "The game's mods and rewards under \"Terrorized\" in the map's text."
 [[setting]]
 type = "header"
 label = "Mods that can roll"
@@ -1047,90 +1002,53 @@ bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint3
 
 // ---- on screen ----
 
-namespace Overlay = D2RL::Overlay;
 
-const D2RL::OverlayService*   OverlayApi {};
 const D2RL::LifecycleService* Lifecycle {};
 std::atomic<bool>             InGame { false };
 std::atomic<int>              CurrentLevel { -1 };
-
-constexpr int Towns[] { 1, 40, 75, 103, 109 };
-
-int ActOf(int level) noexcept {
-	for (int a = 0; a < 5; ++a)
-		for (int i = 0; i < Acts[a].count; ++i)
-			if (Acts[a].ids[i] == level) return a + 1;
-	return 0;
-}
 
 void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
 	using EventKind = D2RL::Lifecycle::GameplayEventKind;
 	if (!D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) return;
 	switch (event->kind) {
 	case EventKind::GameJoined: InGame = true, CurrentLevel = -1; break;
-	case EventKind::GameLeft: InGame = false, CurrentLevel = -1; break;
+	case EventKind::GameLeft: {
+		InGame = false, CurrentLevel = -1;
+		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
+		Games.clear();
+		Last = nullptr;
+		ReleaseSRWLockExclusive(&Lock);
+		break;
+	}
 	case EventKind::LevelChanged: CurrentLevel = event->currentValue; break;
 	default: break;
 	}
 }
 
-void DrawLine(const D2RL::PluginContext* context, const Overlay::Frame* frame, const std::string& text, float right, float top, float size,
-              Overlay::Color color) noexcept {
-	Overlay::MeasureTextRequest measure {
-		.structSize = Overlay::MeasureTextRequestSize,
-		.canvas     = frame->canvas,
-		.textSize   = size,
-		.text       = text.data(),
-		.textLength = static_cast<std::uint32_t>(text.size()),
-	};
-	Overlay::TextMetrics metrics { .structSize = Overlay::TextMetricsSize };
-	float width = size * 0.5f * static_cast<float>(text.size());
-	if (OverlayApi->measureText(context, &measure, &metrics) == Overlay::Result::Success && metrics.width > 0) width = metrics.width;
-	const Overlay::TextRequest shadow {
-		.structSize = Overlay::TextRequestSize,
-		.canvas     = frame->canvas,
-		.position   = { right - width + 1.5f, top + 1.5f },
-		.color      = { 0.0f, 0.0f, 0.0f, 0.85f },
-		.textSize   = size,
-		.text       = text.data(),
-		.textLength = static_cast<std::uint32_t>(text.size()),
-	};
-	(void)OverlayApi->drawText(context, &shadow);
-	Overlay::TextRequest request = shadow;
-	request.position             = { right - width, top };
-	request.color                = color;
-	(void)OverlayApi->drawText(context, &request);
+// The map's text (top right, with the map open): after its "Terrorized: <level>" line,
+// D2R+0x1475410 calls Append(text, '\n'). We add our lines there.
+using AppendCharFn = void* (*)(void* text, char c) noexcept;
+constexpr std::uint64_t MapLineCallRva = 0x1475410, AppendCharRva = 0x1475050;
+
+void AppendText(void* text, const std::string& line) noexcept {
+	for (const char c : line) At<AppendCharFn>(AppendCharRva)(text, c);
+	At<AppendCharFn>(AppendCharRva)(text, '\n');
 }
 
-void __cdecl OnFrame(const D2RL::PluginContext* context, const Overlay::Frame* frame, void*) noexcept {
-	if (!frame || frame->structSize < Overlay::FrameRequiredSize || !InGame || !Config.show || !Config.enabled) return;
-	const int level = CurrentLevel.load();
-	if (level <= 0) return;
-	for (const int town : Towns)
-		if (level == town) return;
-	std::string mods, rewards;
-	{
-		AcquireSRWLockShared(&Lock);
-		const GameMods* g = Last;
-		bool            shown = g && g->count > 0 && ActOf(level) != 0 && (g->difficulty == 2 || ActOf(level) == g->act.load());
-		if (shown) {
-			for (int i = 0; i < g->count; ++i) {
-				if (!mods.empty()) mods += ", ";
-				mods += std::string(Mods[g->mods[i].mod].name) + " " + Roman(g->mods[i].tier);
-			}
-			char text[160];
-			std::snprintf(text, sizeof(text), "+%d%% Gold Find   +%d%% Magic Find   +%d%% Experience", g->gold, g->magic, g->xp);
-			rewards = text;
-		}
-		ReleaseSRWLockShared(&Lock);
-		if (!shown) return;
+void* HookMapLine(void* text, char c) noexcept {
+	void* const result = At<AppendCharFn>(AppendCharRva)(text, c);
+	if (!text || !Config.show || !Config.enabled || !InGame) return result;
+	std::vector<std::string> lines;
+	AcquireSRWLockShared(&Lock);
+	if (const GameMods* g = Last; g && g->count > 0) {
+		for (int i = 0; i < g->count; ++i) lines.push_back(std::string(Mods[g->mods[i].mod].name) + " " + Roman(g->mods[i].tier));
+		char rewards[128];
+		std::snprintf(rewards, sizeof(rewards), "+%d%% Gold Find, +%d%% Magic Find, +%d%% Experience", g->gold, g->magic, g->xp);
+		lines.push_back(rewards);
 	}
-	const float base  = frame->defaultTextSize >= 6.0f ? frame->defaultTextSize : 18.0f;
-	const float size  = base * Config.showSize.load();
-	const float right = frame->screenWidth * Config.showX.load();
-	const float top   = frame->screenHeight * Config.showY.load();
-	DrawLine(context, frame, "Terror Zone: " + mods, right, top, size, { 0.78f, 0.52f, 1.0f, 1.0f });
-	DrawLine(context, frame, rewards, right, top + size * 1.25f, size * 0.85f, { 0.85f, 0.75f, 0.45f, 1.0f });
+	ReleaseSRWLockShared(&Lock);
+	for (const std::string& line : lines) AppendText(text, line);
+	return result;
 }
 
 template <typename Service>
@@ -1145,8 +1063,7 @@ const Service* Query(const char* name) {
 
 void StartDisplay(const D2RL::PluginContext* context) noexcept {
 	Lifecycle  = Query<D2RL::LifecycleService>("lifecycle");
-	OverlayApi = Query<D2RL::OverlayService>("overlay");
-	if (!Lifecycle || !OverlayApi) return;
+	if (!Lifecycle) return;
 	using EventKind = D2RL::Lifecycle::GameplayEventKind;
 	for (const EventKind kind : { EventKind::GameJoined, EventKind::GameLeft, EventKind::LevelChanged }) {
 		const D2RL::Lifecycle::GameplayEventListener listener {
@@ -1156,16 +1073,8 @@ void StartDisplay(const D2RL::PluginContext* context) noexcept {
 		};
 		D2RL::Lifecycle::ListenerHandle handle = D2RL::Lifecycle::InvalidHandle;
 		if (Lifecycle->registerGameplayEventListener(context, &listener, &handle) != D2RL::Lifecycle::Result::Success)
-			return Log(true, "could not listen to game events: the mods are not shown on screen");
+			return Log(true, "could not listen to game events: the mods are not shown on the map");
 	}
-	const Overlay::CallbackRegistration registration {
-		.structSize = Overlay::CallbackRegistrationSize,
-		.phase      = Overlay::Phase::AfterGameUi,
-		.callback   = OnFrame,
-	};
-	Overlay::CallbackHandle handle {};
-	if (OverlayApi->registerFrameCallback(context, &registration, &handle) != Overlay::Result::Success)
-		Log(true, "could not draw on screen: the mods are not shown");
 }
 
 // ---- console: "tzplus" shows this game's mods ----
@@ -1211,11 +1120,13 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "TZ Plus %s: inactive, could not hook D2R+0x%llX (another plugin may hook it)", PluginVersion, static_cast<unsigned long long>(ApplyRva));
 		return true;
 	}
-	if (!PatchCall(TerrorCheckCallRva, 0x3AF200, reinterpret_cast<const void*>(&HookTerrorCheck)))
+	if (!PatchCall(TerrorCheckCallRva, 0x3AF200, reinterpret_cast<const void*>(&HookTerrorCheck), true))
 		Log(true, "TZ Plus %s: monster mods off, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(TerrorCheckCallRva));
 	if (!PatchCall(MonInitCallRva, MonInitRva, reinterpret_cast<const void*>(&HookMonInit)) ||
 	    !PatchCall(LevelUpCallRva, 0x49AEB0, reinterpret_cast<const void*>(&HookLevelUp)))
 		Log(true, "TZ Plus %s: level 99 cap partly off, could not patch the monster level calls", PluginVersion);
+	if (!PatchCall(MapLineCallRva, AppendCharRva, reinterpret_cast<const void*>(&HookMapLine)))
+		Log(true, "TZ Plus %s: the mods are not shown on the map, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(MapLineCallRva));
 	Log(false, "TZ Plus %s: %s (Nightmare %s, Hell %s)", PluginVersion, Config.enabled ? "active" : "turned off", Config.nightmare ? "on" : "off",
 	    Config.hell ? "on" : "off");
 	return true;

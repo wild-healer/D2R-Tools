@@ -9,12 +9,8 @@ enabled = true
 nightmare = true
 hell = true
 
-# The game's mods and rewards on screen, in a terror zone.
-# show_x: right edge, show_y: top, as a share of the screen (0 to 1).
+# The game's mods and rewards under "Terrorized" in the map's text.
 show_mods = true
-show_x = 0.99
-show_y = 0.10
-show_size = 1.00
 
 # Mods that can roll
 extra_strong = true
