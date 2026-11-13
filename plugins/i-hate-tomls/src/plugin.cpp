@@ -51,7 +51,7 @@
 namespace {
 
 constexpr const char* PluginId      = "i-hate-tomls";
-constexpr const char* PluginVersion = "1.1.1-dev-1";
+constexpr const char* PluginVersion = "1.1.1-dev-3";
 constexpr const char* CommandPrefix = "i-hate-tomls/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -296,6 +296,8 @@ struct Setting {
 	std::string              defaultValue; // position: what its reset button sets
 	// table: a check box per row and column, each one the bool "<row>.<column>"
 	std::vector<std::string> rows, rowLabels, columns, columnLabels;
+	std::vector<int>         needs; // per column: the column of the same row that must be ticked for it to be used, or -1
+	std::vector<std::pair<std::string, std::string>> needsWritten; // `requires` as written: column, the column it needs
 };
 
 struct Client {
@@ -379,6 +381,17 @@ void ReadSchema(const char* text, Client& client) {
 		else if (key == "row_labels") current->rowLabels = ArrayItems(value);
 		else if (key == "columns") current->columns = ArrayItems(value);
 		else if (key == "column_labels") current->columnLabels = ArrayItems(value);
+		else if (key == "requires" && value.size() >= 2 && value.front() == '{') { // { enchant = "weapon", ... }
+			const auto       close = value.rfind('}');
+			std::string_view inner = std::string_view(value).substr(1, close == std::string::npos ? std::string::npos : close - 1);
+			while (!inner.empty()) {
+				const auto        comma = inner.find(',');
+				const std::string pair  = Trim(inner.substr(0, comma));
+				inner                   = comma == std::string_view::npos ? std::string_view() : inner.substr(comma + 1);
+				const auto        eq    = pair.find('=');
+				if (eq != std::string::npos) current->needsWritten.emplace_back(Unquote(Trim(std::string_view(pair).substr(0, eq))), Unquote(Trim(std::string_view(pair).substr(eq + 1))));
+			}
+		}
 	}
 	for (auto& s : client.settings) {
 		if (s.label.empty() && s.kind != Kind::Table) s.label = s.key;
@@ -388,6 +401,12 @@ void ReadSchema(const char* text, Client& client) {
 				if (s.rowLabels[r].empty()) s.rowLabels[r] = s.rows[r];
 			for (std::size_t c = 0; c < s.columns.size(); ++c)
 				if (s.columnLabels[c].empty()) s.columnLabels[c] = s.columns[c];
+			s.needs.assign(s.columns.size(), -1);
+			const auto column = [&](const std::string& name) { return static_cast<int>(std::find(s.columns.begin(), s.columns.end(), name) - s.columns.begin()); };
+			for (const auto& [col, need] : s.needsWritten) {
+				const int c = column(col), n = column(need);
+				if (c < static_cast<int>(s.columns.size()) && n < static_cast<int>(s.columns.size()) && c != n) s.needs[static_cast<std::size_t>(c)] = n;
+			}
 		}
 		if (s.step <= 0) s.step = 1;
 		if (s.shiftStep <= 0) s.shiftStep = s.step * 10;
@@ -1541,12 +1560,22 @@ std::string RowWidgets(const Client& client, const Setting& setting, int row, in
 		for (std::size_t r = 0; r < setting.rows.size(); ++r, at += TableLine) {
 			const std::string cell = id + "_" + std::to_string(r);
 			out += Text("RowName" + cell, ContentLeft, at, left - ContentLeft - 10, TableLine, setting.rowLabels[r], SmallLabelStyle);
+			std::vector<char> ticked(setting.columns.size());
 			for (std::size_t c = 0; c < setting.columns.size(); ++c) {
 				char value[64] {};
 				const std::string key = setting.rows[r] + "." + setting.columns[c];
-				const bool on = client.get(key.c_str(), value, sizeof(value), client.user) && Unquote(Trim(value)) == "true";
-				out += Check("Cell" + cell + "_" + std::to_string(c), left + static_cast<int>(c) * width + (width - TableCheck) / 2, at + (TableLine - TableCheck) / 2, on,
-				             "C" + id + ":" + std::to_string(r) + ":" + std::to_string(c));
+				ticked[c] = client.get(key.c_str(), value, sizeof(value), client.user) && Unquote(Trim(value)) == "true";
+			}
+			for (std::size_t c = 0; c < setting.columns.size(); ++c) {
+				const std::string name    = "Cell" + cell + "_" + std::to_string(c);
+				const int         x       = left + static_cast<int>(c) * width + (width - TableCheck) / 2, cy = at + (TableLine - TableCheck) / 2;
+				const std::string command = "C" + id + ":" + std::to_string(r) + ":" + std::to_string(c);
+				const int         need    = setting.needs.empty() ? -1 : setting.needs[c];
+				// a box whose column needs another one unticked: greyed (frames 2 and 6), its value kept
+				if (need >= 0 && !ticked[static_cast<std::size_t>(need)]) {
+					const int frame = ticked[c] ? 6 : 2;
+					out += Gui::Button(name, x, cy, Gui::Kit::Native::CheckBox, { frame, frame, frame }, command, "Needs " + setting.columnLabels[static_cast<std::size_t>(need)]);
+				} else out += Check(name, x, cy, ticked[c], command);
 			}
 		}
 		return out;
@@ -2088,6 +2117,11 @@ void RunClientCommand(const std::string& command) {
 			if (second == std::string::npos) break;
 			const std::size_t r = std::strtoul(command.c_str() + first + 1, nullptr, 10), c = std::strtoul(command.c_str() + second + 1, nullptr, 10);
 			if (r >= setting.rows.size() || c >= setting.columns.size()) break;
+			if (!setting.needs.empty() && setting.needs[c] >= 0) { // greyed while the box it needs is unticked
+				Setting need = setting;
+				need.key     = setting.rows[r] + "." + setting.columns[static_cast<std::size_t>(setting.needs[c])];
+				if (Unquote(GetValue(client, need)) != "true") break;
+			}
 			Setting cell = setting;
 			cell.kind  = Kind::Bool;
 			cell.key   = setting.rows[r] + "." + setting.columns[c];

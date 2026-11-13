@@ -45,6 +45,8 @@
 //   columns = ["self", "merc"]
 //   column_labels = ["From you", "From your merc"]
 //   -> get("on_self.merc") / set("on_self.merc", "true")
+//   requires = { merc = "self" }       # optional (newer than I Hate TOMLs 1.1.1): a column greyed, its value kept,
+//                                      # while the same row's box in the other column is unticked
 //
 // A plugin with a settings window of its own declares it instead, and the
 // menu's Open button then opens that window:

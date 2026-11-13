@@ -81,7 +81,7 @@ ctrl_step = 50                          # Ctrl+click (default 100 steps)
 | `enum` | drop-down list (`values`, optional `labels`) | `"after"` (one of `values`) |
 | `string` | text box (click, type, Enter) | `"Eth"` |
 | `position` | X and Y with arrows and a reset button (`min`, `max`, `default = [x, y]`) | `[12, -40]` |
-| `table` | grid of check boxes (`rows`, `columns`, optional `row_labels`, `column_labels`) | `true` / `false` for each box, key `"<row>.<column>"` |
+| `table` | grid of check boxes (`rows`, `columns`, optional `row_labels`, `column_labels`, `requires`) | `true` / `false` for each box, key `"<row>.<column>"` |
 | `action` | button (`confirm = true` asks for a second click) | `run` |
 | `header` | section title (`label`) | no key |
 | `text` | plain text (`label`, `\n` for a new line) | no key |
@@ -100,6 +100,15 @@ row_labels = ["On the ground", "At vendors"]
 columns = ["normal", "magic", "rare", "unique"]
 column_labels = ["Normal", "Magic", "Rare", "Unique"]
 # -> get("ground.magic"), set("vendor.rare", "true")
+```
+
+A column can need another column of the same row with `requires`. While the needed box is unticked,
+the box is shown greyed and can't be clicked. Its value is kept, and get still returns it. Ignore
+it in the plugin while the needed box is off.
+
+```toml
+columns = ["weapon", "helm", "armor", "enchant"]
+requires = { enchant = "weapon" }   # enchant is greyed in a row whose weapon box is unticked
 ```
 
 ## 4. Write get and set
