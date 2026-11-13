@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.2";
+constexpr const char* PluginVersion = "0.0.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -150,6 +150,10 @@ struct Settings {
 	std::atomic<bool> nightmare { true };
 	std::atomic<bool> hell { true };
 	std::atomic<bool> allowed[ModCount] {};
+	std::atomic<bool>  show { true };
+	std::atomic<float> showX { 0.99f }; // right edge of the text, share of the screen width
+	std::atomic<float> showY { 0.10f }; // top of the text, share of the screen height
+	std::atomic<float> showSize { 1.0f };
 	Settings() {
 		for (auto& on : allowed) on = true;
 	}
@@ -293,6 +297,7 @@ struct GameMods {
 	std::uint64_t       seed = 0;
 	int                 difficulty = 0;
 	int                 zoneLevel = 0;
+	std::atomic<int>    act { 0 }; // Nightmare: the terrorized act (1-5); Hell: 0 (all)
 	int                 count = 0;
 	Rolled              mods[3] {};
 	int                 gold = 0, magic = 0, xp = 0; // % bonuses
@@ -605,6 +610,7 @@ std::uint64_t HookApply(std::uint8_t* game, std::uint8_t* zone, std::uint8_t fla
 	const int          act     = difficulty == 2 ? 0 : static_cast<int>(SlotOf(config, now) % 5) + 1;
 	void*              ours    = BuildZone(zone, config, act);
 	GameMods*          g       = ModsFor(game, difficulty);
+	g->act.store(act);
 
 	// No game mod: ours replace it, and it must not roll again on rotation.
 	SetField<std::int32_t>(game, GameUMod, 0);
@@ -876,6 +882,17 @@ bool ApplySetting(const std::string& key, const std::string& value, std::string&
 	if (key == "enabled") return flag(Config.enabled);
 	if (key == "nightmare") return flag(Config.nightmare);
 	if (key == "hell") return flag(Config.hell);
+	const auto number = [&](std::atomic<float>& target, float low, float high) {
+		char* end         = nullptr;
+		const float v     = std::strtof(value.c_str(), &end);
+		if (end == value.c_str() || !std::isfinite(v)) return error = "a number", false;
+		target = std::clamp(v, low, high);
+		return true;
+	};
+	if (key == "show_mods") return flag(Config.show);
+	if (key == "show_x") return number(Config.showX, 0.0f, 1.0f);
+	if (key == "show_y") return number(Config.showY, 0.0f, 1.0f);
+	if (key == "show_size") return number(Config.showSize, 0.5f, 3.0f);
 	if (const int m = ModKey(key); m >= 0) return flag(Config.allowed[m]);
 	return error = "unknown setting", false;
 }
@@ -885,6 +902,15 @@ std::string ValueOf(const std::string& key) {
 	if (key == "enabled") return flag(Config.enabled);
 	if (key == "nightmare") return flag(Config.nightmare);
 	if (key == "hell") return flag(Config.hell);
+	const auto number = [](float v) {
+		char text[32];
+		std::snprintf(text, sizeof(text), "%.2f", v);
+		return std::string(text);
+	};
+	if (key == "show_mods") return flag(Config.show);
+	if (key == "show_x") return number(Config.showX);
+	if (key == "show_y") return number(Config.showY);
+	if (key == "show_size") return number(Config.showSize);
 	if (const int m = ModKey(key); m >= 0) return flag(Config.allowed[m]);
 	return {};
 }
@@ -898,7 +924,10 @@ std::string Render() {
 
 [tz-plus]
 enabled = )" + ValueOf("enabled") +
-	                   "\nnightmare = " + ValueOf("nightmare") + "\nhell = " + ValueOf("hell") + "\n\n# Mods that can roll\n";
+	                   "\nnightmare = " + ValueOf("nightmare") + "\nhell = " + ValueOf("hell") +
+	                   "\n\n# The game's mods and rewards on screen, in a terror zone.\n# show_x: right edge, show_y: top, as a share of the screen (0 to 1).\nshow_mods = " +
+	                   ValueOf("show_mods") + "\nshow_x = " + ValueOf("show_x") + "\nshow_y = " + ValueOf("show_y") + "\nshow_size = " + ValueOf("show_size") +
+	                   "\n\n# Mods that can roll\n";
 	for (int m = 0; m < ModCount; ++m) toml += std::string(Mods[m].key) + " = " + ValueOf(Mods[m].key) + "\n";
 	return toml;
 }
@@ -954,6 +983,38 @@ label = "Hell: every level"
 note = "Up to level 99. 1 to 3 mods, tier 1 to 3."
 [[setting]]
 type = "header"
+label = "On screen"
+[[setting]]
+key = "show_mods"
+type = "bool"
+label = "Show the mods"
+note = "The game's mods and rewards, while you are in a terror zone."
+[[setting]]
+key = "show_x"
+type = "float"
+label = "Right edge"
+min = 0
+max = 1
+step = 0.01
+decimals = 2
+[[setting]]
+key = "show_y"
+type = "float"
+label = "Top"
+min = 0
+max = 1
+step = 0.01
+decimals = 2
+[[setting]]
+key = "show_size"
+type = "float"
+label = "Text size"
+min = 0.5
+max = 3
+step = 0.1
+decimals = 1
+[[setting]]
+type = "header"
 label = "Mods that can roll"
 )toml";
 	for (int m = 0; m < ModCount; ++m)
@@ -982,6 +1043,129 @@ bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint3
 	}
 	SaveConfig();
 	return true;
+}
+
+// ---- on screen ----
+
+namespace Overlay = D2RL::Overlay;
+
+const D2RL::OverlayService*   OverlayApi {};
+const D2RL::LifecycleService* Lifecycle {};
+std::atomic<bool>             InGame { false };
+std::atomic<int>              CurrentLevel { -1 };
+
+constexpr int Towns[] { 1, 40, 75, 103, 109 };
+
+int ActOf(int level) noexcept {
+	for (int a = 0; a < 5; ++a)
+		for (int i = 0; i < Acts[a].count; ++i)
+			if (Acts[a].ids[i] == level) return a + 1;
+	return 0;
+}
+
+void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
+	using EventKind = D2RL::Lifecycle::GameplayEventKind;
+	if (!D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) return;
+	switch (event->kind) {
+	case EventKind::GameJoined: InGame = true, CurrentLevel = -1; break;
+	case EventKind::GameLeft: InGame = false, CurrentLevel = -1; break;
+	case EventKind::LevelChanged: CurrentLevel = event->currentValue; break;
+	default: break;
+	}
+}
+
+void DrawLine(const D2RL::PluginContext* context, const Overlay::Frame* frame, const std::string& text, float right, float top, float size,
+              Overlay::Color color) noexcept {
+	Overlay::MeasureTextRequest measure {
+		.structSize = Overlay::MeasureTextRequestSize,
+		.canvas     = frame->canvas,
+		.textSize   = size,
+		.text       = text.data(),
+		.textLength = static_cast<std::uint32_t>(text.size()),
+	};
+	Overlay::TextMetrics metrics { .structSize = Overlay::TextMetricsSize };
+	float width = size * 0.5f * static_cast<float>(text.size());
+	if (OverlayApi->measureText(context, &measure, &metrics) == Overlay::Result::Success && metrics.width > 0) width = metrics.width;
+	const Overlay::TextRequest shadow {
+		.structSize = Overlay::TextRequestSize,
+		.canvas     = frame->canvas,
+		.position   = { right - width + 1.5f, top + 1.5f },
+		.color      = { 0.0f, 0.0f, 0.0f, 0.85f },
+		.textSize   = size,
+		.text       = text.data(),
+		.textLength = static_cast<std::uint32_t>(text.size()),
+	};
+	(void)OverlayApi->drawText(context, &shadow);
+	Overlay::TextRequest request = shadow;
+	request.position             = { right - width, top };
+	request.color                = color;
+	(void)OverlayApi->drawText(context, &request);
+}
+
+void __cdecl OnFrame(const D2RL::PluginContext* context, const Overlay::Frame* frame, void*) noexcept {
+	if (!frame || frame->structSize < Overlay::FrameRequiredSize || !InGame || !Config.show || !Config.enabled) return;
+	const int level = CurrentLevel.load();
+	if (level <= 0) return;
+	for (const int town : Towns)
+		if (level == town) return;
+	std::string mods, rewards;
+	{
+		AcquireSRWLockShared(&Lock);
+		const GameMods* g = Last;
+		bool            shown = g && g->count > 0 && ActOf(level) != 0 && (g->difficulty == 2 || ActOf(level) == g->act.load());
+		if (shown) {
+			for (int i = 0; i < g->count; ++i) {
+				if (!mods.empty()) mods += ", ";
+				mods += std::string(Mods[g->mods[i].mod].name) + " " + Roman(g->mods[i].tier);
+			}
+			char text[160];
+			std::snprintf(text, sizeof(text), "+%d%% Gold Find   +%d%% Magic Find   +%d%% Experience", g->gold, g->magic, g->xp);
+			rewards = text;
+		}
+		ReleaseSRWLockShared(&Lock);
+		if (!shown) return;
+	}
+	const float base  = frame->defaultTextSize >= 6.0f ? frame->defaultTextSize : 18.0f;
+	const float size  = base * Config.showSize.load();
+	const float right = frame->screenWidth * Config.showX.load();
+	const float top   = frame->screenHeight * Config.showY.load();
+	DrawLine(context, frame, "Terror Zone: " + mods, right, top, size, { 0.78f, 0.52f, 1.0f, 1.0f });
+	DrawLine(context, frame, rewards, right, top + size * 1.25f, size * 0.85f, { 0.85f, 0.75f, 0.45f, 1.0f });
+}
+
+template <typename Service>
+const Service* Query(const char* name) {
+	const Service* service = nullptr;
+	if (Context->QueryService(&service) != D2RL::ServiceQueryResult::Success) {
+		Log(true, "%s service unavailable: the mods are not shown on screen", name);
+		return nullptr;
+	}
+	return service;
+}
+
+void StartDisplay(const D2RL::PluginContext* context) noexcept {
+	Lifecycle  = Query<D2RL::LifecycleService>("lifecycle");
+	OverlayApi = Query<D2RL::OverlayService>("overlay");
+	if (!Lifecycle || !OverlayApi) return;
+	using EventKind = D2RL::Lifecycle::GameplayEventKind;
+	for (const EventKind kind : { EventKind::GameJoined, EventKind::GameLeft, EventKind::LevelChanged }) {
+		const D2RL::Lifecycle::GameplayEventListener listener {
+			.structSize = D2RL::Lifecycle::GameplayEventListenerSize,
+			.kind       = kind,
+			.callback   = OnGameplayEvent,
+		};
+		D2RL::Lifecycle::ListenerHandle handle = D2RL::Lifecycle::InvalidHandle;
+		if (Lifecycle->registerGameplayEventListener(context, &listener, &handle) != D2RL::Lifecycle::Result::Success)
+			return Log(true, "could not listen to game events: the mods are not shown on screen");
+	}
+	const Overlay::CallbackRegistration registration {
+		.structSize = Overlay::CallbackRegistrationSize,
+		.phase      = Overlay::Phase::AfterGameUi,
+		.callback   = OnFrame,
+	};
+	Overlay::CallbackHandle handle {};
+	if (OverlayApi->registerFrameCallback(context, &registration, &handle) != Overlay::Result::Success)
+		Log(true, "could not draw on screen: the mods are not shown");
 }
 
 // ---- console: "tzplus" shows this game's mods ----
@@ -1013,6 +1197,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	Schema = BuildSchema();
 	(void)Menu.Start(context, Schema.c_str(), MenuGet, MenuSet, nullptr);
 	(void)context->RegisterConsoleCommand("tzplus", &Command, "Shows this game's TZ Plus mods and rewards.");
+	StartDisplay(context);
 	Base = context->exeBase;
 	if (!Base || !Locate()) {
 		Log(true, "TZ Plus %s: inactive, this game build isn't supported (Steam 3.4.95041 is)", PluginVersion);
