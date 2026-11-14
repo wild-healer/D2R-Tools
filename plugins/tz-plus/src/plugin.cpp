@@ -59,7 +59,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.15";
+constexpr const char* PluginVersion = "0.0.16";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -940,8 +940,9 @@ struct SpawnHook {
 constexpr std::uint64_t TeleportHitSlotRva = 0x2396210 + (26 * 6 + 4) * 8, WarpRva = 0x5A7510;
 constexpr int           TeleportChance[3] { 15, 25, 35 };
 using WarpFn      = int (*)(void* game, void* unit, int skill, void* target, int x, int y) noexcept;
-using CastFn      = int (*)(void* game, void* unit, int skill, void* target, int x, int y) noexcept;
-constexpr std::uint64_t CastRva = 0x4A7CF0;
+using FindRoomFn   = void* (*)(void* room, int x, int y) noexcept;
+using TeleportFn   = int (*)(void* game, void* unit, void* room, int x, int y, int, int) noexcept;
+using UnitUpdateFn = void (*)(void* unit, int on) noexcept;
 using PathCoordFn = int (*)(void* path) noexcept;
 std::atomic<std::uint64_t> TeleportRandom { 0x9E3779B97F4A7C15ULL };
 
@@ -966,10 +967,16 @@ void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
 		const double angle    = static_cast<double>(Mix(state) % 6283) / 1000.0;
 		const int    distance = 6 + static_cast<int>(Mix(state) % 7);
 		const int    tx = x + static_cast<int>(std::lround(std::cos(angle) * distance)), ty = y + static_cast<int>(std::lround(std::sin(angle) * distance));
-		// 0x5A7510 only checks that the skill can land there; 0x4A7CF0 makes the monster cast it (what its AI does).
-		if (At<WarpFn>(WarpRva)(game, unit, 0xB8, nullptr, tx, ty)) {
-			const int cast = At<CastFn>(CastRva)(game, unit, 0xB8, nullptr, tx, ty);
-			if (logs < 40) ++logs, Log(false, "Teleportation: monster %p at %d,%d casts to %d,%d (%d)", unit, x, y, tx, ty, cast);
+		// 0x5A7510 only checks that the skill can land there. The move itself is what the game's monster
+		// teleport skill (0x57D6D0) does: room at the spot, 0x491CA0 moves the unit, 0x34F490(unit, 1) marks it for the clients.
+		if (!At<WarpFn>(WarpRva)(game, unit, 0xB8, nullptr, tx, ty)) continue;
+		void* here = At<UnitRoomFn>(0x34B440)(unit);
+		void* there = here ? At<FindRoomFn>(0x38DFB0)(here, tx, ty) : nullptr;
+		if (!there) continue;
+		if (At<TeleportFn>(0x491CA0)(game, unit, there, tx, ty, 0, 0)) {
+			At<UnitUpdateFn>(0x34F490)(unit, 1);
+			const int nx = At<PathCoordFn>(0x341A20)(path), ny = At<PathCoordFn>(0x341A30)(path);
+			if (logs < 40) ++logs, Log(false, "Teleportation: monster %p moved from %d,%d to %d,%d (asked %d,%d)", unit, x, y, nx, ny, tx, ty);
 			return;
 		}
 	}
