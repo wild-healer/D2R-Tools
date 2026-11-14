@@ -689,7 +689,8 @@ void ApplyUMod(void* unit, std::uint8_t mode, int id, int tier, bool elite) noex
 	}
 	if (slot < 0) return;
 	void* record = At<UModRecordFn>(0x4983C0)(mode, id);
-	if (!record || !At<UModAllowedFn>(0x4A1E50)(unit, record, 1)) return;
+	// Multiple Shots: the game's check keeps normal monsters out; ours may have it (it acts on their missiles only).
+	if (!record || (id != 29 && !At<UModAllowedFn>(0x4A1E50)(unit, record, 1))) return;
 
 	int before[6] {};
 	constexpr int watched[6] { StatFireRes, StatLightRes, StatColdRes, StatMagicRes, StatPhysRes, StatDefense };
