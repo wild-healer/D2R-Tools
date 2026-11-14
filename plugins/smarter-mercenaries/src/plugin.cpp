@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.30";
+constexpr const char* PluginVersion = "0.0.31";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -452,6 +452,10 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 	Gather(game, merc, scan);
 	if (!scan.count) return nullptr;
 	const bool     melee    = role == Role::Desert || role == Role::BashBarb || role == Role::FrenzyBarb;
+	// You're backing off: melee mercenaries come with you, whatever is on them
+	// or on you (fighting there kept them behind; a ring of monsters is still
+	// broken out of, see BreakOut).
+	if (melee && Now.intent == Intent::Retreat) return nullptr;
 	const int      leash    = Config.leash.load();
 	const int      engage   = Config.engage.load();
 	const unsigned elements = ElementsOf(merc, role);
