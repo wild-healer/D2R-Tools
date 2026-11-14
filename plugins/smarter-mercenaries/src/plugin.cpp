@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.33";
+constexpr const char* PluginVersion = "0.0.34";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1126,7 +1126,8 @@ bool Dodge(void* game, void* merc, void* owner, const Scan& scan, Role role) noe
 }
 
 // Crowd control on a monster that gets close: freezing or slowing arrows and
-// spikes, Stun and Bash (knockback), Taunt. The Desert mercenary has none.
+// spikes, Stun and Bash (knockback). The Desert mercenary and the Frenzy
+// Barbarian have none.
 bool CrowdControl(void* game, void* merc, Role role, void* target) noexcept {
 	const bool cold = !Immune(target, Cold);
 	switch (role) {
@@ -1141,10 +1142,7 @@ bool CrowdControl(void* game, void* merc, Role role, void* target) noexcept {
 		if (!CheckState(target, StateStunned) && Cast(game, merc, ModeAttack1, SkillStun, target)) return Note(merc, role, target, SkillStun, "safe mode: stuns a monster that got close"), true;
 		if (Cast(game, merc, ModeAttack1, SkillBash, target)) return Note(merc, role, target, SkillBash, "safe mode: bashes a monster back"), true;
 		return false;
-	case Role::FrenzyBarb:
-		if (!CheckState(target, StateTaunt) && Cast(game, merc, ModeAttack2, SkillTaunt, target)) return Note(merc, role, target, SkillTaunt, "safe mode: taunts a monster that got close"), true;
-		return false;
-	default: return false;
+	default: return false; // Taunt pulls the monster onto it: no use when it needs to get away
 	}
 }
 
@@ -1404,6 +1402,13 @@ void Params(void* tick, std::uint16_t (&params)[4]) noexcept {
 // back. Ranged mercenaries still shoot when nothing is near them.
 void SafeThink(void* game, void* merc, void* owner, MercState& state, int sx, int sy, bool walking, void* target, Role role, const Scan& scan, void* tick,
                const std::uint16_t* params) noexcept {
+	// You're on the move: it comes with you (it is no safer left behind, and
+	// for a melee mercenary its formation spot is out of the fight anyway).
+	if (const OwnerState& you = OwnerOf(owner); you.moving && !you.stopped) {
+		if (!walking && Dodge(game, merc, owner, scan, role)) return;
+		Mv(merc, " safe mode: you move, it keeps its formation spot");
+		if (KeepFormation(game, merc, owner, state, sx, sy, walking)) return;
+	}
 	if (walking) return Mv(merc, " safe mode: still moving");
 	state.moving = false;
 	if (Dodge(game, merc, owner, scan, role)) return;

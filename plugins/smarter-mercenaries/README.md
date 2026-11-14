@@ -26,7 +26,7 @@ dice roll.
 - Safe mode: below `safe_life` (35%) life, or losing `safe_burst` (25%) of
   its life within `safe_window` (2) seconds, a mercenary keeps well away from
   monsters, dodges missiles, uses its crowd control on what gets close
-  (Freezing/Cold Arrow, Glacial Spike, Stun, Bash, Taunt) and lets its life
+  (Freezing/Cold Arrow, Glacial Spike, Stun, Bash), comes with you when you move, and lets its life
   come back; it fights again once back over safe_life + 25.
 - Targets: what you're attacking first (only a slight lean for melee), then monsters attacking you, then
   monsters attacking the mercenary, then the closest, never farther than
