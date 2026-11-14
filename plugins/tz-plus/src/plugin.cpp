@@ -56,7 +56,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.10";
+constexpr const char* PluginVersion = "0.0.11";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -71,7 +71,7 @@ const D2RL::PluginInfo Info {
 
 // ---- mods ----
 
-enum class Kind : int { UMod, Aura, Tough, Vampiric, Regen };
+enum class Kind : int { UMod, Aura, Tough, Vampiric, Regen, Poison };
 
 struct Mod {
 	const char* key;
@@ -91,7 +91,7 @@ constexpr Mod Mods[] {
 	{ "fire_enchanted", "Fire Enchanted", Kind::UMod, 9, 10, 0, false },
 	{ "lightning_enchanted", "Lightning Enchanted", Kind::UMod, 17, 10, 0, false },
 	{ "cold_enchanted", "Cold Enchanted", Kind::UMod, 18, 10, 0, false },
-	{ "venomous", "Venomous", Kind::UMod, 23, 10, 0, false },
+	{ "poison_enchanted", "Poison Enchanted", Kind::Poison, 0, 10, 0, false },
 	{ "mana_burn", "Mana Burn", Kind::UMod, 25, 10, 0, false },
 	{ "teleportation", "Teleportation", Kind::UMod, 26, 10, 0, true },
 	{ "spectral_hit", "Spectral Hit", Kind::UMod, 27, 10, 0, false },
@@ -115,7 +115,9 @@ constexpr int ModCount = static_cast<int>(sizeof(Mods) / sizeof(Mods[0]));
 
 // Stats
 constexpr int StatHp = 6, StatMaxHp = 7, StatLevel = 12, StatDefense = 31, StatPhysRes = 36, StatMagicRes = 37, StatFireRes = 39, StatLightRes = 41,
-              StatColdRes = 43, StatLifeSteal = 60, StatVelocity = 67, StatAttackRate = 68, StatRegen = 74, StatGoldFind = 79, StatMagicFind = 80, StatExperience = 85;
+              StatColdRes = 43, StatLifeSteal = 60, StatVelocity = 67, StatAttackRate = 68, StatRegen = 74, StatGoldFind = 79, StatMagicFind = 80, StatExperience = 85,
+              StatPoisonMin = 57, StatPoisonMax = 58, StatPoisonLength = 59;
+constexpr int PoisonPerLevel[3] { 2, 4, 6 }, PoisonFrames = 75;
 
 // Per tier values (index = tier - 1).
 constexpr int OwnResist[3]   { 50, 75, 100 }; // Fire/Lightning/Cold Enchanted
@@ -455,7 +457,7 @@ void SetConstants(const GameMods& g, std::uint8_t mode) noexcept {
 	SetRow(mode, RowMinionStrong, strong ? StrongDamage[strong - 1] : Original(mode, RowMinionStrong));
 	SetRow(mode, RowMinionAr, strong ? StrongAr[strong - 1] : Original(mode, RowMinionAr));
 	int elem = 0;
-	for (const int id : { 9, 17, 18, 23, 25 }) elem = std::max(elem, TierOf(g, id));
+	for (const int id : { 9, 17, 18, 25 }) elem = std::max(elem, TierOf(g, id));
 	for (const int row : { RowMinionElemMin + g.difficulty, RowMinionElemMax + g.difficulty }) {
 		const std::int32_t base = Original(mode, row);
 		SetRow(mode, row, elem ? base * ElemScale[elem - 1] / 100 : base);
@@ -816,6 +818,15 @@ void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 			break;
 		}
 		case Kind::Vampiric: SetStat(unit, StatLifeSteal, GetStat(unit, StatLifeSteal) + LifeSteal[tier - 1]); break;
+		case Kind::Poison: {
+			// Poison on the monster's attacks: mlvl x 2 / 4 / 6 damage over 3 seconds.
+			const std::int64_t total = static_cast<std::int64_t>(std::max(1, GetStat(unit, StatLevel))) * PoisonPerLevel[tier - 1];
+			const std::int32_t perFrame = static_cast<std::int32_t>(total * 256 / PoisonFrames); // 1/256 per frame
+			SetStat(unit, StatPoisonMin, GetStat(unit, StatPoisonMin) + perFrame * 4 / 5);
+			SetStat(unit, StatPoisonMax, GetStat(unit, StatPoisonMax) + perFrame * 6 / 5);
+			SetStat(unit, StatPoisonLength, std::max(GetStat(unit, StatPoisonLength), PoisonFrames));
+			break;
+		}
 		case Kind::Regen: {
 			const std::int64_t life = GetStat(unit, StatMaxHp); // 1/256 points
 			SetStat(unit, StatRegen, GetStat(unit, StatRegen) + static_cast<std::int32_t>(life * RegenPct[tier - 1] / 100 / 25));
@@ -901,6 +912,39 @@ struct SpawnHook {
 	Code          bytes;
 	void*         hook;
 };
+
+// ---- Teleportation (TZ Plus mod only): a chance to blink away each time the monster is hit ----
+// The game runs per-mod event handlers from a table (D2R+0x2396210, 6 per monster mod); event 4 is "was hit"
+// (Lightning Enchanted's charged bolts). Teleportation has none: we add ours. The move is the game's own
+// warp for the monster teleport skill (D2R+0x5A7510, skill 0xB8 to x, y; it checks the destination).
+constexpr std::uint64_t TeleportHitSlotRva = 0x2396210 + (26 * 6 + 4) * 8, WarpRva = 0x5A7510;
+constexpr int           TeleportChance[3] { 15, 25, 35 };
+using WarpFn      = int (*)(void* game, void* unit, int skill, void* target, int x, int y) noexcept;
+using PathCoordFn = int (*)(void* path) noexcept;
+std::atomic<std::uint64_t> TeleportRandom { 0x9E3779B97F4A7C15ULL };
+
+void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
+	if (!hit || !game || !unit || !Config.enabled.load(std::memory_order_relaxed)) return;
+	GameMods* g = ModsOf(game);
+	if (!g) return;
+	int tier = TierOf(*g, 26);
+	if (!tier) return; // a monster's own Teleportation: the game's behaviour only
+	void* room = At<UnitRoomFn>(0x34B440)(unit);
+	const int level = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
+	if (level <= 0 || !At<LevelTzFn>(0x489B70)(game, level)) return;
+	if (At<IsSpecialFn>(0x38E0E0)(unit, true)) tier = std::min(tier + 1, Ranges[g->difficulty].maxTier);
+	std::uint64_t state = TeleportRandom.fetch_add(0x9E3779B97F4A7C15ULL) ^ reinterpret_cast<std::uintptr_t>(unit);
+	if (static_cast<int>(Mix(state) % 100) >= TeleportChance[tier - 1]) return;
+	void* path = Field<void*>(unit, 0x38);
+	if (!path) return;
+	const int x = At<PathCoordFn>(0x341A20)(path), y = At<PathCoordFn>(0x341A30)(path);
+	for (int attempt = 0; attempt < 6; ++attempt) {
+		const double angle    = static_cast<double>(Mix(state) % 6283) / 1000.0;
+		const int    distance = 6 + static_cast<int>(Mix(state) % 7);
+		const int    tx = x + static_cast<int>(std::lround(std::cos(angle) * distance)), ty = y + static_cast<int>(std::lround(std::sin(angle) * distance));
+		if (At<WarpFn>(WarpRva)(game, unit, 0xB8, nullptr, tx, ty)) return;
+	}
+}
 
 bool HookTerrorCheck(void* unit, std::uint8_t* game, void* room) noexcept {
 	AddMods(game, unit, room);
@@ -1431,6 +1475,15 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "TZ Plus %s: level 99 cap partly off, could not patch the monster level calls", PluginVersion);
 	if (!PatchCall(MapLineCallRva, AppendCharRva, reinterpret_cast<const void*>(&HookMapLine)))
 		Log(true, "TZ Plus %s: the mods are not shown on the map, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(MapLineCallRva));
+	{
+		const std::uint8_t empty[8] {};
+		const auto         handler = reinterpret_cast<std::uint64_t>(&TeleportWhenHit);
+		std::uint8_t       bytes[8];
+		std::memcpy(bytes, &handler, 8);
+		if (!Context->PatchBytes(TeleportHitSlotRva, empty, 8, bytes, 8))
+			Log(true, "TZ Plus %s: Teleportation keeps the game's behaviour, could not patch D2R+0x%llX", PluginVersion,
+			    static_cast<unsigned long long>(TeleportHitSlotRva));
+	}
 	if (!PatchCall(NormalNamesCallRva, UModNamesRva, reinterpret_cast<const void*>(&HookNormalNames)) ||
 	    !PatchCall(EliteNamesCallRva, UModNamesRva, reinterpret_cast<const void*>(&HookEliteNames)))
 		Log(true, "TZ Plus %s: monster names show the game's mods only, could not patch their calls", PluginVersion);

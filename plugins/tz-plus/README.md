@@ -9,7 +9,7 @@ D2RLoader plugin. Bigger terror zones, with mods that have tiers and give more l
 - Champions, uniques, minions and bosses get each mod one tier higher. No monster goes over level 99.
 - Rewards for the game: each mod gives its tier in points of gold find (+25% each), tier 2 and 3 mods also give tier - 1 points of magic find (+15% each), and tier 3 mods give 1 point of experience (+5%, on top of the game's +25%).
 
-Mods: Extra Strong, Extra Fast, Cursed, Magic Resistant, Fire / Lightning / Cold Enchanted, Venomous, Mana Burn, Teleportation, Spectral Hit, Stone Skin, Multiple Shots, Tough, Vampiric, Regenerating, and every monster aura (Might, Holy Fire, Blessed Aim, Holy Freeze, Conviction, Fanaticism, Holy Shock, Concentration, Vigor, Thorns; at most one aura per game).
+Mods: Extra Strong, Extra Fast, Cursed, Magic Resistant, Fire / Lightning / Cold Enchanted, Poison Enchanted, Mana Burn, Teleportation, Spectral Hit, Stone Skin, Multiple Shots, Tough, Vampiric, Regenerating, and every monster aura (Might, Holy Fire, Blessed Aim, Holy Freeze, Conviction, Fanaticism, Holy Shock, Concentration, Vigor, Thorns; at most one aura per game).
 
 The game's mods and rewards are listed in the map's text (top right, map open), under "Terrorized". The console command `tzplus` shows the game's mods and rewards. Settings: `d2rloader/config/tz-plus.toml`, or in game with I Hate TOMLs. Runs where the game's server runs: single player and games you host.
 
