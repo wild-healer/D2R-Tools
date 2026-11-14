@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.19";
+constexpr const char* PluginVersion = "0.0.20";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -309,6 +309,7 @@ struct GameMods {
 	Rolled              mods[3] {};
 	int                 gold = 0, magic = 0, xp = 0; // % bonuses
 	std::atomic<int>    monsters { 0 };
+	int                 zonesUsed = 0; // TZ Plus zones opened in this game
 	SRWLOCK             modLock = SRWLOCK_INIT;
 	std::unordered_map<void*, std::uint32_t> modded; // monsters given our mods (unit -> unit id): not mercs or summons
 };
@@ -499,6 +500,10 @@ struct ActLevels {
 };
 constexpr ActLevels Acts[5] { { Act1, 38 }, { Act2, 34 }, { Act3, 27 }, { Act4, 5 }, { Act5, 22 } };
 
+// TZ Plus zones (see "TZ Plus zones" below): hidden act 5 levels added after the game's own, always terrorized.
+std::atomic<int> ZoneBase { 0 }; // the first one's level id (the game's level count), 0 = none
+constexpr int    ZoneSlots = 10;
+
 struct BuiltZone {
 	const void* real;
 	const void* config;
@@ -541,6 +546,8 @@ void* BuildZone(const std::uint8_t* real, const void* config, int act) noexcept 
 	std::uint64_t total = 0;
 	for (int a = 0; a < 5; ++a)
 		if (act == 0 || act == a + 1) total += static_cast<std::uint64_t>(Acts[a].count);
+	const int zoneBase = ZoneBase.load();
+	if (zoneBase > 0) total += ZoneSlots;
 	auto* zone   = static_cast<std::uint8_t*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ZoneSize));
 	auto* levels = static_cast<std::uint8_t*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, total * LevelSize));
 	if (!zone || !levels) return nullptr;
@@ -555,6 +562,10 @@ void* BuildZone(const std::uint8_t* real, const void* config, int act) noexcept 
 			SetField<std::int32_t>(levels + at * LevelSize, 0, id);
 			++at;
 		}
+	}
+	for (int i = 0; zoneBase > 0 && i < ZoneSlots; ++i, ++at) {
+		std::memcpy(levels + at * LevelSize, realLevels, LevelSize);
+		SetField<std::int32_t>(levels + at * LevelSize, 0, zoneBase + i);
 	}
 	SetField<void*>(zone, ZoneLevels, levels);
 	SetField<std::uint64_t>(zone, ZoneLevelCount, total);
@@ -1854,9 +1865,268 @@ void StartWindow(const D2RL::PluginContext* context) noexcept {
 	}
 }
 
+// ---- TZ Plus zones: hidden act 5 levels added to the game's level tables ----
+// When the tables are loaded, ZoneSlots levels are added after the game's own (ids 138+), in our own copies of the
+// Levels, LevelDefs and LvlMaze rows (the game reads them by id: Levels/LevelDefs by index, LvlMaze by its Level field).
+// Each portal takes the next unused one in the game and turns it into a copy of a random vanilla dungeon with random
+// monsters from every act. No stairs (Vis/Warp cleared), no quest, no waypoint, act 5 (Pandemonium levels are made this way).
+
+constexpr std::uint64_t  TablesRva = 0x2A9A580; // the data tables of each game mode (16 bytes each), see D2R+0x300A90
+constexpr std::uintptr_t LevelsVec = 0x1460, DefsVec = 0x14A0, MazeVec = 0x18C0; // {rows, count, capacity}
+constexpr std::size_t    LevelRow = 0x18C, DefRow = 0x9C, MazeRow = 0x1C;
+constexpr std::uintptr_t LvId = 4, LvPal = 12, LvAct = 13, LvQuest = 56, LvNumMon = 58, LvMonCount = 59, LvMon = 62, LvNMon = 112, LvUMon = 162,
+                         LvWaypoint = 236, LvName = 253;
+constexpr std::uintptr_t DefQuest = 0, DefQuestEx = 4, DefDrlg = 48, DefType = 52, DefDepend = 44, DefVis = 72, DefWarp = 104;
+constexpr int            MonSlots = 25, ZoneMonsters = 8;
+// Generic dungeons (no level-specific generation code, no quest): cave, crypt, jail, catacombs, tombs, lair, sewers,
+// spider caves, swamp/flayer dungeons, Abaddon.
+constexpr int ZoneTemplates[] { 9, 11, 12, 18, 21, 29, 34, 55, 56, 58, 62, 65, 84, 86, 88, 125 };
+constexpr int Harrogath = 109;
+
+struct ZoneBank {
+	std::uint8_t* tables  = nullptr;
+	std::uint8_t* levels  = nullptr; // our copies: the game's rows, then ours
+	std::uint8_t* defs    = nullptr;
+	std::uint8_t* maze    = nullptr;
+	int           count   = 0; // the game's levels
+	std::uint64_t mazes   = 0; // the game's maze rows
+	std::vector<std::int16_t> pool; // every monster of the game's level lists (Nightmare/Hell lists)
+};
+ZoneBank Banks[4];
+
+using GetCoordsFn    = void (*)(void* unit, void* coord) noexcept;
+using FindFreeSpotFn = std::uint64_t (*)(void* game, void* room, void* coord, int size, int mask, void** outRoom, int a7, int a8) noexcept;
+using CreatePortalFn = int (*)(void* game, void* player, void* room, int x, int y, int destLevel, void** outPortal, int objectClass, int a9, int a10) noexcept;
+using ClientPlayerFn = void* (*)(void* client, int flag) noexcept;
+using FrameCallFn    = std::uint64_t (*)(void* game) noexcept;
+constexpr std::uint64_t FrameCallRva = 0x40660B, FrameCallTarget = 0x404330; // UpdateGameFrame 0x406550: call 0x404330 (game), once a frame
+
+struct Coord {
+	std::int32_t x, y;
+};
+
+// A table vector replaced by our copy with `extra` more rows (the game keeps reading it in place; capacity marked not owned).
+std::uint8_t* GrowVector(std::uint8_t* tables, std::uintptr_t at, std::size_t rowSize, std::uint64_t extra, std::uint64_t& count) noexcept {
+	auto* rows = Field<std::uint8_t*>(tables, at);
+	count      = Field<std::uint64_t>(tables, at + 8);
+	if (!rows || count == 0 || count > 0x10000) return nullptr;
+	auto* copy = static_cast<std::uint8_t*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (count + extra) * rowSize));
+	if (!copy) return nullptr;
+	std::memcpy(copy, rows, count * rowSize);
+	for (std::uint64_t e = 0; e < extra; ++e) std::memcpy(copy + (count + e) * rowSize, rows + (count - 1) * rowSize, rowSize);
+	SetField<std::uint8_t*>(tables, at, copy);
+	SetField<std::uint64_t>(tables, at + 16, (count + extra) | NotOnHeap);
+	SetField<std::uint64_t>(tables, at + 8, count + extra);
+	return copy;
+}
+
+std::uint8_t* MazeOf(const ZoneBank& b, int level) noexcept {
+	for (std::uint64_t i = 0; i < b.mazes; ++i)
+		if (Field<std::int32_t>(b.maze + i * MazeRow, 0) == level) return b.maze + i * MazeRow;
+	return nullptr;
+}
+
+std::string LevelName(const ZoneBank& b, int level) {
+	char name[41] {};
+	std::memcpy(name, b.levels + level * LevelRow + LvName, 40);
+	return name;
+}
+
+// Level `id` (a TZ Plus zone) becomes a copy of `tmpl` with random monsters.
+void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state) noexcept {
+	if (!b.levels || id < b.count || id >= b.count + ZoneSlots || tmpl <= 0 || tmpl >= b.count) return;
+	std::uint8_t* row = b.levels + id * LevelRow;
+	std::memcpy(row, b.levels + tmpl * LevelRow, LevelRow);
+	SetField<std::uint16_t>(row, LvId, static_cast<std::uint16_t>(id));
+	SetField<std::uint8_t>(row, LvAct, 4);
+	SetField<std::uint8_t>(row, LvQuest, 0);
+	SetField<std::uint8_t>(row, LvWaypoint, 0xFF);
+	if (!b.pool.empty()) {
+		std::int16_t picks[MonSlots];
+		int          count = 0;
+		for (int tries = 0; count < ZoneMonsters && count < static_cast<int>(b.pool.size()) && tries < 200; ++tries) {
+			const std::int16_t m = b.pool[Mix(state) % b.pool.size()];
+			if (std::find(picks, picks + count, m) == picks + count) picks[count++] = m;
+		}
+		for (const std::uintptr_t list : { LvMon, LvNMon, LvUMon })
+			for (int i = 0; i < MonSlots; ++i) SetField<std::int16_t>(row, list + i * 2, i < count ? picks[i] : static_cast<std::int16_t>(-1));
+		for (int i = 0; i < 3; ++i) SetField<std::uint8_t>(row, LvMonCount + i, static_cast<std::uint8_t>(count));
+	}
+	std::uint8_t* def = b.defs + id * DefRow;
+	std::memcpy(def, b.defs + tmpl * DefRow, DefRow);
+	SetField<std::int32_t>(def, DefQuest, 0);
+	SetField<std::int32_t>(def, DefQuestEx, 0);
+	SetField<std::int32_t>(def, DefDepend, 0);
+	for (int i = 0; i < 8; ++i) SetField<std::int32_t>(def, DefVis + i * 4, 0), SetField<std::int32_t>(def, DefWarp + i * 4, -1);
+	std::uint8_t* maze = b.maze + (b.mazes + (id - b.count)) * MazeRow;
+	if (const std::uint8_t* from = MazeOf(b, tmpl)) std::memcpy(maze, from, MazeRow);
+	SetField<std::int32_t>(maze, 0, id);
+}
+
+void __cdecl OnTablesLoaded(const D2RL::PluginContext* context, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
+	const auto* service = Query<D2RL::DataTableService>("data table");
+	int         base    = 0;
+	for (int bank = 1; bank <= 3; ++bank) {
+		auto* tables = Field<std::uint8_t*>(reinterpret_cast<void*>(Base + TablesRva), static_cast<std::uintptr_t>(bank) * 16);
+		if (!tables) continue;
+		ZoneBank& b = Banks[bank];
+		bool      shared = false;
+		for (int other = 1; other < bank; ++other)
+			if (Banks[other].tables == tables) shared = true;
+		if (shared || Field<std::uint8_t*>(tables, LevelsVec) == b.levels) continue; // already ours
+		const std::uint64_t levels = Field<std::uint64_t>(tables, LevelsVec + 8), defs = Field<std::uint64_t>(tables, DefsVec + 8);
+		if (service && D2RL::HasDataTableServiceField(service, D2RL::DataTableServiceRequiredSize)) {
+			D2RL::DataTables::TableView view { .structSize = D2RL::DataTables::TableViewSize };
+			if (service->getTable(context, static_cast<D2RL::DataTables::Bank>(bank), D2RL::DataTables::TableId::Levels, &view) == D2RL::DataTables::Result::Success &&
+			    (view.rows != Field<void*>(tables, LevelsVec) || view.rowSize != LevelRow || view.rowCount != levels)) {
+				Log(true, "zones: bank %d levels table not where expected (%p/%u/%u vs %p/%llu), no TZ Plus zones", bank, view.rows, view.rowCount, view.rowSize,
+				    Field<void*>(tables, LevelsVec), static_cast<unsigned long long>(levels));
+				continue;
+			}
+		}
+		if (levels < 100 || levels != defs) {
+			Log(true, "zones: bank %d has %llu levels and %llu level defs, no TZ Plus zones", bank, static_cast<unsigned long long>(levels),
+			    static_cast<unsigned long long>(defs));
+			continue;
+		}
+		std::uint64_t n = 0, nd = 0, nm = 0;
+		b.levels = GrowVector(tables, LevelsVec, LevelRow, ZoneSlots, n);
+		b.defs   = b.levels ? GrowVector(tables, DefsVec, DefRow, ZoneSlots, nd) : nullptr;
+		b.maze   = b.defs ? GrowVector(tables, MazeVec, MazeRow, ZoneSlots, nm) : nullptr;
+		if (!b.maze) {
+			Log(true, "zones: bank %d tables could not be extended", bank);
+			b = ZoneBank {};
+			continue;
+		}
+		b.tables = tables;
+		b.count  = static_cast<int>(n);
+		b.mazes  = nm;
+		b.pool.clear();
+		for (int level = 1; level < b.count; ++level)
+			for (int i = 0; i < MonSlots; ++i) {
+				const auto m = Field<std::int16_t>(b.levels + level * LevelRow, LvNMon + i * 2);
+				if (m < 0) break;
+				if (std::find(b.pool.begin(), b.pool.end(), m) == b.pool.end()) b.pool.push_back(m);
+			}
+		std::uint64_t state = 0x5A17C0DEull;
+		for (int i = 0; i < ZoneSlots; ++i) SetupZone(b, b.count + i, 125, state);
+		base = b.count;
+		Log(false, "zones: bank %d: %d levels, levels %d-%d added (%llu maze rows), %zu monster types to pick from", bank, b.count, b.count, b.count + ZoneSlots - 1,
+		    static_cast<unsigned long long>(nm), b.pool.size());
+	}
+	if (base > 0) ZoneBase.store(base);
+}
+
+// ---- opening a zone portal (console "tzplus portal" for now), on the game's thread ----
+
+std::atomic<bool> PortalRequested { false };
+SRWLOCK           PortalLock = SRWLOCK_INIT;
+std::string       PortalResult;
+
+void SetPortalResult(const char* format, ...) noexcept {
+	char    line[300] {};
+	va_list args;
+	va_start(args, format);
+	std::vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	Log(false, "%s", line);
+	AcquireSRWLockExclusive(&PortalLock);
+	try {
+		PortalResult = line;
+	} catch (...) {
+	}
+	ReleaseSRWLockExclusive(&PortalLock);
+}
+
+void OpenZonePortal(std::uint8_t* game) noexcept {
+	const int base = ZoneBase.load();
+	if (base <= 0) return SetPortalResult("TZ Plus zones: not available (the level tables could not be extended, see the log)");
+	const int  difficulty = Field<std::uint8_t>(game, GameDifficulty);
+	const auto mode       = Field<std::uint8_t>(game, GameMode);
+	GameMods*  g          = ModsOf(game);
+	if (!g || mode > 3 || !Banks[mode].levels) return SetPortalResult("TZ Plus zones: only in Nightmare or Hell games with TZ Plus on");
+	void* player = nullptr;
+	auto* client = Field<std::uint8_t*>(game, GameClients);
+	for (int guard = 0; client && guard < 64 && !player; ++guard, client = Field<std::uint8_t*>(client, ClientNext))
+		if (Field<std::uint32_t>(client, 4) == 4) player = At<ClientPlayerFn>(0x484C90)(client, 0);
+	void* room = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
+	if (!room || At<RoomLevelFn>(0x2EFC10)(room) != Harrogath) return SetPortalResult("TZ Plus zones: stand in Harrogath to open a zone portal");
+	if (g->zonesUsed >= ZoneSlots) return SetPortalResult("TZ Plus zones: all %d zones of this game are used, make a new game for more", ZoneSlots);
+	const int     id    = base + g->zonesUsed;
+	std::uint64_t state = Field<std::uint64_t>(game, GameSeed) ^ (static_cast<std::uint64_t>(std::time(nullptr)) << 16) ^ static_cast<std::uint64_t>(id);
+	int           tmpl  = 0;
+	for (int tries = 0; tries < 32 && !tmpl; ++tries) {
+		const int pick = ZoneTemplates[Mix(state) % (sizeof(ZoneTemplates) / sizeof(ZoneTemplates[0]))];
+		if (pick < Banks[mode].count && MazeOf(Banks[mode], pick)) tmpl = pick;
+	}
+	if (!tmpl) return SetPortalResult("TZ Plus zones: no dungeon to copy was found in the level tables");
+	for (int bank = 1; bank <= 3; ++bank) {
+		std::uint64_t copy = state; // the same monsters in every bank
+		SetupZone(Banks[bank], id, tmpl, copy);
+	}
+	(void)Mix(state);
+	std::string monsters;
+	for (int i = 0; i < MonSlots; ++i) {
+		const auto m = Field<std::int16_t>(Banks[mode].levels + id * LevelRow, LvNMon + i * 2);
+		if (m < 0) break;
+		monsters += (monsters.empty() ? "" : ",") + std::to_string(m);
+	}
+	// New mods for the game when a zone opens.
+	AcquireSRWLockExclusive(&Lock);
+	g->seed ^= Mix(state);
+	Roll(*g);
+	const std::string mods = Describe(*g);
+	ReleaseSRWLockExclusive(&Lock);
+	SetConstants(*g, mode);
+	GiveRewards(game, *g, difficulty == 2);
+
+	Coord at {};
+	At<GetCoordsFn>(0x34A040)(player, &at);
+	Coord spot { at.x + 3, at.y + 3 };
+	void* freeRoom = nullptr;
+	At<FindFreeSpotFn>(0x517F90)(game, room, &spot, 3, 0x400, &freeRoom, 4, 100);
+	// a10 = 1: past the game's town check (only the cow level and Pandemonium from towns); the act must still match.
+	void*     portal  = nullptr;
+	const int created = freeRoom ? At<CreatePortalFn>(0x432CE0)(game, player, freeRoom, spot.x, spot.y, id, &portal, 60, 0, 1) : 0;
+	if (!created)
+		return SetPortalResult("TZ Plus zones: the game refused the portal to level %d (%s) at %d,%d%s", id, LevelName(Banks[mode], tmpl).c_str(), spot.x, spot.y,
+		                       freeRoom ? "" : " (no free spot)");
+	++g->zonesUsed;
+	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d), monsters [%s]; new mods: %s", g->zonesUsed, ZoneSlots, id,
+	                LevelName(Banks[mode], tmpl).c_str(), tmpl, monsters.c_str(), mods.c_str());
+}
+
+std::uint64_t HookFrameCall(void* game) noexcept {
+	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
+	return At<FrameCallFn>(FrameCallTarget)(game);
+}
+
+void StartZones(const D2RL::PluginContext* context) noexcept {
+	if (!Lifecycle) return Log(true, "zones: no lifecycle service, no TZ Plus zones");
+	const D2RL::Lifecycle::DataTablesLoadedListener listener {
+		.structSize = D2RL::Lifecycle::DataTablesLoadedListenerSize,
+		.callback   = OnTablesLoaded,
+	};
+	D2RL::Lifecycle::ListenerHandle handle = D2RL::Lifecycle::InvalidHandle;
+	if (Lifecycle->registerDataTablesLoadedListener(context, &listener, &handle) != D2RL::Lifecycle::Result::Success)
+		return Log(true, "zones: could not listen to table loads, no TZ Plus zones");
+	if (!PatchCall(FrameCallRva, FrameCallTarget, reinterpret_cast<const void*>(&HookFrameCall)))
+		Log(true, "zones: could not patch the game update at D2R+0x%llX, no zone portals", static_cast<unsigned long long>(FrameCallRva));
+}
+
 // ---- console: "tzplus" shows this game's mods ----
 
-D2RL::ConsoleCommandResult __cdecl Command(D2R::Game::Client*, const D2RL::ConsoleCommandContext*, void*) noexcept {
+D2RL::ConsoleCommandResult __cdecl Command(D2R::Game::Client*, const D2RL::ConsoleCommandContext* command, void*) noexcept {
+	const std::string_view args = command && command->args ? std::string_view(command->args, command->argsLength) : std::string_view();
+	if (args.find("portal") != std::string_view::npos) {
+		AcquireSRWLockShared(&PortalLock);
+		const std::string last = PortalResult;
+		ReleaseSRWLockShared(&PortalLock);
+		if (!last.empty()) Context->WriteConsoleMessage(("last time: " + last).c_str());
+		PortalRequested.store(true);
+		Context->WriteConsoleMessage("TZ Plus: opening a zone portal next to you (the result is in tz-plus.log and shown on the next \"tzplus portal\")");
+		return D2RL::ConsoleCommandResult::Handled;
+	}
 	AcquireSRWLockShared(&Lock);
 	std::string text = "TZ Plus: no Nightmare or Hell game yet";
 	if (Last) {
@@ -1977,6 +2247,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		}
 		(void)failed;
 	}
+	StartZones(context);
 	Log(false, "TZ Plus %s: %s (Nightmare %s, Hell %s)", PluginVersion, Config.enabled ? "active" : "turned off", Config.nightmare ? "on" : "off",
 	    Config.hell ? "on" : "off");
 	return true;
