@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.23";
+constexpr const char* PluginVersion = "0.0.24";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1826,19 +1826,23 @@ using HoveredUnitFn = void* (*)(int index) noexcept;     // the unit under the m
 int TalkLogs = 0;
 
 bool OnGameMessage(UINT message, WPARAM, LPARAM) {
-	if (message != WM_LBUTTONDOWN || !InGame.load() || CurrentLevel.load() != 109) return false;
+	if (message != WM_LBUTTONDOWN || !InGame.load()) return false;
 	const int index = At<LocalIndexFn>(0x8B2D0)();
-	if (index < 0 || index >= 8) return false;
-	void* unit = At<HoveredUnitFn>(0xF1900)(index);
-	if (!unit || Field<std::uint32_t>(unit, 0) != 1) return false;
+	void*     unit  = index >= 0 && index < 8 ? At<HoveredUnitFn>(0xF1900)(index) : nullptr;
+	if (TalkLogs < 12)
+		++TalkLogs, Log(false, "click: level %d, player %d, unit under the mouse %p (type %d, class %d, id %u)", CurrentLevel.load(), index, unit,
+		                unit ? static_cast<int>(Field<std::uint32_t>(unit, 0)) : -1, unit ? static_cast<int>(Field<std::uint32_t>(unit, 4)) : -1,
+		                unit ? Field<std::uint32_t>(unit, 8) : 0u);
+	if (CurrentLevel.load() != 109 || !unit || Field<std::uint32_t>(unit, 0) != 1) return false;
 	const std::uint32_t cls = Field<std::uint32_t>(unit, 4);
-	if (TalkLogs < 5) ++TalkLogs, Log(false, "click on monster class %u (unit %u) in Harrogath", cls, Field<std::uint32_t>(unit, 8));
-	if (cls != CombatantA && cls != CombatantB) return false;
+	if (cls != CombatantA && cls != CombatantB && cls != 536 && cls != 537) return false;
 	Gui::Commands::Post("talk");
 	return false; // the click goes on: you walk to him
 }
 
 void StartWindowHook() noexcept {
+	static std::atomic<bool> once { false };
+	if (!once.exchange(true)) Log(false, "window hook started (clicks on the fire barbarians watched)");
 	Gui::WindowHook::Start({
 	    .active = [] { return WindowOpen.load(); },
 	    .wheel  = [](int notches) {
@@ -1936,7 +1940,8 @@ constexpr std::uintptr_t LevelsVec = 0x1460, DefsVec = 0x14A0, MazeVec = 0x18C0;
 constexpr std::size_t    LevelRow = 0x18C, DefRow = 0x9C, MazeRow = 0x1C;
 constexpr std::uintptr_t LvId = 4, LvPal = 12, LvAct = 13, LvQuest = 56, LvNumMon = 58, LvMonCount = 59, LvMon = 62, LvNMon = 112, LvUMon = 162,
                          LvWaypoint = 236, LvName = 253, LvWarpName = 293, LvEntryName = 333, LvDen = 36;
-constexpr int            ZoneDensity = 1500; // monster density of every zone (twice a typical dungeon: Pit 600, Crypt 1056, Stony Tomb 2200)
+constexpr int            ZoneDensity = 2200; // monster density of every zone (Stony Tomb's; Pit 600, Crypt 1056)
+constexpr int            ZoneArea    = 2304; // map size of every zone: rooms x room width x room height (Pit, Crypt, Cave in Hell)
 constexpr int            SafeRadius  = 30;   // no monster spawns this close to the zone's entry portal
 constexpr std::uintptr_t DefQuest = 0, DefQuestEx = 4, DefDrlg = 48, DefType = 52, DefDepend = 44, DefVis = 72, DefWarp = 104;
 constexpr int            MonSlots = 25, ZoneMonsters = 8;
@@ -2033,10 +2038,42 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state) noexcept {
 	std::uint8_t* maze = b.maze + (b.mazes + (id - b.count)) * MazeRow;
 	if (const std::uint8_t* from = MazeOf(b, tmpl)) std::memcpy(maze, from, MazeRow);
 	SetField<std::int32_t>(maze, 0, id);
+	const int roomArea = Field<std::int32_t>(maze, 16) * Field<std::int32_t>(maze, 20);
+	if (roomArea > 0) {
+		const int rooms = std::clamp((ZoneArea + roomArea / 2) / roomArea, 3, 40);
+		for (const std::uintptr_t at : { 4, 8, 12 }) SetField<std::int32_t>(maze, at, rooms);
+	}
+}
+
+// The Act 5 Townguards (act5barb3/4, the barbarians standing at Harrogath's fires) can't be selected (monstats2 noSel):
+// made selectable like the Combatants, so they show their name and can be clicked. monstats2 flags: dword +4, isSel bit 3, noSel bit 5.
+constexpr std::uint32_t Townguards[] { 536, 537 }, CombatantRow = 523;
+constexpr std::uint32_t SelIs = 1u << 3, SelNo = 1u << 5;
+
+void MakeTownguardsSelectable(const D2RL::PluginContext* context, const D2RL::DataTableService* service, int bank) noexcept {
+	using namespace D2RL::DataTables;
+	RowView combatant { .structSize = RowViewSize };
+	if (service->getRow(context, static_cast<Bank>(bank), TableId::MonStats2, CombatantRow, &combatant) != Result::Success || !combatant.row || combatant.rowSize < 8) return;
+	const std::uint32_t known = Field<std::uint32_t>(combatant.row, 4);
+	for (const std::uint32_t index : Townguards) {
+		RowView guard { .structSize = RowViewSize };
+		if (service->getRow(context, static_cast<Bank>(bank), TableId::MonStats2, index, &guard) != Result::Success || !guard.row) continue;
+		auto*               row   = const_cast<void*>(guard.row);
+		const std::uint32_t flags = Field<std::uint32_t>(row, 4);
+		if ((flags & SelIs) && !(flags & SelNo)) continue; // done already (banks can share tables)
+		if (!(known & SelIs) || (known & SelNo) || !(flags & SelNo)) {
+			Log(true, "zones: bank %d monstats2 row %u flags 0x%X (combatant 0x%X) not as expected, the townguard stays unselectable", bank, index, flags, known);
+			continue;
+		}
+		SetField<std::uint32_t>(row, 4, (flags | SelIs) & ~SelNo);
+		Log(false, "zones: bank %d townguard (monstats2 %u) made selectable, flags 0x%X -> 0x%X", bank, index, flags, Field<std::uint32_t>(row, 4));
+	}
 }
 
 void __cdecl OnTablesLoaded(const D2RL::PluginContext* context, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
 	const auto* service = Query<D2RL::DataTableService>("data table");
+	if (service && D2RL::HasDataTableServiceField(service, D2RL::DataTableServiceRequiredSize))
+		for (int bank = 1; bank <= 3; ++bank) MakeTownguardsSelectable(context, service, bank);
 	int         base    = 0;
 	for (int bank = 1; bank <= 3; ++bank) {
 		auto* tables = Field<std::uint8_t*>(reinterpret_cast<void*>(Base + TablesRva), static_cast<std::uintptr_t>(bank) * 16);
