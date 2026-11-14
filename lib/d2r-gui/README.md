@@ -68,9 +68,9 @@ button and a long scrolling list. Console command `guidemo`.
   screen, not by what they show) if they ever look them up.
 - Panels can only be registered while the plugin loads: `PanelPool::Register`
   belongs in `D2RLoaderLoadPlugin`.
-- Calls into the game (`ArchiveFile`, the UI states, the view shift, Low
-  Vision Mode) check the code bytes first and do nothing on a build they
-  don't match (D2R 3.3.94995 and 3.4.95041 match).
+- No D2R version check. Calls into the game (`ArchiveFile`, the UI states,
+  the view shift, Low Vision Mode) look at the code they call first and skip
+  only that part when it is not there.
 - Art falls back to the plugin's own drawing when the game's can't be read,
   so a window never needs a companion mod.
 

@@ -110,15 +110,8 @@ the UI thread.
 
 ## Safe by design
 
-- **Version-checked.** Every call into the game checks the code bytes first and does nothing on a build it doesn't recognise. D2R 3.3.94995 and 3.4.95041 match.
 - **Fixed names only.** D2RLoader gives each plugin about 255 widget lookups and never takes them back, so the library looks up only fixed names.
 - **Chains with other plugins.** Hooks are added on top of whatever is already there. Inventory Slots wraps the same grid entries.
 - **Self-contained.** Each plugin carries its own copy of the library, so two plugins on different library versions never affect each other.
-
-## Try it
-
-Install D2R GUI Demo (`plugins/d2r-gui-demo`) and type `guidemo` in the
-console. It opens a window with a search box, a check box, a drop-down, a
-number with arrows, a reset button and a long scrolling list.
 
 For the full list of headers, see [README.md](README.md).
