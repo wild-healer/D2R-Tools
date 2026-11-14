@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.17";
+constexpr const char* PluginVersion = "0.0.18";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -941,11 +941,20 @@ struct SpawnHook {
 constexpr std::uint64_t TeleportHitSlotRva = 0x2396210 + (26 * 6 + 4) * 8, WarpRva = 0x5A7510;
 constexpr int           TeleportChance[3] { 15, 25, 35 };
 using WarpFn      = int (*)(void* game, void* unit, int skill, void* target, int x, int y) noexcept;
-using FindRoomFn   = void* (*)(void* room, int x, int y) noexcept;
-using TeleportFn   = int (*)(void* game, void* unit, void* room, int x, int y, int, int) noexcept;
-using UnitUpdateFn = void (*)(void* unit, int on) noexcept;
+using CastFn      = int (*)(void* game, void* unit, int skill, void* target, int x, int y) noexcept;
+constexpr std::uint64_t CastRva = 0x4A7CF0;
 using PathCoordFn = int (*)(void* path) noexcept;
 std::atomic<std::uint64_t> TeleportRandom { 0x9E3779B97F4A7C15ULL };
+
+struct PendingTeleport {
+	void*         unit;
+	std::uint32_t id;
+	std::uint8_t* game;
+	std::uint64_t at;
+};
+SRWLOCK          TeleportLock = SRWLOCK_INIT;
+PendingTeleport  Teleports[64] {};
+std::atomic<int> PendingCount { 0 };
 
 void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
 	if (!hit || !game || !unit || !Config.enabled.load(std::memory_order_relaxed)) return;
@@ -961,27 +970,66 @@ void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
 	static int logs = 0;
 	if (logs < 20) ++logs, Log(false, "Teleportation: monster %p was hit (tier %d)", unit, tier);
 	if (static_cast<int>(Mix(state) % 100) >= TeleportChance[tier - 1]) return;
+	// Being hit is no time to start a cast (the hit recovery takes over and the clients lose track), so
+	// the teleport waits for the monster's next AI think, where its own AI would cast it (HookThink).
+	AcquireSRWLockExclusive(&TeleportLock);
+	PendingTeleport* slot = nullptr;
+	for (PendingTeleport& p : Teleports)
+		if (p.unit == unit || !p.unit || GetTickCount64() - p.at > 3000) {
+			slot = &p;
+			if (p.unit == unit) break;
+		}
+	if (slot) *slot = { unit, Field<std::uint32_t>(unit, 8), game, GetTickCount64() }, PendingCount.store(1, std::memory_order_relaxed);
+	ReleaseSRWLockExclusive(&TeleportLock);
+}
+
+// D2R+0x4A2A00 (game, monster, ...): a monster's AI think.
+constexpr std::uint64_t ThinkRva = 0x4A2A00;
+constexpr Code          ThinkBytes { 0x48, 0x89, 0x54, 0x24, 0x10, 0x48, 0x89, 0x4C, 0x24, 0x08, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48 };
+std::uint64_t           ThinkOrig {};
+
+bool CastTeleport(std::uint8_t* game, void* unit) noexcept {
 	void* path = Field<void*>(unit, 0x38);
-	if (!path) return;
+	if (!path) return false;
+	const std::uint32_t mode = Field<std::uint32_t>(unit, 0x0C);
+	if (mode != 1 && mode != 2 && mode != 15) return false; // neutral, walking, running
+	static int logs = 0;
 	const int x = At<PathCoordFn>(0x341A20)(path), y = At<PathCoordFn>(0x341A30)(path);
+	std::uint64_t state = TeleportRandom.fetch_add(0x9E3779B97F4A7C15ULL) ^ reinterpret_cast<std::uintptr_t>(unit);
 	for (int attempt = 0; attempt < 6; ++attempt) {
 		const double angle    = static_cast<double>(Mix(state) % 6283) / 1000.0;
 		const int    distance = 6 + static_cast<int>(Mix(state) % 7);
 		const int    tx = x + static_cast<int>(std::lround(std::cos(angle) * distance)), ty = y + static_cast<int>(std::lround(std::sin(angle) * distance));
-		// 0x5A7510 only checks that the skill can land there. The move itself is what the game's monster
-		// teleport skill (0x57D6D0) does: room at the spot, 0x491CA0 moves the unit, 0x34F490(unit, 1) marks it for the clients.
+		// 0x5A7510 checks the skill can land there; 0x4A7CF0 casts it (sequence mode, the monster's cast speed,
+		// the skill's sound), what the monster AIs do. The skill (0x57D6D0) then moves it.
 		if (!At<WarpFn>(WarpRva)(game, unit, 0xB8, nullptr, tx, ty)) continue;
-		void* here = At<UnitRoomFn>(0x34B440)(unit);
-		void* there = here ? At<FindRoomFn>(0x38DFB0)(here, tx, ty) : nullptr;
-		if (!there) continue;
-		if (At<TeleportFn>(0x491CA0)(game, unit, there, tx, ty, 0, 0)) {
-			At<UnitUpdateFn>(0x34F490)(unit, 1);
-			const int nx = At<PathCoordFn>(0x341A20)(path), ny = At<PathCoordFn>(0x341A30)(path);
-			if (logs < 40) ++logs, Log(false, "Teleportation: monster %p moved from %d,%d to %d,%d (asked %d,%d)", unit, x, y, nx, ny, tx, ty);
-			return;
-		}
+		const int cast = At<CastFn>(CastRva)(game, unit, 0xB8, nullptr, tx, ty);
+		if (logs < 40) ++logs, Log(false, "Teleportation: monster %p at %d,%d casts to %d,%d (%d)", unit, x, y, tx, ty, cast);
+		return cast != 0;
 	}
-	if (logs < 40) ++logs, Log(false, "Teleportation: monster %p could not move from %d,%d", unit, x, y);
+	if (logs < 40) ++logs, Log(false, "Teleportation: monster %p found no spot around %d,%d", unit, x, y);
+	return false;
+}
+
+std::uint64_t HookThink(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d, std::uint64_t e, std::uint64_t f, std::uint64_t g7,
+                        std::uint64_t h, std::uint64_t i, std::uint64_t j, std::uint64_t k, std::uint64_t l, std::uint64_t m, std::uint64_t n) noexcept {
+	using Fn  = std::uint64_t (*)(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                 std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t) noexcept;
+	void* unit = reinterpret_cast<void*>(b);
+	bool  due  = false;
+	if (unit && PendingCount.load(std::memory_order_relaxed)) {
+		AcquireSRWLockExclusive(&TeleportLock);
+		const std::uint32_t mode  = Field<std::uint32_t>(unit, 0x0C);
+		const bool          ready = mode == 1 || mode == 2 || mode == 15; // a think during hit recovery keeps it waiting
+		for (PendingTeleport& p : Teleports)
+			if (p.unit == unit) {
+				const bool fresh = p.game == reinterpret_cast<std::uint8_t*>(a) && p.id == Field<std::uint32_t>(unit, 8) && GetTickCount64() - p.at < 2000;
+				if (!fresh || ready) due = fresh, p.unit = nullptr;
+			}
+		ReleaseSRWLockExclusive(&TeleportLock);
+	}
+	if (due && CastTeleport(reinterpret_cast<std::uint8_t*>(a), unit)) return 0;
+	return reinterpret_cast<Fn>(ThinkOrig)(a, b, c, d, e, f, g7, h, i, j, k, l, m, n);
 }
 
 // ---- monster mod events (D2R+0x49D240: game, monster, other unit, event, ...) ----
@@ -1075,6 +1123,37 @@ void HookMissileEvent(std::uint8_t* game, void* monster, void* missile) noexcept
 		Log(false, "missile %p of monster %p [%s]%s%s: poison %d-%d/%d", missile, monster, list.c_str(), raised ? " (unique flag raised)" : "", extra ? " (extra shot)" : "",
 		    GetStat(missile, StatPoisonMin), GetStat(missile, StatPoisonMax), GetStat(missile, StatPoisonLength));
 	}
+}
+
+// The game client runs its own copy of the mods' missile handlers: 0x1E0410(monster, other, event) with
+// event 4 = "fired a missile", passing the same "is unique" flag. Its Multiple Shots (0x1E1630) draws the two
+// extra missiles, so for the monsters of a TZ Plus zone that have it we raise the flag there as well.
+constexpr std::uint64_t ClientModEventRva = 0x1E0410;
+constexpr Code          ClientModEventBytes { 0x48, 0x89, 0x6C, 0x24, 0x18, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x49, 0x63 };
+std::uint64_t           ClientModEventOrig {};
+bool                    ClientZone(void* unit) noexcept;
+
+std::uint64_t HookClientModEvent(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d, std::uint64_t e, std::uint64_t f, std::uint64_t g7,
+                                 std::uint64_t h, std::uint64_t i, std::uint64_t j, std::uint64_t k, std::uint64_t l, std::uint64_t m, std::uint64_t n) noexcept {
+	using Fn = std::uint64_t (*)(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                 std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t) noexcept;
+	void*         unit   = reinterpret_cast<void*>(a);
+	std::uint8_t* data   = nullptr;
+	bool          raised = false;
+	if (static_cast<std::uint32_t>(c) == 4 && unit && Field<std::uint32_t>(unit, 0) == 1 && Config.enabled.load(std::memory_order_relaxed)) {
+		bool shots = false;
+		if (const std::uint8_t* umods = At<UModListFn>(0x38E310)(unit))
+			for (int x = 0; x < 9; ++x) shots = shots || umods[x] == 29;
+		data = shots ? Field<std::uint8_t*>(unit, 0x10) : nullptr;
+		if (data && !(Field<std::uint16_t>(data, 0x1A) & 8) && ClientZone(unit)) {
+			SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) | 8), raised = true;
+			static int logs = 0;
+			if (logs < 10) ++logs, Log(false, "client: Multiple Shots for monster %p's missile %p", unit, reinterpret_cast<void*>(b));
+		}
+	}
+	const std::uint64_t result = reinterpret_cast<Fn>(ClientModEventOrig)(a, b, c, d, e, f, g7, h, i, j, k, l, m, n);
+	if (raised) SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) & ~std::uint16_t { 8 });
+	return result;
 }
 
 bool HookTerrorCheck(void* unit, std::uint8_t* game, void* room) noexcept {
@@ -1532,6 +1611,7 @@ bool HookNameTerror(void* unit) noexcept {
 	const int level = CurrentLevel;
 	return game && level > 0 && At<InZoneListFn>(InZoneListRva)(level);
 }
+bool ClientZone(void* unit) noexcept { return HookNameTerror(unit); }
 bool                    NameIsMinion       = false;
 
 bool HookNameSpecial(void* unit, bool minions) noexcept {
@@ -1824,6 +1904,16 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		if (!Context->PatchBytes(TeleportHitSlotRva, empty, 8, bytes, 8))
 			Log(true, "TZ Plus %s: Teleportation keeps the game's behaviour, could not patch D2R+0x%llX", PluginVersion,
 			    static_cast<unsigned long long>(TeleportHitSlotRva));
+	}
+	{
+		void* original = nullptr;
+		if (!context->InstallInlineHook(ThinkRva, ThinkBytes.data(), static_cast<std::uint32_t>(ThinkBytes.size()), reinterpret_cast<void*>(&HookThink), &original) || !original)
+			Log(true, "TZ Plus %s: Teleportation off, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(ThinkRva));
+		else ThinkOrig = reinterpret_cast<std::uint64_t>(original);
+		original = nullptr;
+		if (!context->InstallInlineHook(ClientModEventRva, ClientModEventBytes.data(), static_cast<std::uint32_t>(ClientModEventBytes.size()), reinterpret_cast<void*>(&HookClientModEvent), &original) || !original)
+			Log(true, "TZ Plus %s: Multiple Shots not drawn on normal monsters, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(ClientModEventRva));
+		else ClientModEventOrig = reinterpret_cast<std::uint64_t>(original);
 	}
 	if (!PatchCall(MissileEventCallRva, MissileEventRva, reinterpret_cast<const void*>(&HookMissileEvent)))
 		Log(true, "TZ Plus %s: Multiple Shots and ranged poison off, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(MissileEventCallRva));
