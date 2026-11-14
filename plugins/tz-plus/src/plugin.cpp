@@ -56,7 +56,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.9";
+constexpr const char* PluginVersion = "0.0.10";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1234,6 +1234,118 @@ bool HookTownCheck(int level, void* text) noexcept {
 	return listed;
 }
 
+// ---- monster names (the line of mods under the life bar) ----
+// D2R+0x1DFAE0 writes the names of a 9-byte mod list in one color into a game string. Called at
+// D2R+0xCF606 for normal monsters with the terror state (purple, color 0x1D) and at D2R+0x1DF7A5 for
+// champions and uniques (gold, color 4). We let it write the mods that aren't ours, then add ours in
+// purple with their tier, the stat mods and auras too.
+struct GameString {
+	char*         text;
+	std::uint64_t size;
+	std::uint64_t capacity; // top bit: the text is inside this object
+	char          inside[0x118];
+};
+using UModNamesFn = GameString* (*)(GameString* out, std::uint8_t flag, const std::uint8_t* list, std::uint32_t count, std::int32_t color,
+                                    const char* width) noexcept;
+using AllocatorFn = void** (*)() noexcept;
+constexpr std::uint64_t UModNamesRva = 0x1DFAE0, NormalNamesCallRva = 0xCF606, EliteNamesCallRva = 0x1DF7A5;
+constexpr std::int32_t  Purple = 0x1D;
+
+std::string Take(GameString& text) noexcept {
+	std::string result(text.text ? text.text : "", text.text ? static_cast<std::size_t>(text.size) : 0);
+	if (text.text && !(text.capacity & 0x8000000000000000ULL)) {
+		void** allocator = At<AllocatorFn>(0x12063C0)();
+		using FreeFn     = void (*)(void* self, void* memory) noexcept;
+		reinterpret_cast<FreeFn>((*reinterpret_cast<void***>(allocator))[4])(allocator, text.text);
+	}
+	return result;
+}
+
+std::string NamesOf(std::uint8_t flag, std::initializer_list<std::uint8_t> ids, std::int32_t color) noexcept {
+	std::uint8_t list[9] {};
+	std::uint32_t n = 0;
+	for (const std::uint8_t id : ids) list[n++] = id;
+	GameString text {};
+	At<UModNamesFn>(UModNamesRva)(&text, flag, list, n, color, nullptr);
+	return Take(text);
+}
+
+struct NameParts {
+	bool        ready = false;
+	std::string color;     // the purple color code
+	std::string separator; // between two mods
+	std::string umod[45];  // purple names of the monster mods
+} Names;
+
+void LearnNames(std::uint8_t flag) noexcept {
+	if (Names.ready) return;
+	Names.ready         = true;
+	const std::string a = NamesOf(flag, { 5 }, Purple), b = NamesOf(flag, { 8 }, Purple), ab = NamesOf(flag, { 5, 8 }, Purple);
+	std::size_t common  = 0;
+	while (common < a.size() && common < b.size() && a[common] == b[common]) ++common;
+	Names.color             = a.substr(0, common);
+	const std::string nameB = b.substr(common);
+	Names.separator         = " ";
+	if (ab.compare(0, a.size(), a) == 0) {
+		const std::string rest = ab.substr(a.size());
+		if (rest.size() >= b.size() && rest.compare(rest.size() - b.size(), b.size(), b) == 0) Names.separator = rest.substr(0, rest.size() - b.size());
+		else if (rest.size() >= nameB.size() && rest.compare(rest.size() - nameB.size(), nameB.size(), nameB) == 0)
+			Names.separator = rest.substr(0, rest.size() - nameB.size());
+	}
+	for (const Mod& mod : Mods)
+		if (mod.kind == Kind::UMod && mod.id > 0 && mod.id < 45) Names.umod[mod.id] = NamesOf(flag, { static_cast<std::uint8_t>(mod.id) }, Purple);
+	Log(false, "monster names: color code %zu byte(s), separator \"%s\"", Names.color.size(), Names.separator.c_str());
+}
+
+GameString* WriteNames(GameString* out, std::uint8_t flag, const std::uint8_t* list, std::uint32_t count, std::int32_t color, const char* width,
+                       bool elite) noexcept {
+	const auto original = At<UModNamesFn>(UModNamesRva);
+	if (!out || !list || !Config.enabled || !InGame) return original(out, flag, list, count, color, width);
+	struct Entry {
+		int  mod;
+		int  tier;
+	};
+	Entry entries[ModCount] {};
+	int   n = 0, difficulty = 0;
+	AcquireSRWLockShared(&Lock);
+	if (const GameMods* g = Last) {
+		difficulty = g->difficulty;
+		for (int i = 0; i < g->count; ++i) entries[n++] = { g->mods[i].mod, g->mods[i].tier };
+	}
+	ReleaseSRWLockShared(&Lock);
+	// Elites: only in terror zones (normal monsters only come here with the terror state).
+	const int level = CurrentLevel;
+	if (!n || (elite && !(level > 0 && At<InZoneListFn>(InZoneListRva)(level))))
+		return original(out, flag, list, count, color, width);
+	LearnNames(flag);
+	std::uint8_t theirs[9] {};
+	for (std::uint32_t i = 0; i < count && i < 9; ++i) {
+		bool ours = false;
+		for (int e = 0; e < n; ++e) ours |= Mods[entries[e].mod].kind == Kind::UMod && Mods[entries[e].mod].id == list[i];
+		if (!ours) theirs[i] = list[i];
+	}
+	GameString* result = original(out, flag, theirs, count < 9 ? count : 9, color, width);
+	const int   top    = Ranges[difficulty].maxTier;
+	std::string more;
+	for (int e = 0; e < n; ++e) {
+		const Mod& mod  = Mods[entries[e].mod];
+		const int  tier = elite ? std::min(entries[e].tier + 1, top) : entries[e].tier;
+		std::string name = mod.kind == Kind::UMod && mod.id > 0 && mod.id < 45 && !Names.umod[mod.id].empty() ? Names.umod[mod.id] : Names.color + mod.name;
+		if (!more.empty() || (result && result->size)) more += Names.separator;
+		more += name + " " + Roman(tier);
+	}
+	if (result)
+		for (const char c : more) At<AppendCharFn>(AppendCharRva)(result, c);
+	return result;
+}
+
+GameString* HookNormalNames(GameString* out, std::uint8_t flag, const std::uint8_t* list, std::uint32_t count, std::int32_t color, const char* width) noexcept {
+	return WriteNames(out, flag, list, count, color, width, false);
+}
+GameString* HookEliteNames(GameString* out, std::uint8_t flag, const std::uint8_t* list, std::uint32_t count, std::int32_t color, const char* width) noexcept {
+	return WriteNames(out, flag, list, count, color, width, true);
+}
+
 template <typename Service>
 const Service* Query(const char* name) {
 	const Service* service = nullptr;
@@ -1319,6 +1431,9 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "TZ Plus %s: level 99 cap partly off, could not patch the monster level calls", PluginVersion);
 	if (!PatchCall(MapLineCallRva, AppendCharRva, reinterpret_cast<const void*>(&HookMapLine)))
 		Log(true, "TZ Plus %s: the mods are not shown on the map, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(MapLineCallRva));
+	if (!PatchCall(NormalNamesCallRva, UModNamesRva, reinterpret_cast<const void*>(&HookNormalNames)) ||
+	    !PatchCall(EliteNamesCallRva, UModNamesRva, reinterpret_cast<const void*>(&HookEliteNames)))
+		Log(true, "TZ Plus %s: monster names show the game's mods only, could not patch their calls", PluginVersion);
 	if (!PatchCall(TownCheckCallRva, InZoneListRva, reinterpret_cast<const void*>(&HookTownCheck), { 0x4C, 0x89, 0xE2 })) // mov rdx, r12
 		Log(true, "TZ Plus %s: the mods are not shown on the town map, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(TownCheckCallRva));
 	{
