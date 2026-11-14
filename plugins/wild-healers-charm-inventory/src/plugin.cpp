@@ -1,8 +1,8 @@
 // Wild Healer's Charm Inventory: a charm grid on Player Page Host's page.
 //   - reserves one area of the host's page (10x4 by default, the size of the inventory),
 //     with active charms, and takes only charms;
-//   - shows it in a game-style left panel (D2R GUI's character screen window)
-//     with the area's cells;
+//   - shows it in a game-style left panel (D2R GUI's stash-look window) with
+//     the area's cells;
 //   - a button on the inventory's left edge (D2R GUI's inventory button, the
 //     "rune-stone" icon), under Grail On!'s, opens and closes it;
 //   - charms in the normal inventory give no bonus (the local player's), and
@@ -15,6 +15,7 @@
 
 #include <d2r_gui.h>
 #include <d2r_gui/icons.h>
+#include <d2r_gui/stash_window.h>
 
 #include <windows.h>
 #include <algorithm>
@@ -73,9 +74,8 @@ void Log(bool error, const char* format, ...) noexcept {
 
 // ---- the inventory button (D2R GUI) ----
 
-// Under Grail On!'s button (its mold at 3,954). While the plugin is off it is
-// moved off the screen (in the game's widget and in its layout).
-constexpr int        ButtonX = 3, ButtonY = 954 + Gui::InventoryButton::Height, HiddenX = -5000;
+// Under Grail On!'s button (its mold at 3,954). Hidden while the plugin is off.
+constexpr int        ButtonX = 3, ButtonY = 954 + Gui::InventoryButton::Height;
 constexpr int        IconSize = 98, IconDrawn = 42;
 Gui::InventoryButton Button;
 
@@ -85,32 +85,33 @@ void AddButton() {
 	    || !Gui::RegisterSprite("button", Gui::MaskButton(icon.data(), IconSize, Gui::InventoryButton::Width - 2, 60, IconDrawn)))
 		Log(true, "could not register the button art");
 	const Gui::InventoryButton::Look look { .moldSprite = "mold", .buttonSprite = "button", .button = "CharmButton", .tooltip = "Charms", .command = "toggle" };
-	if (!Button.Register("InventoryButton", look, Enabled.load() ? ButtonX : HiddenX, ButtonY)) Log(true, "could not add the inventory button");
+	if (!Button.Register("InventoryButton", look, ButtonX, ButtonY)) Log(true, "could not add the inventory button");
+	Button.SetShown(Enabled.load());
 }
 
 void ShowButton() {
-	if (GuiReady) (void)Gui::RunOnUi([] { Button.Move(Enabled.load() ? ButtonX : HiddenX, ButtonY); });
+	if (GuiReady) (void)Gui::RunOnUi([] { Button.SetShown(Enabled.load()); });
 }
 
-// ---- the panel (D2R GUI's character screen window) ----
+// ---- the panel (D2R GUI's stash-look window) ----
 
-// The cells centred on the window's plain stone, or between its header and
-// its bottom when taller (the cells cover what is under them).
-namespace Window = Gui::CharacterWindow;
-int           GridX = 0, GridY = 0;
+// The cells centred inside the frame's gold line.
+namespace Window = Gui::StashWindow;
+int GridX = 0, GridY = 0;
 void PlaceGrid() noexcept {
-	const int height = Rows * Cell;
-	GridX = Window::CoverX + (Window::CoverWidth - Columns * Cell) / 2;
-	GridY = height <= Window::CoverHeight ? Window::CoverY + (Window::CoverHeight - height) / 2 : 178 + (1451 - 178 - height) / 2;
+	GridX = Window::InnerX + (Window::InnerWidth - Columns * Cell) / 2;
+	GridY = Window::InnerY + (Window::InnerHeight - Rows * Cell) / 2;
 }
 
-// The host's layout: @PANEL@ and @GRID@ are its tokens.
+// The host's layout: @PANEL@ and @GRID@ are its tokens; the close button
+// closes the panel as the game's own do.
 std::string PanelLayout() {
-	std::string cells;
-	const auto  slot = Gui::StashKit::Slot(Cell, Cell);
-	for (int y = 0; y < Rows; ++y)
-		for (int x = 0; x < Columns; ++x) cells += Gui::Image("Cell" + std::to_string(y * MaxColumns + x), GridX + x * Cell, GridY + y * Cell, slot);
-	return Window::Layout("@PANEL@", "Probe0", "Charms", "close", cells + ", @GRID@");
+	static const bool cell = Gui::RegisterSprite("cell", { Window::Cell() });
+	std::string       cells;
+	if (cell)
+		for (int y = 0; y < Rows; ++y)
+			for (int x = 0; x < Columns; ++x) cells += Gui::Image("Cell" + std::to_string(y * MaxColumns + x), GridX + x * Cell, GridY + y * Cell, Gui::SpriteName("cell"));
+	return Window::Layout("@PANEL@", "Charms", "", cells + ", @GRID@");
 }
 
 // ---- no bonus from inventory charms ----
@@ -410,7 +411,7 @@ auto __cdecl OnItemClick(const D2RL::PluginContext*, const Clicks::ItemInteracti
 }
 
 
-bool PanelArt = false; // D2R GUI has read the game's art (after the data tables loaded)
+bool PanelArt = false; // D2R GUI is ready: the panel gets its frame
 
 void SetLayout() {
 	if (!PanelArt || !Area || !Host) return;
@@ -446,11 +447,6 @@ void __cdecl AfterAllLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::D
 	PageHost::AreaInfo info { .structSize = sizeof(info) };
 	const bool         gotInfo = Area && Host->getAreaInfo(Area, &info) == PageHost::Result::Success;
 	WrapCharmSlot();
-	if (GuiReady) {
-		Gui::Kit::Read();
-		PanelArt = true;
-		SetLayout();
-	}
 	if (gotInfo)
 		Log(false, "area at %d,%d of the page (-1: not placed yet), charms active %u", info.x, info.y, info.charmsActive);
 }
@@ -477,7 +473,6 @@ void Toggle() {
 // Button clicks (D2R GUI, UI thread).
 void OnCommand(const std::string& command) {
 	if (command == "toggle") Toggle();
-	else if (command == "close" && Area && Host && Host->isAreaOpen(Area)) (void)Host->closeArea(Area);
 }
 
 // A key or the console: on the UI thread, as the button.
@@ -768,6 +763,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	Log(false, "%s %s loading, %dx%d%s", Info.name, PluginVersion, Columns, Rows, Enabled.load() ? "" : " (off: enabled = false)");
 	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
 	GuiReady = Gui::Init(context, PluginId);
+	PanelArt = GuiReady && !Window::FrameSprite().empty();
 	if (!GuiReady) Log(true, "a window service is missing: no button or panel art (use the charms console command)");
 	if (context->QueryService(&CommApi) != D2RL::ServiceQueryResult::Success) CommApi = nullptr;
 	if (context->QueryService(&Inventory) != D2RL::ServiceQueryResult::Success) Inventory = nullptr;

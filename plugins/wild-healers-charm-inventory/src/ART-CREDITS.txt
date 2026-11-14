@@ -4,6 +4,5 @@ CC BY 3.0 (https://creativecommons.org/licenses/by/3.0/). It comes from the
 D2R GUI library's icon set (lib/d2r-gui/ICONS-CREDITS.txt), recoloured and
 resized for the button.
 
-The inventory button's mold and the cells' slot art come from the D2R GUI
-library (lib/d2r-gui); the panel's background is the game's own character
-screen art.
+The inventory button's mold, the panel's frame and the cells come from the
+D2R GUI library (lib/d2r-gui: mold_data.inc, stash_window.h).
