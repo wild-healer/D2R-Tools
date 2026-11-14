@@ -51,6 +51,8 @@
 #include <string_view>
 #include <vector>
 
+#include <d2r_gui.h>
+
 #include "i_hate_tomls_client.h"
 
 namespace {
@@ -1187,8 +1189,10 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 	if (!D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) return;
 	switch (event->kind) {
 	case EventKind::GameJoined: InGame = true, CurrentLevel = -1; break;
+	case EventKind::LocalPlayerReady: D2RGui::LeftPanel::InGame(true); break;
 	case EventKind::GameLeft: {
 		InGame = false, CurrentLevel = -1;
+		D2RGui::LeftPanel::InGame(false);
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
 		Games.clear();
 		Last       = nullptr;
@@ -1404,7 +1408,7 @@ void StartDisplay(const D2RL::PluginContext* context) noexcept {
 	Lifecycle  = Query<D2RL::LifecycleService>("lifecycle");
 	if (!Lifecycle) return;
 	using EventKind = D2RL::Lifecycle::GameplayEventKind;
-	for (const EventKind kind : { EventKind::GameJoined, EventKind::GameLeft, EventKind::LevelChanged }) {
+	for (const EventKind kind : { EventKind::GameJoined, EventKind::GameLeft, EventKind::LevelChanged, EventKind::LocalPlayerReady }) {
 		const D2RL::Lifecycle::GameplayEventListener listener {
 			.structSize = D2RL::Lifecycle::GameplayEventListenerSize,
 			.kind       = kind,
@@ -1413,6 +1417,181 @@ void StartDisplay(const D2RL::PluginContext* context) noexcept {
 		D2RL::Lifecycle::ListenerHandle handle = D2RL::Lifecycle::InvalidHandle;
 		if (Lifecycle->registerGameplayEventListener(context, &listener, &handle) != D2RL::Lifecycle::Result::Success)
 			return Log(true, "could not listen to game events: the mods are not shown on the map");
+	}
+}
+
+// ---- the TZ Plus window (D2R GUI): this game's mods and rewards, and the settings ----
+// Console "tzplus" or the Controls menu (TZ Plus > Open TZ Plus). Built like the game's left panels.
+
+namespace Gui = D2RGui;
+
+constexpr int PanelX = 236, PanelY = -651, PanelWidth = 1162, PanelHeight = 1507;
+constexpr int Left = 105, Right = 1044, BarLeft = 1054, LineHeight = 56, RowHeight = 70, WheelStep = 120;
+
+Gui::PanelPool    Window;
+Gui::ScrollBar    Bar("mods", BarLeft, 30, 30, PanelX, PanelY);
+std::atomic<bool> WindowOpen {};
+int               Scroll = 0;
+
+std::string WindowBackground() {
+	static std::string name;
+	if (name.empty() && Gui::RegisterSprite("background", { Gui::PlainBox(PanelWidth, PanelHeight, 120) })) name = Gui::SpriteName("background");
+	return name;
+}
+
+// This game, as lines (UI thread).
+std::vector<std::string> GameLines() {
+	std::vector<std::string> lines;
+	AcquireSRWLockShared(&Lock);
+	if (const GameMods* g = Last; g && InGame) {
+		char head[96];
+		if (g->difficulty == 2) std::snprintf(head, sizeof(head), "Hell, terror zone level %d", g->zoneLevel);
+		else std::snprintf(head, sizeof(head), "Nightmare act %d, terror zone level %d", g->act.load(), g->zoneLevel);
+		lines.push_back(head);
+		for (int i = 0; i < g->count; ++i) lines.push_back(std::string(Mods[g->mods[i].mod].name) + " " + Roman(g->mods[i].tier));
+		char rewards[128];
+		std::snprintf(rewards, sizeof(rewards), "+%d%% Gold Find, +%d%% Magic Find, +%d%% Experience", g->gold, g->magic, g->xp);
+		lines.push_back(rewards);
+	} else lines.push_back(InGame ? "No TZ Plus mods in this game" : "Not in a game");
+	ReleaseSRWLockShared(&Lock);
+	return lines;
+}
+
+std::string BuildWindow(const std::string& panelName, const std::string& probe) {
+	std::string c = Gui::Image("Background", 0, 0, WindowBackground());
+	c += Gui::LeftPanelFrame(PanelWidth, PanelHeight, "TZ Plus", "close", 1075);
+	c += Gui::Probe(probe);
+
+	int y = 170;
+	c += Gui::Text("GameTitle", Left, y, Right - Left, LineHeight, "This game", Gui::Style::Section);
+	y += LineHeight;
+	const auto lines = GameLines();
+	for (std::size_t i = 0; i < lines.size(); ++i, y += LineHeight)
+		c += Gui::Text("Game" + std::to_string(i), Left + 20, y, Right - Left - 20, LineHeight, lines[i],
+		               i == 0 || i + 1 == lines.size() ? Gui::Style::Label : Gui::Style::SmallLabel);
+	y += 20;
+
+	c += Gui::Text("SettingsTitle", Left, y, Right - Left, LineHeight, "Settings (from the next game)", Gui::Style::Section);
+	y += LineHeight;
+	const struct {
+		const char* key;
+		const char* label;
+		const char* tip;
+	} options[] {
+		{ "enabled", "TZ Plus", "Turns everything off when unchecked" },
+		{ "nightmare", "Nightmare: a whole act", "One act at a time, changing every 30 minutes. 1 to 2 mods, tier 1 to 2" },
+		{ "hell", "Hell: every level", "Up to level 99. 1 to 3 mods, tier 1 to 3" },
+		{ "show_mods", "Show the mods on the map", "Under \"Terrorized\" in the map's text" },
+	};
+	int o = 0;
+	for (const auto& option : options) {
+		const std::string n = "Option" + std::to_string(o++);
+		c += Gui::Text(n + "Label", Left, y, Right - Left - 100, RowHeight, option.label, Gui::Style::Label, option.tip);
+		c += Gui::Check(n, Right - 60, y + 7, ValueOf(option.key) == "true", std::string("set:") + option.key, option.tip);
+		y += RowHeight;
+	}
+	y += 20;
+
+	c += Gui::Text("ModsTitle", Left, y, Right - Left, LineHeight, "Mods that can roll", Gui::Style::Section);
+	y += LineHeight;
+	const int listTop = y, listRoom = PanelHeight - 150 - listTop;
+	const int total   = ModCount * RowHeight;
+	Scroll            = std::clamp(Scroll, 0, std::max(0, total - listRoom));
+	std::string inside;
+	const int   first = Scroll / RowHeight, last = std::min(ModCount, (Scroll + listRoom) / RowHeight + 1);
+	for (int m = first; m < last; ++m) {
+		const int         top = m * RowHeight - Scroll;
+		const std::string n   = "Row" + std::to_string(m - first);
+		const Mod&        mod = Mods[m];
+		inside += Gui::Image(n + "Back", Left, top + 3, Gui::Kit::Row(Right - Left, RowHeight - 6));
+		inside += Gui::Text(n + "Name", Left + 30, top, Right - Left - 140, RowHeight, std::string(mod.name) + (mod.kind == Kind::Aura ? " aura" : ""), Gui::Style::Label);
+		inside += Gui::Check(n + "Check", Right - 74, top + 7, Config.allowed[m].load(), std::string("set:") + mod.key);
+	}
+	c += Gui::Clip("List", 0, listTop, BarLeft - 6, listRoom, inside);
+	c += Bar.Layout(listTop, listRoom, total, Scroll);
+	return Gui::Panel(panelName, PanelX, PanelY, PanelWidth, PanelHeight, c, 10, R"(, "anchor": "$LeftPanelAnchor")");
+}
+
+void CloseWindow() {
+	Window.Close();
+	WindowOpen = false;
+	Gui::LeftPanel::Closed();
+}
+
+void WatchWindow() {
+	const bool open = Window.IsOpen();
+	WindowOpen      = open;
+	if (Gui::LeftPanel::Watch(open, Window.Busy())) CloseWindow();
+}
+
+void ToggleWindow() {
+	if (Window.IsOpen()) return CloseWindow();
+	Gui::Font::Refresh();
+	Gui::WindowHook::Start({
+	    .active = [] { return WindowOpen.load(); },
+	    .wheel  = [](int notches) {
+            Scroll = std::clamp(Scroll + notches * WheelStep, 0, std::max(0, Bar.Max()));
+            Window.Show();
+	    },
+	    .watch = WatchWindow,
+	});
+	static bool attached = false;
+	if (!attached) Bar.Attach(), attached = true;
+	Gui::LeftPanel::Opening();
+	Window.Show();
+	WindowOpen = true;
+}
+
+void OnWindowCommand(const std::string& command) {
+	if (command == "toggle") return ToggleWindow();
+	if (!Window.IsOpen() && command != "close") return;
+	if (Bar.Handle(command)) return;
+	if (command == "close") return CloseWindow();
+	if (command.rfind("set:", 0) == 0) {
+		const std::string key = command.substr(4);
+		std::string       error;
+		if (ApplySetting(key, ValueOf(key) == "true" ? "false" : "true", error)) SaveConfig();
+	}
+	Window.Show();
+}
+
+void __cdecl WindowDataLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
+	static bool done = false;
+	if (done) return;
+	done = true;
+	Gui::Kit::Read();
+	Gui::Font::Measure();
+}
+
+auto OnOpenAction(const D2RL::PluginContext*, const D2RL::Input::ActionEvent* event, void*) noexcept -> D2RL::Input::ActionResult {
+	if (!D2RL::Input::HasActionEventField(event, D2RL::Input::ActionEventRequiredSize) || event->kind != D2RL::Input::ActionEventKind::Pressed)
+		return D2RL::Input::ActionResult::Ignored;
+	Gui::Commands::Post("toggle");
+	return D2RL::Input::ActionResult::Handled;
+}
+
+void StartWindow(const D2RL::PluginContext* context) noexcept {
+	if (!Gui::Init(context, PluginId)) return Log(true, "the TZ Plus window is off: a service it needs is missing");
+	Window.Register(BuildWindow, "TZPlus", 16);
+	Bar.OnScroll([](int scroll) { Scroll = scroll, Window.Show(); });
+	Gui::Commands::Listen(OnWindowCommand);
+	if (Lifecycle) {
+		D2RL::Lifecycle::ListenerHandle                 handle {};
+		const D2RL::Lifecycle::DataTablesLoadedListener loaded { .structSize = sizeof(D2RL::Lifecycle::DataTablesLoadedListener), .callback = WindowDataLoaded };
+		(void)Lifecycle->registerDataTablesLoadedListener(context, &loaded, &handle);
+	}
+	if (const auto* input = Gui::Detail::Query<D2RL::InputService>(context, "input"); input && D2RL::HasInputServiceField(input, D2RL::InputServiceRequiredSize)) {
+		const D2RL::Input::ActionRegistration action {
+			.structSize       = D2RL::Input::ActionRegistrationSize,
+			.logicalId        = "open-tz-plus",
+			.displayName      = "Open TZ Plus",
+			.category         = "TZ Plus",
+			.defaultPrimary   = { .key = D2RL::Input::Key::None },
+			.defaultSecondary = { .key = D2RL::Input::Key::None },
+			.callback         = OnOpenAction,
+		};
+		D2RL::Input::ActionHandle handle = D2RL::Input::InvalidHandle;
+		(void)input->registerAction(context, &action, &handle);
 	}
 }
 
@@ -1429,6 +1608,7 @@ D2RL::ConsoleCommandResult __cdecl Command(D2R::Game::Client*, const D2RL::Conso
 	}
 	ReleaseSRWLockShared(&Lock);
 	Context->WriteConsoleMessage(text.c_str());
+	Gui::Commands::Post("toggle");
 	const int index = At<LocalIndexFn>(0x8B2D0)();
 	if (void* player = index >= 0 && index < 8 ? At<PlayerByIndexFn>(0x9A480)(index) : nullptr) {
 		char line[160];
@@ -1452,8 +1632,9 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	LoadConfig();
 	Schema = BuildSchema();
 	(void)Menu.Start(context, Schema.c_str(), MenuGet, MenuSet, nullptr);
-	(void)context->RegisterConsoleCommand("tzplus", &Command, "Shows this game's TZ Plus mods and rewards.");
+	(void)context->RegisterConsoleCommand("tzplus", &Command, "Opens the TZ Plus window and shows this game's mods and rewards.");
 	StartDisplay(context);
+	StartWindow(context);
 	Base = context->exeBase;
 	if (!Base || !Locate()) {
 		Log(true, "TZ Plus %s: inactive, this game build isn't supported (Steam 3.4.95041 is)", PluginVersion);
@@ -1517,4 +1698,5 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
 	Menu.Stop();
+	D2RGui::WindowHook::Stop();
 }

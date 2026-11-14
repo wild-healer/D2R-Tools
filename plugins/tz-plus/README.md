@@ -14,3 +14,7 @@ Mods: Extra Strong, Extra Fast, Cursed, Magic Resistant, Fire / Lightning / Cold
 The game's mods and rewards are listed in the map's text (top right, map open), under "Terrorized". The console command `tzplus` shows the game's mods and rewards. Settings: `d2rloader/config/tz-plus.toml`, or in game with I Hate TOMLs. Runs where the game's server runs: single player and games you host.
 
 Build: `./build.sh` (MinGW-w64).
+
+## Window
+
+Console `tzplus` or Controls > TZ Plus > Open TZ Plus opens the TZ Plus window: this game's mods, tiers and rewards, the settings, and one check box per mod. Built with the D2R GUI library (`lib/d2r-gui`, compiled into the DLL).
