@@ -56,7 +56,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.7";
+constexpr const char* PluginVersion = "0.0.8";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -727,7 +727,7 @@ void Trace(const char* format, ...) noexcept {
 }
 
 // Every monster, once, at the end of its creation (where the game checks for its terror zone mod).
-void AddMods(std::uint8_t* game, void* unit, void* room) noexcept {
+void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	if (!game || !unit || !Config.enabled.load(std::memory_order_relaxed)) return;
 	static int entries = 0; // first calls logged, to see where it stops
 	const bool first = entries < 3;
@@ -759,8 +759,9 @@ void AddMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	const int players = GiveRewards(game, *g, g->difficulty == 2 || terrorized, g->difficulty == 2 ? -1 : level);
 	if (first) Log(false, "monster init: level %d, terrorized %d, rewards on %d player(s)", level, terrorized ? 1 : 0, players);
 	static int quiet = 0; // monsters outside terror zones logged so far
-	if (TracedGame != game) TracedGame = game, Traced = 0, quiet = 0;
-	const bool trace = Traced < 25;
+	static int tracedElites = 0;
+	if (TracedGame != game) TracedGame = game, Traced = 0, quiet = 0, tracedElites = 0;
+	bool trace = Traced < 25;
 	if (!terrorized) {
 		if (quiet < 5) ++quiet, Trace("monster in level %d: not terrorized, no mods", level);
 		return;
@@ -771,6 +772,7 @@ void AddMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	const bool         boss  = At<BossKindFn>(0x3AEFF0)(nullptr, unit) != 0;
 	const bool         elite = boss || (type & 0x61E) != 0 || At<IsSpecialFn>(0x38E0E0)(unit, true);
 	const int          top   = Ranges[g->difficulty].maxTier;
+	if (elite && tracedElites < 15) ++tracedElites, trace = true;
 	const int          cold0 = trace ? GetStat(unit, StatColdRes) : 0, fire0 = trace ? GetStat(unit, StatFireRes) : 0;
 	for (int i = 0; i < g->count; ++i) {
 		const Mod& mod  = Mods[g->mods[i].mod];
@@ -812,6 +814,67 @@ using LevelUpFn     = std::uint64_t (*)(void* unit, void* info, std::uint16_t fl
 
 // 0x54375B: call 0x3AF200 (monster has the terror state?), reached by every monster.
 // The stub passes the game (r14) and the room (the init's 2nd argument, saved at [rsp+0x30]).
+// ---- champions, uniques, super uniques and minions ----
+// Their spawn functions create a normal monster first (our hook above), then copy in their own mods
+// (over ours) and set their type. So inside those functions we wait and add our mods when the outermost one returns.
+
+struct Pending {
+	std::uint8_t* game;
+	void*         unit;
+};
+struct SpawnSlot {
+	std::atomic<DWORD>   thread { 0 };
+	int                  depth = 0;
+	std::vector<Pending> pending;
+};
+SpawnSlot SpawnSlots[16];
+
+SpawnSlot* SlotFor(DWORD thread, bool claim) noexcept {
+	for (SpawnSlot& slot : SpawnSlots)
+		if (slot.thread.load(std::memory_order_relaxed) == thread) return &slot;
+	if (!claim) return nullptr;
+	for (SpawnSlot& slot : SpawnSlots) {
+		DWORD free = 0;
+		if (slot.thread.compare_exchange_strong(free, thread)) return &slot;
+	}
+	return nullptr;
+}
+
+void AddMods(std::uint8_t* game, void* unit, void* room) noexcept {
+	if (SpawnSlot* slot = SlotFor(GetCurrentThreadId(), false); slot && slot->depth > 0) {
+		if (slot->pending.size() < 256) slot->pending.push_back({ game, unit });
+		return;
+	}
+	ApplyMods(game, unit, room);
+}
+
+std::uint64_t SpawnOrig[8] {};
+static int    GroupLogs = 0;
+
+template <int I>
+std::uint64_t HookSpawn(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d, std::uint64_t e, std::uint64_t f, std::uint64_t g,
+                        std::uint64_t h, std::uint64_t i, std::uint64_t j, std::uint64_t k, std::uint64_t l, std::uint64_t m, std::uint64_t n) noexcept {
+	using Fn            = std::uint64_t (*)(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                 std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t) noexcept;
+	SpawnSlot* slot     = SlotFor(GetCurrentThreadId(), true);
+	if (slot) ++slot->depth;
+	const std::uint64_t result = reinterpret_cast<Fn>(SpawnOrig[I])(a, b, c, d, e, f, g, h, i, j, k, l, m, n);
+	if (slot && --slot->depth == 0 && !slot->pending.empty()) {
+		std::vector<Pending> units;
+		units.swap(slot->pending);
+		if (GroupLogs < 10) ++GroupLogs, Log(false, "group spawn %d: %zu monster(s), mods added now", I, units.size());
+		for (const Pending& p : units)
+			if (Field<std::uint32_t>(p.unit, 0) == 1) ApplyMods(p.game, p.unit, nullptr); // still a monster
+	}
+	return result;
+}
+
+struct SpawnHook {
+	std::uint64_t rva;
+	Code          bytes;
+	void*         hook;
+};
+
 bool HookTerrorCheck(void* unit, std::uint8_t* game, void* room) noexcept {
 	AddMods(game, unit, room);
 	return At<TerrorCheckFn>(0x3AF200)(unit);
@@ -1229,6 +1292,27 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Log(true, "TZ Plus %s: the mods are not shown on the map, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(MapLineCallRva));
 	if (!PatchCall(TownCheckCallRva, InZoneListRva, reinterpret_cast<const void*>(&HookTownCheck), { 0x4C, 0x89, 0xE2 })) // mov rdx, r12
 		Log(true, "TZ Plus %s: the mods are not shown on the town map, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(TownCheckCallRva));
+	{
+		const SpawnHook spawns[] {
+			{ 0x499210, { 0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0x6C }, reinterpret_cast<void*>(&HookSpawn<0>) },
+			{ 0x499880, { 0x48, 0x89, 0x54, 0x24, 0x10, 0x55, 0x41, 0x54, 0x41, 0x55, 0x41, 0x57, 0x48, 0x8D, 0x6C, 0x24 }, reinterpret_cast<void*>(&HookSpawn<1>) },
+			{ 0x499BA0, { 0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x48, 0xFF, 0xFF }, reinterpret_cast<void*>(&HookSpawn<2>) },
+			{ 0x49AB40, { 0x48, 0x89, 0x5C, 0x24, 0x18, 0x48, 0x89, 0x6C, 0x24, 0x20, 0x56, 0x48, 0x83, 0xEC, 0x20, 0x41 }, reinterpret_cast<void*>(&HookSpawn<3>) },
+			{ 0x49AC30, { 0x40, 0x55, 0x41, 0x54, 0x41, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0xB9, 0x48, 0x81, 0xEC, 0xA0, 0x00 }, reinterpret_cast<void*>(&HookSpawn<4>) },
+			{ 0x4996B0, { 0x40, 0x55, 0x57, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x4D, 0x8B, 0xF8, 0x48, 0x8B, 0xEA, 0x48 }, reinterpret_cast<void*>(&HookSpawn<5>) },
+			{ 0x498810, { 0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0x6C }, reinterpret_cast<void*>(&HookSpawn<6>) },
+			{ 0x49AF30, { 0x4C, 0x8B, 0xDC, 0x49, 0x89, 0x5B, 0x08, 0x49, 0x89, 0x6B, 0x10, 0x56, 0x57, 0x41, 0x54, 0x41 }, reinterpret_cast<void*>(&HookSpawn<7>) },
+		};
+		int failed = 0;
+		for (int i = 0; i < 8; ++i) {
+			void* original = nullptr;
+			if (!context->InstallInlineHook(spawns[i].rva, spawns[i].bytes.data(), static_cast<std::uint32_t>(spawns[i].bytes.size()), spawns[i].hook, &original) ||
+			    !original)
+				++failed, Log(true, "elite mods: could not hook D2R+0x%llX", static_cast<unsigned long long>(spawns[i].rva));
+			else SpawnOrig[i] = reinterpret_cast<std::uint64_t>(original);
+		}
+		(void)failed;
+	}
 	Log(false, "TZ Plus %s: %s (Nightmare %s, Hell %s)", PluginVersion, Config.enabled ? "active" : "turned off", Config.nightmare ? "on" : "off",
 	    Config.hell ? "on" : "off");
 	return true;
