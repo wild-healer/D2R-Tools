@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.31";
+constexpr const char* PluginVersion = "0.0.32";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -438,6 +438,7 @@ struct View {
 	double hx = 0, hy = 0;   // your heading while you move
 	bool   protect = false;  // enemies right next to you: melee regroups on you
 	bool   safe    = false;  // this mercenary is in safe mode
+	DWORD  retreatMs = 0;    // how long you have been backing off
 };
 thread_local View Now {};
 
@@ -455,7 +456,9 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 	// You're backing off: melee mercenaries come with you, whatever is on them
 	// or on you (fighting there kept them behind; a ring of monsters is still
 	// broken out of, see BreakOut).
-	if (melee && Now.intent == Intent::Retreat) return nullptr;
+	// Only a real retreat: backing off for most of a second and already more
+	// than 5 away from it. A step back while it fights next to you is not one.
+	if (melee && Now.intent == Intent::Retreat && Now.retreatMs >= 800 && Distance(merc, owner) > 5) return nullptr;
 	const int      leash    = Config.leash.load();
 	const int      engage   = Config.engage.load();
 	const unsigned elements = ElementsOf(merc, role);
@@ -471,7 +474,7 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 		// Protecting you: melee only looks at what is right around you.
 		if (melee && Now.protect) {
 			if (fromOwner > Config.protect.load() + 2 && !(selfDefense && fromMerc <= 2)) continue;
-		} else if ((fromOwner > leash || (melee && fromMerc > (Now.intent == Intent::Retreat ? 3 : engage))) && !selfDefense) continue;
+		} else if ((fromOwner > leash || (melee && fromMerc > (Now.intent == Intent::Retreat && Now.retreatMs >= 800 ? 3 : engage))) && !selfDefense) continue;
 		// Ranged: only targets it can shoot from where it stands (missile line,
 		// as the game's own ranged target choice checks), so it never runs
 		// around looking for a shot.
@@ -754,6 +757,7 @@ struct OwnerState {
 	int           mirror;  // 1 or -1: which side of you each lane is on
 	DWORD         stillSince; // first moment seen standing (0: moving)
 	bool          stopped;    // standing for more than the frame between two moves
+	DWORD         retreatSince; // backing off since (0: not backing off)
 };
 struct MercState {
 	std::uint32_t id, owner;
@@ -778,7 +782,7 @@ OwnerState& OwnerOf(void* owner) noexcept {
 	for (auto& entry : Owners)
 		if (entry.id == id && (entry.fx != 0 || entry.fy != 0)) return entry;
 	OwnerState& entry = Owners[id % Owners.size()];
-	entry = { id, -1, -1, 0.0, 1.0, -1, -1, 0.0, 0.0, -1, -1, 0, false, 1, 0, true };
+	entry = { id, -1, -1, 0.0, 1.0, -1, -1, 0.0, 0.0, -1, -1, 0, false, 1, 0, true, 0 };
 	return entry;
 }
 
@@ -1453,13 +1457,16 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	// What you're doing and how things stand, for the choices below.
 	Now        = {};
 	Now.intent = ReadIntent(owner, ownerState, scan);
+	if (Now.intent != Intent::Retreat) ownerState.retreatSince = 0;
+	else if (!ownerState.retreatSince) ownerState.retreatSince = GetTickCount();
+	Now.retreatMs = ownerState.retreatSince ? GetTickCount() - ownerState.retreatSince : 0;
 	Now.hx = ownerState.hx, Now.hy = ownerState.hy;
 	for (std::size_t index = 0; index < scan.count; ++index)
 		if (Distance(owner, scan.units[index]) <= Config.protect.load()) Now.protect = true;
 	Now.safe = UpdateSafe(merc, role);
 	void* const target  = ChooseTarget(game, merc, owner, role);
 	const bool  blocked = OnlyBlocked;
-	Mv(merc, " view: you %s%s%s", IntentName(Now.intent), Now.protect ? ", enemies on you" : "", Now.safe ? ", it is in safe mode" : "");
+	Mv(merc, " view: you %s (%lu ms)%s%s", IntentName(Now.intent), static_cast<unsigned long>(Now.retreatMs), Now.protect ? ", enemies on you" : "", Now.safe ? ", it is in safe mode" : "");
 	if (Now.safe) return SafeThink(game, merc, owner, mercState, sx, sy, walking, target, role, scan, tick, params);
 	if (!walking && BreakOut(game, merc, owner, scan, role)) return;
 	if (melee) {

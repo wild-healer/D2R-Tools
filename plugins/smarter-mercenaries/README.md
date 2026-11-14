@@ -18,7 +18,7 @@ dice roll.
 - Mercenaries run whenever you run or when more than 3 off their spot.
 - Your intent, from how you move: pushing toward monsters, mercenaries favour
   what's ahead of you and ranged ones hold the formation longer; backing off,
-  they back off with you and stop chasing what you leave behind; melee ones stop fighting and come with you.
+  they back off with you and stop chasing what you leave behind; melee ones come with you once you have backed off for most of a second and are more than 5 away.
 - Protection: when a monster gets within `protect_range` (5) of you, melee
   mercenaries regroup on you and fight what is around you.
 - Surrounded (monsters on every side within 4): the mercenary breaks out to
