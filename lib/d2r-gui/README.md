@@ -59,6 +59,7 @@ button and a long scrolling list. Console command `guidemo`.
 | `item_grid.h` | the plugin's item grid drawn its way: half-cell tiles, peeking past the grid, no cannot-wear colour | Grail On! |
 | `panels.h` | `SinglePanel` (one panel, a new layout per show) and `ViewCache` (many panels that each keep a view) | Grail On! |
 | `icons.h` (opt-in) | 120 game-icons.net icons at any size and colour, as pictures or sprites ([preview](docs/icons.png), [credits](ICONS-CREDITS.txt)) | Grail On! |
+| `stash_window.h` (opt-in) | a window in the stash's look (frame, gold title, close button), as Charm Inventory's | Charm Inventory |
 
 ## Rules the library follows
 

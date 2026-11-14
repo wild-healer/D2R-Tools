@@ -52,9 +52,35 @@ public:
 		return api.panels->registerChildLayout(api.context, &child, &handle) == D2RL::Panels::Result::Success;
 	}
 
-	// UI thread: the button goes to x, y.
+	// UI thread: the button goes to x, y (shown there once SetShown(true)).
 	void Move(int x, int y) {
 		x_ = x, y_ = y;
+		Place();
+	}
+
+	// UI thread: shows or hides the button, at once and through the game
+	// loading the inventory again (hidden, its layout puts it off screen).
+	void SetShown(bool shown) {
+		if (shown == shown_) return;
+		shown_ = shown;
+		Place();
+		const auto& api = Api();
+		if (!api.widgets) return;
+		namespace W = D2RL::Widgets;
+		for (const char* name : Panels) {
+			W::WidgetHandle panel {}, widget {};
+			if (api.widgets->findPanel(api.context, name, &panel) == W::Result::Success && api.widgets->findWidget(api.context, panel, MoldName().c_str(), &widget) == W::Result::Success)
+				(void)api.widgets->setWidgetVisible(api.context, widget, shown_);
+		}
+	}
+	bool Shown() const { return shown_; }
+
+private:
+	// Where the mold is drawn: its place, or off screen while hidden.
+	int DrawX() const { return shown_ ? x_ : HiddenX; }
+	int DrawY() const { return y_; }
+
+	void Place() {
 		RegisterLayout();
 		namespace W     = D2RL::Widgets;
 		const auto& api = Api();
@@ -63,11 +89,13 @@ public:
 			for (const char* name : Panels) {
 				W::WidgetHandle panel {}, widget {};
 				if (api.widgets->findPanel(api.context, name, &panel) != W::Result::Success || api.widgets->findWidget(api.context, panel, MoldName().c_str(), &widget) != W::Result::Success) continue;
-				const W::Rect rect { x_, y_, Width, Height };
+				const W::Rect rect { DrawX(), DrawY(), Width, Height };
 				if (api.widgets->setWidgetRect(api.context, widget, &rect) == W::Result::Success) moved = true;
 			}
 		if (!moved) moveWanted_ = true;
 	}
+
+public:
 
 	// The inventory's layout is to be loaded again once it is closed (Reload).
 	void ReloadWhenClosed() { reload_ = true; }
@@ -82,17 +110,17 @@ public:
 			if (!parent) break;
 			root = parent;
 		}
-		if (FindMold(root, x_, y_, 0)) { // already there (the layout was loaded again)
-			shownX_ = x_, shownY_ = y_, shownKnown_ = true, moveWanted_ = false;
+		if (FindMold(root, DrawX(), DrawY(), 0)) { // already there (the layout was loaded again)
+			shownX_ = DrawX(), shownY_ = DrawY(), shownKnown_ = true, moveWanted_ = false;
 			return;
 		}
 		if (!shownKnown_) return;
 		auto* mold = FindMold(root, shownX_, shownY_, 0);
 		if (!mold) return; // not this grid's panel
 		auto* rect = reinterpret_cast<std::int32_t*>(mold + WidgetRect);
-		rect[0] = x_, rect[1] = y_;
-		Log(false, "d2r-gui: inventory button moved from %d,%d to %d,%d", shownX_, shownY_, x_, y_);
-		shownX_ = x_, shownY_ = y_, moveWanted_ = false;
+		rect[0] = DrawX(), rect[1] = DrawY();
+		Log(false, "d2r-gui: inventory button moved from %d,%d to %d,%d", shownX_, shownY_, DrawX(), DrawY());
+		shownX_ = DrawX(), shownY_ = DrawY(), moveWanted_ = false;
 	}
 
 	// UI thread, each tick: after ReloadWhenClosed, the inventory's layout is let go once
@@ -164,7 +192,7 @@ public:
 			std::snprintf(line, sizeof(line), " %s at %d,%d %dx%d, %s, screen %s%.0f,%.0f %.0fx%.0f;", name.c_str(), rect.x, rect.y, rect.width, rect.height,
 			              stateKnown ? (state.visible ? "visible" : "HIDDEN") : "visibility unknown", screenKnown ? "" : "unknown ", screen.x, screen.y, screen.width, screen.height);
 			report += line;
-			if (stateKnown && !state.visible && (name == MoldName() || name == ButtonName())) (void)api.widgets->setWidgetVisible(api.context, widget, true);
+			if (stateKnown && state.visible != shown_ && (name == MoldName() || name == ButtonName())) (void)api.widgets->setWidgetVisible(api.context, widget, shown_);
 		}
 		if (report != told_) Log(false, "d2r-gui: %s", report.c_str());
 		told_ = report;
@@ -174,6 +202,7 @@ public:
 	std::string ButtonName() const { return Api().pluginId + "/" + look_.button; }
 
 private:
+	static constexpr int         HiddenX  = -5000;
 	static constexpr const char* Panels[] { "PlayerInventoryExpansionLayout", "PlayerInventoryOriginalLayout", "PlayerInventoryExpansionLayoutHD", "PlayerInventoryOriginalLayoutHD" };
 	// The game's widget: parent, children, child count, whether it fills its parent, its local rect (read at every draw).
 	static constexpr std::size_t WidgetParent = 0x30, WidgetChildren = 0x58, WidgetChildCount = 0x60, WidgetFills = 0x52, WidgetRect = 0x70;
@@ -182,7 +211,7 @@ private:
 		const auto&       api    = Api();
 		const std::string folder = "d2rloader/" + api.pluginId + "/";
 		char              head[256] {};
-		std::snprintf(head, sizeof(head), R"("rect": {"x": %d, "y": %d, "width": %d, "height": %d})", x_, y_, Width, Height);
+		std::snprintf(head, sizeof(head), R"("rect": {"x": %d, "y": %d, "width": %d, "height": %d})", DrawX(), DrawY(), Width, Height);
 		const std::string button = R"({"type": "ImageWidget", "name": )" + Json(MoldName()) + R"(, "fields": {)" + head + R"(, "filename": )" + Json(folder + look_.moldSprite)
 		                         + R"(}, "children": [{"type": "ButtonWidget", "name": )" + Json(ButtonName()) + R"(, "fields": {"rect": {"x": )" + std::to_string(InnerX) + R"(, "y": )"
 		                         + std::to_string(InnerY) + R"(}, "filename": )" + Json(folder + look_.buttonSprite)
@@ -213,7 +242,7 @@ private:
 	Look                                look_;
 	std::string                         id_, told_;
 	int                                 x_ {}, y_ {}, shownX_ {}, shownY_ {};
-	bool                                shownKnown_ {};
+	bool                                shownKnown_ {}, shown_ = true;
 	std::atomic<bool>                   moveWanted_ {}, reload_ {};
 	D2RL::Resources::RegistrationHandle layout_ = D2RL::Resources::InvalidHandle;
 };

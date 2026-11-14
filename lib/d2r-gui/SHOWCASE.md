@@ -52,7 +52,7 @@ the UI thread.
 | --- | --- |
 | **Left panel frame** | The game's left-panel frame, title band and close button. |
 | **Character-screen window** | A window drawn like the character screen, using the game's own background art. I Hate TOMLs uses this one. |
-| **Stash-look window** | Slot stone, gold rims and the stash's art at any size. Grail On! uses this one. |
+| **Stash-look window** | The stash's corners, edges and gold line around dark stone, with a gold title and the game's close button. Charm Inventory uses this one; Grail On!'s window is in the same look. |
 | **Behaves like a game left panel** | Opening it closes the character screen, quests, waypoints and stash, and opening one of those closes it. The view shifts right while it is open, as it does for theirs. |
 | **Windows that change while open** | A pool of panels takes turns, so every rebuild shows the new layout. Rebuilds are combined into one per frame, and the pool recovers on its own if the game keeps an old layout. |
 | **Fast repeat views** | Many panels each keep one view built. A view you saw before opens at once, and the view unused for longest is replaced first. |
@@ -72,7 +72,7 @@ the UI thread.
 | Scroll bars | A recessed track with a bronze thumb sized to the share shown. Click a step to jump, drag the thumb, or use the mouse wheel over the window. |
 | Clip views | Content taller than its room, cut to the room. |
 | Section titles, dividers, table rows | For settings pages and long lists. |
-| Inventory button | A button on the inventory's left edge in the stone and gold mold that Charm Inventory uses. You can move it while the game runs. |
+| Inventory button | A button on the inventory's left edge in the stone and gold mold that Charm Inventory uses. You can move it while the game runs. You can also hide it and show it again live. |
 
 ## Items
 
