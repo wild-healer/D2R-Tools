@@ -116,7 +116,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.2.2-dev-2";
+constexpr const char* PluginVersion = "1.2.2-dev-3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -7130,17 +7130,30 @@ bool LocateStore() {
 	std::uint64_t slotRva = 0;
 	const bool    core    = CoreModule && BytesAt(CoreModule + Store::CoreCall, Store::CoreCallBytes)
 	                && ReadOwn(reinterpret_cast<const void*>(CoreModule + Store::CoreSlot + 8), &slotRva, 8) && slotRva == Store::CreateItem;
-	// An indirect jump whose slot holds an address (a null slot would be called as 0).
+	// An indirect jump (FF 25) into the game's protected code.
 	const auto thunk = [&](std::uint64_t rva) {
-		std::uint8_t code[6] {};
-		std::uint64_t target = 0;
-		if (!ReadOwn(reinterpret_cast<const void*>(exe + rva), code, 6) || code[0] != 0xFF || code[1] != 0x25) return false;
-		std::int32_t rel = 0;
-		std::memcpy(&rel, code + 2, 4);
-		return ReadOwn(reinterpret_cast<const void*>(exe + rva + 6 + rel), &target, 8) && target != 0;
+		std::uint8_t code[2] {};
+		return ReadOwn(reinterpret_cast<const void*>(exe + rva), code, 2) && code[0] == 0xFF && code[1] == 0x25;
 	};
-	const bool game  = thunk(Store::SaveWriter) && thunk(Store::HeaderReader) && BytesAt(exe + Store::SaveLoader, Store::SaveLoaderBytes) && BytesAt(exe + Store::CreateItem, Store::CreateItemBytes)
-	                && BytesAt(exe + Store::UnitById, Store::UnitByIdBytes) && BytesAt(exe + Store::SocketItem, Store::SocketItemBytes);
+	struct Check { const char* name; std::uint64_t rva; bool ok; };
+	const Check checks[] = {
+		{ "save writer", Store::SaveWriter, thunk(Store::SaveWriter) },
+		{ "header reader", Store::HeaderReader, thunk(Store::HeaderReader) },
+		{ "save loader", Store::SaveLoader, BytesAt(exe + Store::SaveLoader, Store::SaveLoaderBytes) },
+		{ "create item", Store::CreateItem, BytesAt(exe + Store::CreateItem, Store::CreateItemBytes) },
+		{ "unit by id", Store::UnitById, BytesAt(exe + Store::UnitById, Store::UnitByIdBytes) },
+		{ "socket item", Store::SocketItem, BytesAt(exe + Store::SocketItem, Store::SocketItemBytes) },
+	};
+	bool game = true;
+	for (const auto& check : checks) {
+		if (check.ok) continue;
+		game = false;
+		// Which one, and what is there instead (an E9 jump: another plugin's hook).
+		std::uint8_t found[8] {};
+		(void)ReadOwn(reinterpret_cast<const void*>(exe + check.rva), found, sizeof(found));
+		Say(true, "grailon: the game's %s at 0x%llX differs: %02X %02X %02X %02X %02X %02X %02X %02X", check.name, static_cast<unsigned long long>(check.rva),
+		    found[0], found[1], found[2], found[3], found[4], found[5], found[6], found[7]);
+	}
 	if (!core || !game) {
 		Problem(true, "grailon: this game or D2RLoader build is not the one the storage was made for (D2RCore %s, game %s): the grail cannot store items",
 		    core ? "fits" : "differs", game ? "fits" : "differs");
