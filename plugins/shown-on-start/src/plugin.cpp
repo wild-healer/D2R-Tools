@@ -7,11 +7,14 @@
 // Items, 1 = Show Unfiltered Items. 0x1FAE30 `bool (mode)` reads it and
 // 0x1FAE90 `void (mode, bool)` writes it. The key handler (0xC66A0) flips or
 // sets it, then 0xCE450 applies it: it opens or closes the labels HUD and sets
-// the "labels shown" flag read by the rest of the game (0x8AFC0). Nothing
-// clears it between games while the Item Name Display option is Toggle, so the
-// plugin sets it once, when you are first in a game after launch, through the
-// same two calls the key uses. With the Hold option the game clears it again
-// whenever a key is released, as it does for the key itself.
+// the "labels shown" flag read by the rest of the game (0x8AFC0). The labels
+// HUD is panel 12. Nothing clears the state between games while the Item Name
+// Display option is Toggle, so the plugin sets it once, in your first game after
+// launch, through the same two calls the key uses. In every game where the
+// state is on (set by the plugin or by you) but the labels HUD is not open, it
+// applies the state again, retrying for a few seconds while the game's HUD is
+// still being set up. A state you turned off is left off. With the Hold option
+// the game clears it whenever a key is released, as it does for the key.
 //
 // The automap is the game panel 10. Panel open flags are a byte array at
 // D2R+0x2A2ADA0 (one per panel id), and 0xCD7C0 `bool (int panel, int)` opens
@@ -39,7 +42,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shown-on-start";
-constexpr const char* PluginVersion = "0.0.2";
+constexpr const char* PluginVersion = "0.0.3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -72,6 +75,7 @@ constexpr std::uint64_t OpenPanelFlagsReadRva = 0xCD7FB; // movzx r15d, byte [r1
 constexpr std::array<std::uint8_t, 9> OpenPanelFlagsReadBytes { 0x45, 0x0F, 0xB6, 0xBC, 0x1C, 0xA0, 0xAD, 0xA2, 0x02 };
 constexpr std::uint64_t PanelOpenFlagsRva = 0x2A2ADA0;
 constexpr int           PanelAutomap      = 10;
+constexpr int           PanelItemLabels   = 12;
 
 using GetFn   = bool (*)(std::uint8_t mode) noexcept;
 using SetFn   = void (*)(std::uint8_t mode, bool on) noexcept;
@@ -88,6 +92,11 @@ const D2RL::PluginContext* Context {};
 const D2RL::ThreadService* Threads {};
 std::atomic<bool>          ItemsDone { false }; // once per launch
 std::atomic<bool>          Queued { false };
+// One game's work, done on the UI thread, retried each frame until done or late.
+ULONGLONG GameDeadline {};
+bool      AutomapPending {};
+bool      ItemsPending {};
+int       Tries {};
 
 void Log(bool warn, const char* format, ...) noexcept {
 	if (!Context) return;
@@ -133,37 +142,80 @@ bool LocateAutomap() noexcept {
 	return true;
 }
 
-bool AutomapOpen() noexcept {
-	return *reinterpret_cast<const std::uint8_t volatile*>(Base + PanelOpenFlagsRva + PanelAutomap) != 0;
+bool PanelOpen(int panel) noexcept {
+	return *reinterpret_cast<const std::uint8_t volatile*>(Base + PanelOpenFlagsRva + panel) != 0;
 }
 
 // ---- UI thread, in a game ----
 
+void __cdecl TurnOn(const D2RL::PluginContext*, void*) noexcept;
+
+void Requeue() noexcept {
+	if (!Queued.exchange(true) && Threads->runOnUiThread(Context, TurnOn, nullptr) != D2RL::Threads::Result::Success) Queued.store(false);
+}
+
 void __cdecl TurnOn(const D2RL::PluginContext*, void*) noexcept {
 	Queued.store(false);
-	if (OpenPanel && Config.automap.load()) {
-		if (AutomapOpen()) {
-			Log(false, "automap was already open");
+	++Tries;
+	const bool late = GetTickCount64() >= GameDeadline;
+	if (AutomapPending) {
+		if (!Config.automap.load()) {
+			AutomapPending = false;
+		} else if (PanelOpen(PanelAutomap)) {
+			AutomapPending = false;
+			Log(false, Tries == 1 ? "automap was already open" : "automap opened");
+		} else if (late) {
+			AutomapPending = false;
+			Log(true, "automap could not be opened");
 		} else {
-			const bool opened = OpenPanel(PanelAutomap, 0) && AutomapOpen();
-			Log(!opened, "automap %s", opened ? "opened" : "could not be opened");
+			(void)OpenPanel(PanelAutomap, 0);
+			if (PanelOpen(PanelAutomap)) {
+				AutomapPending = false;
+				Log(false, "automap opened (try %d)", Tries);
+			}
 		}
 	}
-	if (ItemsGet && !ItemsDone.exchange(true) && Config.items.load()) {
-		if (ItemsGet(ModeShowItems)) {
-			Log(false, "item labels were already shown");
+	if (ItemsPending) {
+		if (!Config.items.load()) {
+			ItemsPending = false;
 		} else {
-			ItemsSet(ModeShowItems, true);
-			ItemsApply();
-			Log(false, "item labels turned on");
+			if (!ItemsDone.exchange(true) && !ItemsGet(ModeShowItems)) {
+				ItemsSet(ModeShowItems, true);
+				Log(false, "item labels turned on (first game after launch)");
+			}
+			if (!ItemsGet(ModeShowItems)) {
+				ItemsPending = false;
+				Log(false, "item labels are off (turned off in an earlier game), left off");
+			} else if (PanelOpen(PanelItemLabels)) {
+				ItemsPending = false;
+				Log(false, "item labels shown (try %d)", Tries);
+			} else if (late) {
+				ItemsPending = false;
+				Log(true, "item labels are on but their HUD could not be opened");
+			} else {
+				ItemsApply();
+				if (PanelOpen(PanelItemLabels)) {
+					ItemsPending = false;
+					Log(false, "item labels shown again (try %d)", Tries);
+				}
+			}
 		}
 	}
+	if (AutomapPending || ItemsPending) Requeue();
+}
+
+void __cdecl StartGame(const D2RL::PluginContext*, void*) noexcept {
+	GameDeadline   = GetTickCount64() + 5000;
+	Tries          = 0;
+	AutomapPending = OpenPanel != nullptr;
+	ItemsPending   = ItemsGet != nullptr;
+	TurnOn(nullptr, nullptr);
 }
 
 void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
 	if (!event || event->kind != D2RL::Lifecycle::GameplayEventKind::LocalPlayerReady || !Threads) return;
 	// Run on the next UI frame, after the game has finished setting up its HUD.
-	if (!Queued.exchange(true) && Threads->runOnUiThread(Context, TurnOn, nullptr) != D2RL::Threads::Result::Success) Queued.store(false);
+	(void)Threads->runOnUiThread(Context, StartGame, nullptr);
 }
 
 // ---- config ----
@@ -189,6 +241,7 @@ bool Apply(const std::string& key, const std::string& value, std::string& error)
 	};
 	if (key == "items") return flag(Config.items);
 	if (key == "automap") return flag(Config.automap);
+	if (key == "minimap") return true; // 0.0.1's setting, now automap: ignored
 	return error = "unknown setting", false;
 }
 
