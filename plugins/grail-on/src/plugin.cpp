@@ -116,7 +116,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.2.2";
+constexpr const char* PluginVersion = "1.2.2-dev-2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -7130,7 +7130,15 @@ bool LocateStore() {
 	std::uint64_t slotRva = 0;
 	const bool    core    = CoreModule && BytesAt(CoreModule + Store::CoreCall, Store::CoreCallBytes)
 	                && ReadOwn(reinterpret_cast<const void*>(CoreModule + Store::CoreSlot + 8), &slotRva, 8) && slotRva == Store::CreateItem;
-	const auto thunk = [&](std::uint64_t rva) { const auto* code = reinterpret_cast<const std::uint8_t*>(exe + rva); return code[0] == 0xFF && code[1] == 0x25; };
+	// An indirect jump whose slot holds an address (a null slot would be called as 0).
+	const auto thunk = [&](std::uint64_t rva) {
+		std::uint8_t code[6] {};
+		std::uint64_t target = 0;
+		if (!ReadOwn(reinterpret_cast<const void*>(exe + rva), code, 6) || code[0] != 0xFF || code[1] != 0x25) return false;
+		std::int32_t rel = 0;
+		std::memcpy(&rel, code + 2, 4);
+		return ReadOwn(reinterpret_cast<const void*>(exe + rva + 6 + rel), &target, 8) && target != 0;
+	};
 	const bool game  = thunk(Store::SaveWriter) && thunk(Store::HeaderReader) && BytesAt(exe + Store::SaveLoader, Store::SaveLoaderBytes) && BytesAt(exe + Store::CreateItem, Store::CreateItemBytes)
 	                && BytesAt(exe + Store::UnitById, Store::UnitByIdBytes) && BytesAt(exe + Store::SocketItem, Store::SocketItemBytes);
 	if (!core || !game) {
@@ -7506,7 +7514,8 @@ std::uint32_t SimplePrint(std::uint32_t code) {
 
 void __cdecl TakeSnapshot(const D2RL::PluginContext*, void* native, void* userData) noexcept {
 	auto* snapshot = static_cast<Snapshot*>(userData);
-	if (!native) return;
+	// Without the game's save writer (another game build) there are no bytes to take.
+	if (!native || !StoreReady || !SaveItem) return;
 	snapshot->bytes.assign(Store::BufferSize, 0);
 	void*     source = reinterpret_cast<void*>(static_cast<std::uintptr_t>(Context->exeBase) + Store::SourceInfo);
 	const int size   = SaveItem(native, snapshot->bytes.data(), snapshot->bytes.size(), 1, 1, 0, &source);
@@ -7771,6 +7780,7 @@ struct Decoding {
 // Returns the socketed items.
 std::vector<void*> SocketChildren(void* game, void* item, const std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t playerId) {
 	std::vector<void*> socketed;
+	if (!StoreReady) return socketed;
 	void*       player = playerId != 0xFFFFFFFF ? UnitById(game, 0, playerId) : nullptr;
 	const auto  parent = *reinterpret_cast<std::uint32_t*>(static_cast<char*>(item) + 8);
 	while (player && offset < bytes.size()) {
@@ -7795,7 +7805,7 @@ std::atomic<void*> ServerGame {}; // the game createItem last ran in (this chara
 void* DecodeInstead(void* game, void*, int) noexcept {
 	Decode.called = true;
 	if (game) ServerGame = game;
-	if (!game || !Decode.bytes || Decode.bytes->empty()) return nullptr;
+	if (!game || !StoreReady || !Decode.bytes || Decode.bytes->empty()) return nullptr;
 	alignas(16) std::uint8_t header[0x100] {};
 	const auto               flag = *reinterpret_cast<std::uint8_t*>(static_cast<char*>(game) + Store::GameFlag);
 	(void)ReadHeader(flag, Decode.bytes->data(), Decode.bytes->size(), 1, header, Store::Version);
@@ -7916,7 +7926,7 @@ std::map<void*, std::vector<void*>> GhostKids; // a ghost's socketed items, free
 // Game thread, Lock not held. A record's bytes decoded by the game's save
 // loader into a loose server item (in no inventory), or null.
 void* GhostFromBytes(void* game, const std::vector<std::uint8_t>& bytes) {
-	if (!game || bytes.empty()) return nullptr;
+	if (!game || !StoreReady || bytes.empty()) return nullptr;
 	alignas(16) std::uint8_t header[0x100] {};
 	const auto               flag = *reinterpret_cast<std::uint8_t*>(static_cast<char*>(game) + Store::GameFlag);
 	(void)ReadHeader(flag, bytes.data(), bytes.size(), 1, header, Store::Version);
