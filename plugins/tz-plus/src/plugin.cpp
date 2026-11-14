@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.24";
+constexpr const char* PluginVersion = "0.0.25";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1473,9 +1473,10 @@ std::vector<std::string> ModLines() noexcept {
 	AcquireSRWLockShared(&Lock);
 	if (const GameMods* g = Last; g && g->count > 0) {
 		for (int i = 0; i < g->count; ++i) lines.push_back(std::string(Mods[g->mods[i].mod].name) + " " + Roman(g->mods[i].tier));
-		char rewards[128];
-		std::snprintf(rewards, sizeof(rewards), "+%d%% Gold Find, +%d%% Magic Find, +%d%% Experience", g->gold, g->magic, g->xp);
-		lines.push_back(rewards);
+		char line[64];
+		std::snprintf(line, sizeof(line), "+%d%% Gold Find", g->gold), lines.push_back(line);
+		std::snprintf(line, sizeof(line), "+%d%% Magic Find", g->magic), lines.push_back(line);
+		std::snprintf(line, sizeof(line), "+%d%% Experience", g->xp), lines.push_back(line);
 	}
 	ReleaseSRWLockShared(&Lock);
 	return lines;
@@ -1529,7 +1530,11 @@ bool HookTownCheck(int level, void* text) noexcept {
 	const bool town = level == 1 || level == 40 || level == 75 || level == 103 || level == 109;
 	if (!listed && town && text)
 		for (const std::string& line : ModLines()) AppendText(text, line);
-	return listed;
+	// Hell: every level is a terror zone, no list of them under the map (true = "this level is listed", the game adds none).
+	AcquireSRWLockShared(&Lock);
+	const bool hell = Last && Last->difficulty == 2 && Config.enabled.load() && Config.hell;
+	ReleaseSRWLockShared(&Lock);
+	return listed || hell;
 }
 
 // ---- monster names (the line of mods under the life bar) ----
@@ -1726,9 +1731,10 @@ std::vector<std::string> GameLines() {
 		else std::snprintf(head, sizeof(head), "Nightmare act %d, terror zone level %d", g->act.load(), g->zoneLevel);
 		lines.push_back(head);
 		for (int i = 0; i < g->count; ++i) lines.push_back(std::string(Mods[g->mods[i].mod].name) + " " + Roman(g->mods[i].tier));
-		char rewards[128];
-		std::snprintf(rewards, sizeof(rewards), "+%d%% Gold Find, +%d%% Magic Find, +%d%% Experience", g->gold, g->magic, g->xp);
-		lines.push_back(rewards);
+		char line[64];
+		std::snprintf(line, sizeof(line), "+%d%% Gold Find", g->gold), lines.push_back(line);
+		std::snprintf(line, sizeof(line), "+%d%% Magic Find", g->magic), lines.push_back(line);
+		std::snprintf(line, sizeof(line), "+%d%% Experience", g->xp), lines.push_back(line);
 	} else lines.push_back(InGame ? "No TZ Plus mods in this game" : "Not in a game");
 	ReleaseSRWLockShared(&Lock);
 	return lines;
@@ -1825,10 +1831,29 @@ constexpr std::uint32_t CombatantA = 523, CombatantB = 524; // monstats act5barb
 using HoveredUnitFn = void* (*)(int index) noexcept;     // the unit under the mouse of a local player (D2R+0xF1900)
 int TalkLogs = 0;
 
+// The label of the unit under the mouse (D2R+0xC0420 (unit), called at 0x880AA5/0x880AE3/0x880B0C): the last one seen.
+using LabelFn = std::uint64_t (*)(void* unit, std::uint64_t, std::uint64_t, std::uint64_t) noexcept;
+constexpr std::uint64_t LabelRva = 0xC0420, LabelCalls[] { 0x880AA5, 0x880AE3, 0x880B0C };
+std::atomic<void*>         LastLabel { nullptr };
+std::atomic<std::uint64_t> LastLabelTick { 0 };
+int                        LabelLogs = 0;
+std::uint32_t              LabelLogged[32] {};
+
+std::uint64_t HookLabel(void* unit, std::uint64_t b, std::uint64_t c, std::uint64_t d) noexcept {
+	if (unit) {
+		LastLabel = unit, LastLabelTick = GetTickCount64();
+		const std::uint32_t key = (Field<std::uint32_t>(unit, 0) << 16) | (Field<std::uint32_t>(unit, 4) & 0xFFFF);
+		if (Field<std::uint32_t>(unit, 0) == 1 && LabelLogs < 32 && std::find(LabelLogged, LabelLogged + LabelLogs, key) == LabelLogged + LabelLogs)
+			LabelLogged[LabelLogs++] = key, Log(false, "hover: monster class %u (unit %u) shows its name", Field<std::uint32_t>(unit, 4), Field<std::uint32_t>(unit, 8));
+	}
+	return At<LabelFn>(LabelRva)(unit, b, c, d);
+}
+
 bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 	if (message != WM_LBUTTONDOWN || !InGame.load()) return false;
 	const int index = At<LocalIndexFn>(0x8B2D0)();
 	void*     unit  = index >= 0 && index < 8 ? At<HoveredUnitFn>(0xF1900)(index) : nullptr;
+	if (!unit && GetTickCount64() - LastLabelTick.load() < 400) unit = LastLabel.load(); // named a moment ago
 	if (TalkLogs < 12)
 		++TalkLogs, Log(false, "click: level %d, player %d, unit under the mouse %p (type %d, class %d, id %u)", CurrentLevel.load(), index, unit,
 		                unit ? static_cast<int>(Field<std::uint32_t>(unit, 0)) : -1, unit ? static_cast<int>(Field<std::uint32_t>(unit, 4)) : -1,
@@ -2341,6 +2366,9 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 		return Log(true, "zones: could not listen to table loads, no TZ Plus zones");
 	if (!PatchCall(FrameCallRva, FrameCallTarget, reinterpret_cast<const void*>(&HookFrameCall)))
 		Log(true, "zones: could not patch the game update at D2R+0x%llX, no zone portals", static_cast<unsigned long long>(FrameCallRva));
+	for (const std::uint64_t site : LabelCalls)
+		if (!PatchCall(site, LabelRva, reinterpret_cast<const void*>(&HookLabel)))
+			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
 	if (!PatchCall(PortalSpotCallRva, RoomHasRva, reinterpret_cast<const void*>(&HookPortalSpot)))
 		Log(true, "zones: no safe area at the entry, could not patch D2R+0x%llX", static_cast<unsigned long long>(PortalSpotCallRva));
 	{
