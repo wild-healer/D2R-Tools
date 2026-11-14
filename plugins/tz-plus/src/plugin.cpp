@@ -58,7 +58,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.13";
+constexpr const char* PluginVersion = "0.0.14";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -960,7 +960,6 @@ void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
 // The game gives the mods' event handlers "is unique" (MonsterData flag 8) and most of them do nothing
 // without it: Multiple Shots, Lightning Enchanted's bolts, our Teleportation... So for the monsters of a
 // TZ Plus terror zone we raise that flag for the duration of the call.
-// Event 5 is "fired a missile" (other = the missile): Poison Enchanted is weaker on missiles.
 constexpr std::uint64_t ModEventRva = 0x49D240;
 constexpr Code          ModEventBytes { 0x48, 0x89, 0x6C, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x48, 0x89, 0x54, 0x24, 0x10, 0x57 };
 constexpr int           RangedPoisonDivisor = 3;
@@ -1001,17 +1000,49 @@ std::uint64_t HookModEvent(std::uint64_t a, std::uint64_t b, std::uint64_t c, st
 		}
 		data = Field<std::uint8_t*>(unit, 0x10); // MonsterData, +0x1A type flags
 		if (data && !(Field<std::uint16_t>(data, 0x1A) & 8)) SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) | 8), raised = true;
-		void* missile = reinterpret_cast<void*>(c);
-		if (static_cast<std::uint32_t>(d) == 5 && missile && Field<std::uint32_t>(missile, 0) == 3 && TierOf(*mods, 0, Kind::Poison)) {
-			const std::int32_t low = GetStat(missile, StatPoisonMin), high = GetStat(missile, StatPoisonMax);
-			if (low > 0) SetStat(missile, StatPoisonMin, low / RangedPoisonDivisor);
-			if (high > 0) SetStat(missile, StatPoisonMax, high / RangedPoisonDivisor);
-			if (MissileLogs < 10) ++MissileLogs, Log(false, "missile of a Poison Enchanted monster: poison %d-%d -> %d-%d", low, high, GetStat(missile, StatPoisonMin), GetStat(missile, StatPoisonMax));
-		}
 	}
 	const std::uint64_t result = reinterpret_cast<Fn>(ModEventOrig)(a, b, c, d, e, f, g7, h, i, j, k, l, m, n);
 	if (raised) SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) & ~std::uint16_t { 8 });
 	return result;
+}
+
+// Missiles take another way: 0x499160(game, monster, missile) runs the mods' event 5 (Multiple Shots)
+// from missile creation (call at 0x537B96), with the same "is unique" rule. We raise the flag there too,
+// and give the missiles of a Poison Enchanted monster a third of its poison (missiles hit with their own stats).
+constexpr std::uint64_t MissileEventCallRva = 0x537B96;
+constexpr std::uint64_t MissileEventRva     = 0x499160;
+using MissileEventFn = void (*)(void* game, void* monster, void* missile) noexcept;
+
+void HookMissileEvent(std::uint8_t* game, void* monster, void* missile) noexcept {
+	GameMods*     mods   = nullptr;
+	std::uint8_t* data   = nullptr;
+	bool          raised = false;
+	const bool    ours   = InTzPlusZone(game, monster, &mods);
+	if (ours) {
+		data = Field<std::uint8_t*>(monster, 0x10);
+		if (data && !(Field<std::uint16_t>(data, 0x1A) & 8)) SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) | 8), raised = true;
+	}
+	At<MissileEventFn>(MissileEventRva)(game, monster, missile);
+	if (raised) SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) & ~std::uint16_t { 8 });
+	if (!ours || !missile || Field<std::uint32_t>(missile, 0) != 3) return;
+	const bool poison = TierOf(*mods, 0, Kind::Poison) != 0;
+	if (poison) {
+		const std::int32_t low = GetStat(monster, StatPoisonMin), high = GetStat(monster, StatPoisonMax), length = GetStat(monster, StatPoisonLength);
+		if (high > 0) {
+			SetStat(missile, StatPoisonMin, std::max(1, low / RangedPoisonDivisor));
+			SetStat(missile, StatPoisonMax, std::max(1, high / RangedPoisonDivisor));
+			SetStat(missile, StatPoisonLength, length);
+		}
+	}
+	if (MissileLogs < 15) {
+		++MissileLogs;
+		std::string list;
+		if (const std::uint8_t* umods = At<UModListFn>(0x38E310)(monster))
+			for (int x = 0; x < 9; ++x)
+				if (umods[x]) list += (list.empty() ? "" : ",") + std::to_string(umods[x]);
+		Log(false, "missile %p of monster %p [%s]%s: poison %d-%d/%d", missile, monster, list.c_str(), raised ? " (unique flag raised)" : "",
+		    GetStat(missile, StatPoisonMin), GetStat(missile, StatPoisonMax), GetStat(missile, StatPoisonLength));
+	}
 }
 
 bool HookTerrorCheck(void* unit, std::uint8_t* game, void* room) noexcept {
@@ -1770,6 +1801,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 			Log(true, "TZ Plus %s: Teleportation keeps the game's behaviour, could not patch D2R+0x%llX", PluginVersion,
 			    static_cast<unsigned long long>(TeleportHitSlotRva));
 	}
+	if (!PatchCall(MissileEventCallRva, MissileEventRva, reinterpret_cast<const void*>(&HookMissileEvent)))
+		Log(true, "TZ Plus %s: Multiple Shots and ranged poison off, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(MissileEventCallRva));
 	if (!PatchCall(NameTerrorCallRva, 0x3AF200, reinterpret_cast<const void*>(&HookNameTerror)))
 		Log(true, "TZ Plus %s: minions show no mods line, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(NameTerrorCallRva));
 	if (!PatchCall(NameSpecialCallRva, 0x38E0E0, reinterpret_cast<const void*>(&HookNameSpecial)))
