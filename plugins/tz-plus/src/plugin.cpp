@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.36";
+constexpr const char* PluginVersion = "0.0.37";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -317,6 +317,8 @@ struct GameMods {
 	int                 zoneId = 0, level2Id = 0;            // the open zone and its "level 2" (one empty room)
 	void*               exitPortal = nullptr;                // the zone's exit-room portal to level 2
 	std::uint32_t       exitPortalId = 0;
+	bool                roranDone = false; // Roran Stronghammer is in Harrogath
+	int                 roranTries = 0;
 	std::uint32_t       portalId  = 0;
 	SRWLOCK             modLock = SRWLOCK_INIT;
 	std::unordered_map<void*, std::uint32_t> modded; // monsters given our mods (unit -> unit id): not mercs or summons
@@ -2060,7 +2062,7 @@ bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 	if (CurrentLevel.load() == 109) DumpBarbarians();
 	if (CurrentLevel.load() != 109 || !unit || Field<std::uint32_t>(unit, 0) != 1) return false;
 	const std::uint32_t cls = Field<std::uint32_t>(unit, 4);
-	if (cls != 567 && cls != 568 && cls != 569) return false; // injuredbarb1-3, the barbarians at the fires
+	if (cls != 535) return false; // act5barb3: Roran Stronghammer
 	Gui::Commands::Post("talk");
 	return false; // the click goes on: you walk to him
 }
@@ -2311,7 +2313,7 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state, int vis0 = 0
 
 // The Act 5 Townguards (act5barb3/4, the barbarians standing at Harrogath's fires) can't be selected (monstats2 noSel):
 // made selectable like the Combatants, so they show their name and can be clicked. monstats2 flags: dword +4, isSel bit 3, noSel bit 5.
-constexpr std::uint32_t Townguards[] { 567, 568, 569 }, Combatant = 522; // monstats ids: injuredbarb1-3 (the barbarians at Harrogath's fires), act5barb1
+constexpr std::uint32_t Townguards[] { 535 }, Combatant = 522; // monstats ids: act5barb3 (Roran Stronghammer), act5barb1
 constexpr std::uint32_t SelIs = 1u << 3, SelNo = 1u << 5;
 
 // The monstats2 row of a monster: MonStats word +0x4C (the table skips the "Expansion" line, so ids and rows differ).
@@ -2429,7 +2431,16 @@ constexpr std::uint64_t StringByKeyThunkRva = 0x3E2B736;
 StringByKeyFn           StringByKeyOrig {};
 char                    ZoneTexts[3][ZoneSlots][48] {};
 
+std::atomic<int> RoranNameLogs { 0 };
+
 const char* HookStringByKey(const KeyView* key) noexcept {
+	if (key && key->text && (key->length == 9 || key->length == 15)) { // Roran's name: the Townguard's NameStr key
+		const std::string_view k(key->text, key->length);
+		if (k == "act5barb3" || k == "act5barb4" || k == "Act 5 Townguard") {
+			if (RoranNameLogs.fetch_add(1) < 3) Log(false, "Roran Stronghammer: name asked by key \"%.*s\"", static_cast<int>(k.size()), k.data());
+			return "Roran Stronghammer";
+		}
+	}
 	if (key && key->text && key->length >= 11 && key->length <= 13 && std::memcmp(key->text, "TZPlus", 6) == 0) {
 		const std::string_view k(key->text, key->length);
 		for (int kind = 0; kind < 3; ++kind) {
@@ -2482,13 +2493,37 @@ void SetPortalResult(const char* format, ...) noexcept {
 // The zone side of a portal being made (D2R+0x435FDF: call 0x2F0680 (room, x, y), with the spot it is placed at).
 thread_local GameMods* Creating   = nullptr;
 thread_local int       CreatingId = 0;
+thread_local std::uint8_t* CreatingGame = nullptr;
 using RoomHasFn = std::uint64_t (*)(void* room, std::int32_t x, std::int32_t y) noexcept;
 constexpr std::uint64_t PortalSpotCallRva = 0x435FDF, RoomHasRva = 0x2F0680;
 
-std::uint64_t HookPortalSpot(void* room, std::int32_t x, std::int32_t y) noexcept {
-	if (Creating && room && At<RoomLevelFn>(0x2EFC10)(room) == CreatingId) {
+// The stub puts the caller's rbp in r9: the spot the caller goes on with is room [rbp-0x28], x [rbp-0x2C], y [rbp-0x30].
+// A zone's portal is moved to its entry stairs room (the level's Vis0 room, Room2 flag 0x10).
+using ActivateRoomFn = void (*)(std::uint8_t mode, void* room2) noexcept; // D2R+0x3289A0: loads a Room2's Room1
+std::uint64_t HookPortalSpot(void* room, std::int32_t x, std::int32_t y, std::uint8_t* frame) noexcept {
+	if (Creating && CreatingGame && room && frame && At<RoomLevelFn>(0x2EFC10)(room) == CreatingId) {
+		const int fromX = x, fromY = y;
+		auto*     room2 = Field<std::uint8_t*>(room, 0x18);
+		auto*     level = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
+		int       guard = 0;
+		for (auto* r = level ? Field<std::uint8_t*>(level, 0x10) : nullptr; r && guard < 4096; r = Field<std::uint8_t*>(r, 0x48), ++guard) {
+			if (!(Field<std::uint32_t>(r, 0x50) & 0x10)) continue;
+			if (!Field<void*>(r, 0x58)) At<ActivateRoomFn>(0x3289A0)(Field<std::uint8_t>(CreatingGame, GameMode), r);
+			void* entry = Field<void*>(r, 0x58);
+			if (!entry) break;
+			Coord spot { (Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2) * 5, (Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2) * 5 };
+			void* freeRoom = nullptr;
+			At<FindFreeSpotFn>(0x517F90)(CreatingGame, entry, &spot, 3, 0x400, &freeRoom, 4, 100);
+			if (!freeRoom) break;
+			room = freeRoom, x = spot.x, y = spot.y;
+			SetField<void*>(frame, static_cast<std::uintptr_t>(-0x28), room);
+			SetField<std::int32_t>(frame, static_cast<std::uintptr_t>(-0x2C), x);
+			SetField<std::int32_t>(frame, static_cast<std::uintptr_t>(-0x30), y);
+			break;
+		}
 		Creating->safeLevel = CreatingId, Creating->safeX = x, Creating->safeY = y;
-		Log(false, "zones: portal into level %d at %d,%d", CreatingId, x, y);
+		Log(false, "zones: portal into level %d at %d,%d (game's pick %d,%d)%s", CreatingId, x, y, fromX, fromY,
+		    x == fromX && y == fromY ? ", no entry stairs room found" : ", moved to the entry stairs");
 	}
 	return At<RoomHasFn>(RoomHasRva)(room, x, y);
 }
@@ -2547,7 +2582,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		std::uint64_t copy = state; // the same monsters in every bank
 		SetupZone(Banks[bank], id, tmpl, copy, id + 1, id + 1); // both stairs lead to level 2
 		std::uint64_t copy2 = state;
-		SetupZone(Banks[bank], id + 1, 9, copy2, id, 0, true); // level 2: one large cave room (Cave Level 2 rooms are 24x24 tiles)
+		SetupZone(Banks[bank], id + 1, tmpl, copy2, id, 0, true); // level 2: one empty room of the same area type
 	}
 	(void)Mix(state);
 	std::string monsters;
@@ -2577,8 +2612,9 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	g->safeLevel = 0;
 	Creating     = g;
 	CreatingId   = id;
+	CreatingGame = game;
 	const int created = freeRoom ? At<CreatePortalFn>(0x432CE0)(game, player, freeRoom, spot.x, spot.y, id, &portal, 60, 0, 1) : 0;
-	Creating = nullptr;
+	Creating = nullptr, CreatingGame = nullptr;
 	if (!created)
 		return SetPortalResult("TZ Plus zones: the game refused the portal to level %d (%s) at %d,%d%s", id, LevelName(Banks[mode], tmpl).c_str(), spot.x, spot.y,
 		                       freeRoom ? "" : " (no free spot)");
@@ -2703,8 +2739,41 @@ void OpenExitPortal(std::uint8_t* game) noexcept {
 	}
 }
 
+// Roran Stronghammer: an Act 5 Townguard (act5barb3) put at the fire south of Harrogath's waypoint once a player is near.
+// Spawn: D2R+0x492CF0 (game, room, x, y, monster, mode, a7, a8), as the game's own calls do (a7 -1 then 4, a8 0x42).
+// Room at a spot: D2R+0x38DFB0 (room near it, x, y).
+constexpr std::uint32_t RoranClass = 535;
+constexpr int           RoranX = 5139, RoranY = 5099;
+using SpawnFn  = void* (*)(void* game, void* room, int x, int y, int monster, int mode, int a7, std::uint16_t a8) noexcept;
+using RoomAtFn = void* (*)(void* room, int x, int y) noexcept;
+
+void SpawnRoran(std::uint8_t* game) noexcept {
+	GameMods* g = ModsOf(game);
+	if (!g || g->roranDone) return;
+	auto* client = Field<std::uint8_t*>(game, GameClients);
+	for (int guard = 0; client && guard < 64; ++guard, client = Field<std::uint8_t*>(client, ClientNext)) {
+		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
+		void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
+		if (!room || At<RoomLevelFn>(0x2EFC10)(room) != 109) continue;
+		void* spot = At<RoomAtFn>(0x38DFB0)(room, RoranX, RoranY);
+		if (!spot) continue; // not loaded near this player yet
+		void* roran = At<SpawnFn>(0x492CF0)(game, spot, RoranX, RoranY, RoranClass, 1, -1, 0x42);
+		if (!roran) roran = At<SpawnFn>(0x492CF0)(game, spot, RoranX, RoranY, RoranClass, 1, 4, 0x42);
+		if (roran) {
+			g->roranDone = true;
+			Coord at {};
+			At<GetCoordsFn>(0x34A040)(roran, &at);
+			Log(false, "Roran Stronghammer: unit %u in Harrogath at %d,%d (asked %d,%d)", Field<std::uint32_t>(roran, 8), at.x, at.y, RoranX, RoranY);
+		} else if (++g->roranTries >= 5) {
+			g->roranDone = true;
+			Log(true, "Roran Stronghammer: the game refused to spawn him at %d,%d", RoranX, RoranY);
+		}
+		return;
+	}
+}
+
 std::uint64_t HookFrameCall(void* game) noexcept {
-	if (game) OpenExitPortal(static_cast<std::uint8_t*>(game));
+	if (game) SpawnRoran(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
 	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
@@ -2724,7 +2793,7 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 	for (const std::uint64_t site : LabelCalls)
 		if (!PatchCall(site, LabelRva, reinterpret_cast<const void*>(&HookLabel)))
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
-	if (!PatchCall(PortalSpotCallRva, RoomHasRva, reinterpret_cast<const void*>(&HookPortalSpot)))
+	if (!PatchCall(PortalSpotCallRva, RoomHasRva, reinterpret_cast<const void*>(&HookPortalSpot), { 0x49, 0x89, 0xE9 })) // mov r9, rbp
 		Log(true, "zones: portal spot not logged, could not patch D2R+0x%llX", static_cast<unsigned long long>(PortalSpotCallRva));
 	if (!PatchCall(PortalNameCallRva, ObjectLevelRva, reinterpret_cast<const void*>(&HookPortalLevel)))
 		Log(true, "zones: portals keep the game's name, could not patch D2R+0x%llX", static_cast<unsigned long long>(PortalNameCallRva));
