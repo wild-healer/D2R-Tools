@@ -33,6 +33,7 @@
 //     +0x106 mode (2 LoD, 3 RotW), +0x1A8 seed, +0x1A5C8 the game's mod,
 //     +0x1A5CC rolled flag.
 
+#include <map>
 #include <D2RLPlugin/api.h>
 #include <windows.h>
 
@@ -60,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.32";
+constexpr const char* PluginVersion = "0.0.33";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -793,6 +794,62 @@ void Trace(const char* format, ...) noexcept {
 }
 
 // Every monster, once, at the end of its creation (where the game checks for its terror zone mod).
+// Zone statistics, written when the zone portal closes: monster type flags (MonsterData +0x1A: 0x2 superunique,
+// 0x4 champion, 0x8 unique, 0x10 minion) and the rooms the monsters spawned in. Room1 +0x18 = Room2, Room2 +0x90 = level.
+struct ZoneStats {
+	int                                  level = 0;
+	std::map<std::uint16_t, int>         types;
+	std::vector<std::uint8_t*>           rooms; // Room2s
+	std::uint8_t*                        drlgLevel = nullptr;
+};
+SRWLOCK   StatsLock = SRWLOCK_INIT;
+ZoneStats Stats;
+
+std::string Hex(const std::uint8_t* p, std::size_t n) {
+	std::string out;
+	char        b[12];
+	for (std::size_t i = 0; i < n; i += 4) {
+		std::snprintf(b, sizeof(b), "%s%08X", i % 32 ? " " : (i ? " | " : ""), Field<std::uint32_t>(p, i));
+		out += b;
+	}
+	return out;
+}
+
+void NoteZoneMonster(int level, std::uint16_t type, void* room) noexcept {
+	AcquireSRWLockExclusive(&StatsLock);
+	try {
+		if (Stats.level != level) Stats = {}, Stats.level = level;
+		++Stats.types[type];
+		auto* room2 = room ? Field<std::uint8_t*>(room, 0x18) : nullptr;
+		if (room2 && std::find(Stats.rooms.begin(), Stats.rooms.end(), room2) == Stats.rooms.end()) {
+			Stats.rooms.push_back(room2);
+			if (!Stats.drlgLevel) Stats.drlgLevel = Field<std::uint8_t*>(room2, 0x90);
+			if (Stats.rooms.size() <= 4) Log(false, "zone level %d room2 %p: %s", level, room2, Hex(room2, 0xC0).c_str());
+			if (Stats.rooms.size() == 1 && Stats.drlgLevel) Log(false, "zone level %d drlg level %p: %s", level, Stats.drlgLevel, Hex(Stats.drlgLevel, 0x240).c_str());
+		}
+	} catch (...) {}
+	ReleaseSRWLockExclusive(&StatsLock);
+}
+
+void WriteZoneStats(GameMods& g) noexcept {
+	AcquireSRWLockExclusive(&StatsLock);
+	try {
+		if (Stats.level) {
+			std::string types;
+			for (const auto& [t, n] : Stats.types) {
+				char item[32];
+				std::snprintf(item, sizeof(item), "%s0x%X x%d", types.empty() ? "" : ", ", t, n);
+				types += item;
+			}
+			const int total = g.zoneCount[0] + g.zoneCount[1] + g.zoneCount[2] + g.zoneCount[3];
+			Log(false, "zone level %d final: %d monsters: %d trash, %d champions, %d uniques, %d minions; type flags [%s]; %zu rooms with monsters", Stats.level, total,
+			    g.zoneCount[0].load(), g.zoneCount[1].load(), g.zoneCount[2].load(), g.zoneCount[3].load(), types.c_str(), Stats.rooms.size());
+		}
+		Stats = {};
+	} catch (...) {}
+	ReleaseSRWLockExclusive(&StatsLock);
+}
+
 void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	if (!game || !unit || !Config.enabled.load(std::memory_order_relaxed)) return;
 	static int entries = 0; // first calls logged, to see where it stops
@@ -885,6 +942,7 @@ void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 		if (total % 25 == 0)
 			Log(false, "zone level %d: %d monsters so far: %d trash, %d champions, %d uniques, %d minions", level, total, g->zoneCount[0].load(), g->zoneCount[1].load(),
 			    g->zoneCount[2].load(), g->zoneCount[3].load());
+		NoteZoneMonster(level, type, room);
 	}
 	AcquireSRWLockExclusive(&g->modLock);
 	try {
@@ -1929,11 +1987,17 @@ void DumpBarbarians() noexcept {
 	using ClientPlayer = void* (*)(int index) noexcept;
 	using ModeFn       = std::uint8_t (*)(void* unit) noexcept;
 	using Ms2Fn        = std::uint8_t* (*)(std::uint8_t mode, int monster) noexcept;
-	if (BarbDumps >= 40) return;
+	using CoordsFn = void (*)(void* unit, void* coord) noexcept;
+	static std::uint32_t seen[128] {};
+	static int           seenCount = 0;
+	if (BarbDumps >= 200) return;
 	++BarbDumps;
 	const int index  = At<LocalIndexFn>(0x8B2D0)();
 	void*     player = At<ClientPlayer>(0x9A480)(index);
 	int       found  = 0;
+	std::int32_t at[2] {};
+	if (player) At<CoordsFn>(0x34A040)(player, at);
+	Log(false, "barb dump %d: player at %d,%d", BarbDumps, at[0], at[1]);
 	try {
 		auto* table = reinterpret_cast<std::uint8_t*>(Base + 0x2A23910 + 0x400); // client units, type 1: 128 lists (next +0x158)
 		for (int bucket = 0; bucket < 128; ++bucket) {
@@ -1942,10 +2006,15 @@ void DumpBarbarians() noexcept {
 				if (Field<std::uint32_t>(u, 0) != 1) continue;
 				const std::uint32_t cls = Field<std::uint32_t>(u, 4);
 				++found;
+				const std::uint32_t id = Field<std::uint32_t>(u, 8);
+				if (std::find(seen, seen + seenCount, id) != seen + seenCount || seenCount >= 128) continue;
+				seen[seenCount++] = id;
+				std::int32_t xy[2] {};
+				At<CoordsFn>(0x34A040)(u, xy);
 				const std::uint8_t  mode = At<ModeFn>(0x34A0E0)(u);
 				const std::uint8_t* ms2  = At<Ms2Fn>(0x975B0)(mode, static_cast<int>(cls));
-				Log(false, "barb dump %d: unit %u class %u anim %u flags 0x%08X ex 0x%08X | bank %u monstats2 flags 0x%X | 34F8D0 %d targetable %d ex80 %d canInteract %d selectable %d",
-				    BarbDumps, Field<std::uint32_t>(u, 8), cls, Field<std::uint32_t>(u, 0xC), Field<std::uint32_t>(u, 0x124), Field<std::uint32_t>(u, 0x128), mode,
+				Log(false, "barb dump %d: unit %u class %u at %d,%d anim %u flags 0x%08X ex 0x%08X | bank %u monstats2 flags 0x%X | 34F8D0 %d targetable %d ex80 %d canInteract %d selectable %d",
+				    BarbDumps, id, cls, xy[0], xy[1], Field<std::uint32_t>(u, 0xC), Field<std::uint32_t>(u, 0x124), Field<std::uint32_t>(u, 0x128), mode,
 				    ms2 ? Field<std::uint32_t>(ms2, 4) : 0xFFFFFFFFu, At<UnitFlagFn>(0x34F8D0)(u), At<UnitFlagFn>(0x3500E0)(u), At<UnitFlagExFn>(0x34FB00)(u, 0x80),
 				    player ? At<CanFn>(0x971E0)(player, u, -1) : -1, At<SelectFn>(0x9B840)(u, 0, 0, -1, -1));
 			}
@@ -1953,7 +2022,7 @@ void DumpBarbarians() noexcept {
 	} catch (...) {
 		Log(true, "barb dump: failed while reading the client units");
 	}
-	Log(false, "barb dump %d: %d monsters found (player %p)", BarbDumps, found, player);
+	(void)found;
 }
 
 bool OnGameMessage(UINT message, WPARAM, LPARAM) {
@@ -2446,6 +2515,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	// New mods for the game when a zone opens.
 	AcquireSRWLockExclusive(&Lock);
 	g->seed ^= Mix(state);
+	WriteZoneStats(*g);
 	for (auto& c : g->zoneCount) c = 0;
 	Roll(*g);
 	const std::string mods = Describe(*g);
@@ -2494,6 +2564,7 @@ void CloseZonePortal(std::uint8_t* game) noexcept {
 		if (void* room = At<UnitRoomFn>(0x34B440)(portal)) At<RoomUnitGoneFn>(0x2EF4D0)(room, 2, g->portalId);
 		At<RemoveUnitFn>(0x48FAA0)(game, portal);
 	}
+	WriteZoneStats(*g);
 	g->portal = nullptr, g->portalId = 0, ZonePortalOpen = false;
 	SetPortalResult(portal ? "TZ Plus zones: the zone portal is closed" : "TZ Plus zones: the zone portal was already gone");
 }
