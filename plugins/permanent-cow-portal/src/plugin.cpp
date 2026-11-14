@@ -1,5 +1,5 @@
 // Permanent Cow Portal: a red portal to the Moo Moo Farm stands in the Rogue
-// Encampment in every game, next to the waypoint, once you have beaten Baal
+// Encampment in every game, at a spot you choose near the stash, once you have beaten Baal
 // on that difficulty (Diablo in a Classic game). Offline and in games you
 // host, like the online "Legacy of Terror" event.
 //
@@ -18,17 +18,22 @@
 //     the Moo Moo Farm and its return portal, and sets the A1Q4 flag 11
 //     (QuestGlobalSet 0x5181C0).
 // The plugin does the same, with the same calls, without the cube:
-//   - The Rogue Encampment waypoint is found when the game creates it: the
-//     waypoint InitFn (entry 17 of the object InitFn table 0x239B980, read
-//     from the dispatcher at 0x510CBF) is wrapped. The wrapper keeps the
-//     waypoint's unit id for that game when it stands in level 1.
 //   - The game update (UpdateGameFrame 0x406550 (game), once per server frame)
 //     is hooked. Once a second it checks that game: no cow portal yet (A1Q4
-//     flag 11 clear), the town waypoint known (FindUnit 0x48FE80 (game, 2,
-//     id), still a waypoint in level 1), and a player in the game (client list
-//     game +0x138, next +0x628, state +4 == 4, ClientPlayer 0x484C90 (client,
-//     0)) who has beaten Baal on this difficulty. Then it opens the portal next
-//     to the waypoint and sets the flag, as the cube would.
+//     flag 11 clear), a player in the game (client list game +0x138, next
+//     +0x628, state +4 == 4, ClientPlayer 0x484C90 (client, 0)) who has beaten
+//     Baal on this difficulty, and the Rogue Encampment stash (object 267 in
+//     level 1) built. Then it opens the portal at the stash + offset_x/y and
+//     sets the flag, as the cube would.
+//   - Units are found in the game's unit hash: game + (0x446 + type*0x80) * 8,
+//     128 buckets per type (UnitBucket 0x4925B0), next unit at +0x158 (FindUnit
+//     0x48FE80). The portal's room is the one holding the spot (RoomAtCoords
+//     0x38DFB0 (room, x, y), the stash's room or a neighbour).
+//   - "permanent-cow-portal here" (console, or the I Hate TOMLs button) saves
+//     the offset from the stash to the item on the ground nearest you (within
+//     10 tiles), or to where you stand. The stash is the anchor because the
+//     Rogue Encampment has 4 layouts (TownN1/E1/S1/W1.ds1) and the camp itself
+//     is the same in all of them.
 // Everything runs on the game server thread, between two frames, like a cube
 // transmute. The portal is a normal game object, so it stays for the whole
 // game, players who join see it, and the cube's cow portal recipe then says
@@ -40,8 +45,10 @@
 #include "code_bytes.h"
 #include "i_hate_tomls_client.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -53,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "permanent-cow-portal";
-constexpr const char* PluginVersion = "0.0.1";
+constexpr const char* PluginVersion = "0.0.2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -69,8 +76,8 @@ const D2RL::PluginInfo Info {
 struct Settings {
 	std::atomic<bool> enabled { true };
 	std::atomic<bool> requireBaal { true };
-	std::atomic<int>  offsetX { 4 };
-	std::atomic<int>  offsetY { 4 };
+	std::atomic<int>  offsetX { -8 };
+	std::atomic<int>  offsetY { 2 };
 } Config;
 
 constexpr int OffsetLimit = 30;
@@ -83,8 +90,6 @@ constexpr std::uint64_t ClientLoopRva       = 0x4066F9;
 constexpr std::uint64_t FindUnitRva         = 0x48FE80;
 constexpr std::uint64_t CreatePortalRva     = 0x432CE0;
 constexpr std::uint64_t FrameRva            = 0x406550;
-constexpr std::uint64_t InitDispatchRva     = 0x510CBF;
-constexpr std::uint64_t WaypointInitRva     = 0x512A50;
 constexpr std::uint64_t ClientPlayerRva     = 0x484C90;
 constexpr std::uint64_t QuestGlobalGetRva   = 0x514FD0;
 constexpr std::uint64_t QuestGlobalSetRva   = 0x5181C0;
@@ -94,6 +99,9 @@ constexpr std::uint64_t UnitRoomRva         = 0x34B440;
 constexpr std::uint64_t LevelOfRoomRva      = 0x2EFC10;
 constexpr std::uint64_t GetCoordsRva        = 0x34A040;
 constexpr std::uint64_t FindFreeSpotRva     = 0x517F90;
+constexpr std::uint64_t UnitBucketRva       = 0x4925B0;
+constexpr std::uint64_t BucketWalkRva       = 0x48FECF;
+constexpr std::uint64_t RoomAtRva           = 0x38DFB0;
 
 constexpr std::uintptr_t GameDifficulty   = 0x104;   // u8
 constexpr std::uintptr_t GameExpansion    = 0x106;   // u8, 1 = Classic
@@ -105,12 +113,14 @@ constexpr std::uintptr_t PlayerQuests     = 0x40;    // QuestRecord*[3]
 constexpr std::uintptr_t UnitType         = 0x00;
 constexpr std::uintptr_t UnitClass        = 0x04;
 constexpr std::uintptr_t UnitId           = 0x08;
-constexpr std::uintptr_t InitGame         = 0x00;
-constexpr std::uintptr_t InitObject       = 0x08;
-constexpr std::uintptr_t InitRoom         = 0x10;
 constexpr std::uint32_t  ClientInGame     = 4;
 constexpr std::uint32_t  TypeObject       = 2;
-constexpr int            WaypointInitFn   = 17;
+constexpr std::uint32_t  TypeItem         = 4;
+constexpr std::uint32_t  StashClass       = 267; // objects.txt Bank
+constexpr std::uintptr_t UnitHashBase     = 0x446;
+constexpr std::uint32_t  UnitHashBuckets  = 0x80;
+constexpr std::uintptr_t UnitHashNext     = 0x158;
+constexpr int            PlaceItemRange   = 10;
 constexpr int            RogueEncampment  = 1;
 constexpr int            MooMooFarm       = 39;
 constexpr int            PortalPermanent  = 60;
@@ -119,7 +129,7 @@ constexpr int            FlagCowPortal    = 11;
 constexpr int            QuestDiablo      = 26;
 constexpr int            QuestBaal        = 40;
 constexpr std::uint32_t  CheckEveryFrames = 25; // once a second
-constexpr int            MaxAttempts      = 5;
+constexpr int            MaxAttempts      = 30;
 
 struct Coord {
 	std::int32_t x;
@@ -127,7 +137,6 @@ struct Coord {
 };
 
 using FrameFn          = std::uint64_t (*)(void* game) noexcept;
-using InitFn           = void (*)(void* params) noexcept;
 using FindUnitFn       = void* (*)(void* game, std::uint32_t type, std::uint32_t id) noexcept;
 using ClientPlayerFn   = void* (*)(void* client, int flag) noexcept;
 using QuestGlobalGetFn = int (*)(void* game, int quest, int flag) noexcept;
@@ -138,13 +147,12 @@ using UnitRoomFn       = void* (*)(void* unit) noexcept;
 using LevelOfRoomFn    = int (*)(void* room) noexcept;
 using GetCoordsFn      = void (*)(void* unit, Coord* out) noexcept;
 using FindFreeSpotFn   = std::uint64_t (*)(void* game, void* room, Coord* coord, int size, int mask, void** outRoom, int a7, int a8) noexcept;
+using RoomAtFn         = void* (*)(void* room, int x, int y) noexcept;
 using CreatePortalFn   = int (*)(void* game, void* player, void* room, int x, int y, int destLevel, void** outPortal, int objectClass, int a9, int a10) noexcept;
 
 const D2RL::PluginContext* Context {};
 std::uintptr_t             Base {};
 FrameFn                    OriginalFrame {};
-std::atomic<InitFn>        OriginalWaypointInit {};
-InitFn*                    InitSlot {};
 FindUnitFn                 FindUnit {};
 ClientPlayerFn             ClientPlayer {};
 QuestGlobalGetFn           QuestGlobalGet {};
@@ -156,6 +164,7 @@ LevelOfRoomFn              LevelOfRoom {};
 GetCoordsFn                GetCoords {};
 FindFreeSpotFn             FindFreeSpot {};
 CreatePortalFn             CreatePortal {};
+RoomAtFn                   RoomAt {};
 std::atomic<bool>          Active { false };
 std::atomic<unsigned>      Opened { 0 };
 std::string                Problem;
@@ -188,63 +197,64 @@ T Field(const void* base, std::uintptr_t offset) noexcept {
 	return value;
 }
 
-// ---- the Rogue Encampment waypoint, per game ----
+// ---- units ----
 
-struct GameWaypoint {
+// Calls f(unit) for every unit of a type in the game's unit hash, until f returns true.
+template <typename F>
+void ForEachUnit(void* game, std::uint32_t type, F f) noexcept {
+	auto* buckets = static_cast<std::uint8_t*>(game) + (UnitHashBase + type * UnitHashBuckets) * sizeof(void*);
+	for (std::uint32_t bucket = 0; bucket < UnitHashBuckets; ++bucket) {
+		auto* unit = Field<std::uint8_t*>(buckets, bucket * sizeof(void*));
+		for (int guard = 0; unit && guard < 4096; ++guard, unit = Field<std::uint8_t*>(unit, UnitHashNext))
+			if (f(unit)) return;
+	}
+}
+
+bool InTown(void* unit, void** roomOut = nullptr) noexcept {
+	void* room = UnitRoom(unit);
+	if (roomOut) *roomOut = room;
+	return room && LevelOfRoom(room) == RogueEncampment;
+}
+
+// The Rogue Encampment stash: its spot and room.
+bool FindStash(void* game, Coord& at, void*& room) noexcept {
+	bool found = false;
+	ForEachUnit(game, TypeObject, [&](std::uint8_t* unit) {
+		if (Field<std::uint32_t>(unit, UnitClass) != StashClass || !InTown(unit, &room)) return false;
+		GetCoords(unit, &at);
+		return found = true;
+	});
+	return found;
+}
+
+// ---- per game ----
+
+struct GameState {
 	void*         game {};
-	std::uint32_t id {};
-	std::uint32_t classId {};
+	std::uint32_t lastFrame {};
 	int           attempts {};
 	bool          gaveUp {};
 };
 
-SRWLOCK                     WaypointLock = SRWLOCK_INIT;
-std::array<GameWaypoint, 8> Waypoints {};
-std::size_t                 NextWaypoint {};
+std::array<GameState, 8> Games {};
+std::size_t              NextGame {};
 
-void RememberWaypoint(void* game, std::uint32_t id, std::uint32_t classId) noexcept {
-	AcquireSRWLockExclusive(&WaypointLock);
-	GameWaypoint* slot = nullptr;
-	for (auto& entry : Waypoints)
-		if (entry.game == game) slot = &entry;
-	if (!slot) {
-		slot         = &Waypoints[NextWaypoint];
-		NextWaypoint = (NextWaypoint + 1) % Waypoints.size();
-	}
-	*slot = GameWaypoint { game, id, classId, 0, false };
-	ReleaseSRWLockExclusive(&WaypointLock);
-}
-
-bool WaypointOf(void* game, GameWaypoint& out) noexcept {
-	AcquireSRWLockShared(&WaypointLock);
-	bool found = false;
-	for (const auto& entry : Waypoints)
-		if (entry.game == game) {
-			out   = entry;
-			found = true;
+// Only used on the game server thread. A new game can reuse an old game's
+// address; its frame counter starting again tells them apart.
+GameState& StateOf(void* game) noexcept {
+	const std::uint32_t frame = Field<std::uint32_t>(game, GameFrame);
+	GameState*          state = nullptr;
+	for (auto& entry : Games)
+		if (entry.game == game) state = &entry;
+	if (!state || frame < state->lastFrame) {
+		if (!state) {
+			state    = &Games[NextGame];
+			NextGame = (NextGame + 1) % Games.size();
 		}
-	ReleaseSRWLockShared(&WaypointLock);
-	return found;
-}
-
-// Counts a failed try; true when it is time to give up on this game.
-bool Failed(void* game) noexcept {
-	AcquireSRWLockExclusive(&WaypointLock);
-	bool giveUp = false;
-	for (auto& entry : Waypoints)
-		if (entry.game == game && ++entry.attempts >= MaxAttempts) giveUp = entry.gaveUp = true;
-	ReleaseSRWLockExclusive(&WaypointLock);
-	return giveUp;
-}
-
-void HookWaypointInit(void* params) noexcept {
-	if (const auto original = OriginalWaypointInit.load(std::memory_order_acquire)) original(params);
-	if (!params || !Active.load(std::memory_order_acquire)) return;
-	void* game   = Field<void*>(params, InitGame);
-	void* object = Field<void*>(params, InitObject);
-	void* room   = Field<void*>(params, InitRoom);
-	if (!game || !object || !room || LevelOfRoom(room) != RogueEncampment) return;
-	RememberWaypoint(game, Field<std::uint32_t>(object, UnitId), Field<std::uint32_t>(object, UnitClass));
+		*state = GameState { game };
+	}
+	state->lastFrame = frame;
+	return *state;
 }
 
 // ---- opening the portal ----
@@ -260,50 +270,122 @@ bool HasBeaten(void* game, void* player) noexcept {
 	return QuestFlagGet(record, quest, 0) != 0;
 }
 
-void* QualifyingPlayer(void* game) noexcept {
-	const bool needBaal = Config.requireBaal.load(std::memory_order_relaxed);
-	auto*      client   = Field<std::uint8_t*>(game, GameClients);
+// The first player in the game that passes the test.
+template <typename F>
+void* FindPlayer(void* game, F test) noexcept {
+	auto* client = Field<std::uint8_t*>(game, GameClients);
 	for (int guard = 0; client && guard < 64; ++guard, client = Field<std::uint8_t*>(client, ClientNext)) {
 		if (Field<std::uint32_t>(client, ClientState) != ClientInGame) continue;
 		void* player = ClientPlayer(client, 0);
-		if (player && (!needBaal || HasBeaten(game, player))) return player;
+		if (player && test(player)) return player;
 	}
 	return nullptr;
 }
 
 void TryOpen(void* game) noexcept {
-	GameWaypoint waypoint {};
-	if (!WaypointOf(game, waypoint) || waypoint.gaveUp) return;
+	GameState& state = StateOf(game);
+	if (state.gaveUp) return;
 	if (QuestGlobalGet(game, QuestCain, FlagCowPortal)) return; // already open in this game
-	void* player = QualifyingPlayer(game);
+	const bool needBaal = Config.requireBaal.load(std::memory_order_relaxed);
+	void*      player   = FindPlayer(game, [&](void* unit) { return !needBaal || HasBeaten(game, unit); });
 	if (!player) return;
-	// The id was kept for this game pointer; a later game can reuse the pointer, so check the unit is still that waypoint.
-	void* object = FindUnit(game, TypeObject, waypoint.id);
-	if (!object || Field<std::uint32_t>(object, UnitType) != TypeObject || Field<std::uint32_t>(object, UnitClass) != waypoint.classId) return;
-	void* room = UnitRoom(object);
-	if (!room || LevelOfRoom(room) != RogueEncampment) return;
+	Coord stash {};
+	void* stashRoom = nullptr;
+	if (!FindStash(game, stash, stashRoom)) return; // not built yet: the town fills in around the players
 
-	Coord spot {};
-	GetCoords(object, &spot);
-	const Coord waypointAt = spot;
-	spot.x += Config.offsetX.load(std::memory_order_relaxed);
-	spot.y += Config.offsetY.load(std::memory_order_relaxed);
+	Coord wanted { stash.x + Config.offsetX.load(std::memory_order_relaxed), stash.y + Config.offsetY.load(std::memory_order_relaxed) };
+	Coord spot   = wanted;
+	void* room   = RoomAt(stashRoom, spot.x, spot.y);
+	if (!room) room = stashRoom;
 	void* freeRoom = nullptr;
 	FindFreeSpot(game, room, &spot, 3, 0x400, &freeRoom, 4, 100);
-	if (freeRoom && CreatePortal(game, player, freeRoom, spot.x, spot.y, MooMooFarm, nullptr, PortalPermanent, 0, 0)) {
+	const bool created = freeRoom && CreatePortal(game, player, freeRoom, spot.x, spot.y, MooMooFarm, nullptr, PortalPermanent, 0, 0);
+	if (created) {
 		QuestGlobalSet(game, QuestCain, FlagCowPortal);
 		Opened.fetch_add(1, std::memory_order_relaxed);
-		Log(false, "cow portal opened in the Rogue Encampment at %d,%d (waypoint %d,%d), game frame %u", spot.x, spot.y, waypointAt.x, waypointAt.y,
-		    Field<std::uint32_t>(game, GameFrame));
+		Log(false, "cow portal opened in the Rogue Encampment at %d,%d (asked %d,%d = stash %d,%d %+d,%+d), game frame %u", spot.x, spot.y, wanted.x, wanted.y, stash.x,
+		    stash.y, wanted.x - stash.x, wanted.y - stash.y, Field<std::uint32_t>(game, GameFrame));
 		return;
 	}
-	if (Failed(game)) Log(true, "could not open the cow portal near the waypoint (%d,%d) after %d tries, giving up for this game", waypointAt.x, waypointAt.y, MaxAttempts);
+	++state.attempts;
+	if (state.attempts == 1 || state.attempts == MaxAttempts)
+		Log(true, "try %d: could not open the cow portal at %d,%d (stash %d,%d): %s", state.attempts, wanted.x, wanted.y, stash.x, stash.y,
+		    freeRoom ? "the game refused the portal" : "no free spot found there");
+	if (state.attempts >= MaxAttempts) {
+		state.gaveUp = true;
+		Log(true, "giving up on the cow portal for this game");
+	}
+}
+
+// ---- "here": the portal's spot from where you stand ----
+
+std::atomic<bool> PlaceRequested { false };
+std::atomic<bool> PlaceDone { false };
+SRWLOCK           PlaceLock = SRWLOCK_INIT;
+std::string       PlaceResult;
+
+void SaveConfig();
+
+void SetPlaceResult(const char* format, ...) noexcept {
+	char    line[300] {};
+	va_list args;
+	va_start(args, format);
+	std::vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	Log(false, "%s", line);
+	try {
+		AcquireSRWLockExclusive(&PlaceLock);
+		PlaceResult = line;
+		ReleaseSRWLockExclusive(&PlaceLock);
+	} catch (...) {
+		ReleaseSRWLockExclusive(&PlaceLock);
+	}
+	PlaceDone.store(true, std::memory_order_release);
+}
+
+void Place(void* game) noexcept {
+	void* player = FindPlayer(game, [](void* unit) { return InTown(unit); });
+	if (!player) return SetPlaceResult("permanent-cow-portal: stand in the Rogue Encampment to choose the portal's spot");
+	Coord stash {};
+	void* stashRoom = nullptr;
+	if (!FindStash(game, stash, stashRoom)) return SetPlaceResult("permanent-cow-portal: the stash was not found, walk closer to it and try again");
+	Coord standing {};
+	GetCoords(player, &standing);
+	// An item on the ground near you wins over where you stand.
+	Coord item {};
+	int   best = PlaceItemRange + 1;
+	ForEachUnit(game, TypeItem, [&](std::uint8_t* unit) {
+		if (!InTown(unit)) return false;
+		Coord at {};
+		GetCoords(unit, &at);
+		const int distance = std::max(std::abs(at.x - standing.x), std::abs(at.y - standing.y));
+		if (distance < best) {
+			best = distance;
+			item = at;
+		}
+		return false;
+	});
+	const bool  onItem = best <= PlaceItemRange;
+	const Coord spot   = onItem ? item : standing;
+	const int   dx = spot.x - stash.x, dy = spot.y - stash.y;
+	if (std::abs(dx) > OffsetLimit || std::abs(dy) > OffsetLimit)
+		return SetPlaceResult("permanent-cow-portal: that spot is too far from the stash (%+d,%+d, %d tiles at most)", dx, dy, OffsetLimit);
+	Config.offsetX.store(dx);
+	Config.offsetY.store(dy);
+	SaveConfig();
+	SetPlaceResult("permanent-cow-portal: the portal will open %s (stash %+d,%+d) from the next game", onItem ? "where the item on the ground is" : "where you stand", dx, dy);
+}
+
+void RequestPlace() noexcept {
+	PlaceDone.store(false, std::memory_order_release);
+	PlaceRequested.store(true, std::memory_order_release);
 }
 
 std::uint64_t HookFrame(void* game) noexcept {
-	if (game && Active.load(std::memory_order_acquire) && Config.enabled.load(std::memory_order_relaxed) &&
-	    Field<std::uint32_t>(game, GameFrame) % CheckEveryFrames == 0)
-		TryOpen(game);
+	if (game && Active.load(std::memory_order_acquire)) {
+		if (PlaceRequested.exchange(false, std::memory_order_acq_rel)) Place(game);
+		if (Config.enabled.load(std::memory_order_relaxed) && Field<std::uint32_t>(game, GameFrame) % CheckEveryFrames == 0) TryOpen(game);
+	}
 	return OriginalFrame(game);
 }
 
@@ -314,13 +396,9 @@ bool Locate() noexcept {
 	if (!CodeMatches(ClientLoopRva, ClientLoopBytes)) return Problem = "game client loop differs", false;
 	if (!CodeMatches(FindUnitRva, FindUnitBytes)) return Problem = "unit lookup code differs", false;
 	if (!CodeMatches(CreatePortalRva, CreatePortalBytes)) return Problem = "portal code differs", false;
-	if (!CodeMatches(InitDispatchRva, InitDispatchBytes)) return Problem = "object init code differs", false;
-	if (!CodeMatches(WaypointInitRva, WaypointInitBytes)) return Problem = "waypoint init code differs", false;
-	std::int32_t displacement {};
-	std::memcpy(&displacement, InitDispatchBytes.data() + 3, sizeof(displacement));
-	InitSlot = reinterpret_cast<InitFn*>(Base + InitDispatchRva + 7 + displacement) + WaypointInitFn;
-	InitFn current {};
-	if (!Read(reinterpret_cast<std::uintptr_t>(InitSlot), &current, sizeof(current)) || !current) return Problem = "waypoint init entry is empty", false;
+	if (!CodeMatches(UnitBucketRva, UnitBucketBytes)) return Problem = "unit hash code differs", false;
+	if (!CodeMatches(BucketWalkRva, BucketWalkBytes)) return Problem = "unit hash walk differs", false;
+	if (!CodeMatches(RoomAtRva, RoomAtBytes)) return Problem = "room lookup code differs", false;
 	FindUnit       = reinterpret_cast<FindUnitFn>(Base + FindUnitRva);
 	ClientPlayer   = reinterpret_cast<ClientPlayerFn>(Base + ClientPlayerRva);
 	QuestGlobalGet = reinterpret_cast<QuestGlobalGetFn>(Base + QuestGlobalGetRva);
@@ -332,27 +410,15 @@ bool Locate() noexcept {
 	GetCoords      = reinterpret_cast<GetCoordsFn>(Base + GetCoordsRva);
 	FindFreeSpot   = reinterpret_cast<FindFreeSpotFn>(Base + FindFreeSpotRva);
 	CreatePortal   = reinterpret_cast<CreatePortalFn>(Base + CreatePortalRva);
-	return true;
-}
-
-bool WriteSlot(InitFn value) noexcept {
-	DWORD old = 0;
-	if (!VirtualProtect(InitSlot, sizeof(InitFn), PAGE_READWRITE, &old)) return false;
-	InterlockedExchangePointer(reinterpret_cast<void* volatile*>(InitSlot), reinterpret_cast<void*>(value));
-	DWORD ignored = 0;
-	VirtualProtect(InitSlot, sizeof(InitFn), old, &ignored);
+	RoomAt         = reinterpret_cast<RoomAtFn>(Base + RoomAtRva);
 	return true;
 }
 
 bool InstallHooks() noexcept {
-	OriginalWaypointInit.store(*InitSlot, std::memory_order_release);
-	if (!WriteSlot(&HookWaypointInit)) return Problem = "could not wrap the waypoint init", false;
 	if (!Context->InstallInlineHook(FrameRva, FrameBytes.data(), static_cast<std::uint32_t>(FrameBytes.size()), reinterpret_cast<void*>(&HookFrame),
 	                                reinterpret_cast<void**>(&OriginalFrame)) ||
-	    !OriginalFrame) {
-		(void)WriteSlot(OriginalWaypointInit.load());
+	    !OriginalFrame)
 		return Problem = "could not hook the game update (another plugin may hook it)", false;
-	}
 	return true;
 }
 
@@ -391,10 +457,10 @@ bool Apply(std::string_view key, const std::string& value) noexcept {
 		(key == "enabled" ? Config.enabled : Config.requireBaal).store(value == "true");
 		return true;
 	}
-	if (key == "offset_x" || key == "offset_y") {
+	if (key == "spot_x" || key == "spot_y") {
 		int number = 0;
 		if (!ParseInt(value, number)) return false;
-		(key == "offset_x" ? Config.offsetX : Config.offsetY).store(number);
+		(key == "spot_x" ? Config.offsetX : Config.offsetY).store(number);
 		return true;
 	}
 	return false;
@@ -403,8 +469,8 @@ bool Apply(std::string_view key, const std::string& value) noexcept {
 bool Get(std::string_view key, char* out, std::uint32_t size) noexcept {
 	if (key == "enabled") std::snprintf(out, size, "%s", Bool(Config.enabled));
 	else if (key == "require_baal") std::snprintf(out, size, "%s", Bool(Config.requireBaal));
-	else if (key == "offset_x") std::snprintf(out, size, "%d", Config.offsetX.load());
-	else if (key == "offset_y") std::snprintf(out, size, "%d", Config.offsetY.load());
+	else if (key == "spot_x") std::snprintf(out, size, "%d", Config.offsetX.load());
+	else if (key == "spot_y") std::snprintf(out, size, "%d", Config.offsetY.load());
 	else return false;
 	return true;
 }
@@ -412,8 +478,8 @@ bool Get(std::string_view key, char* out, std::uint32_t size) noexcept {
 std::string Render() {
 	return std::string(R"(# Permanent Cow Portal
 #
-# A red portal to the Moo Moo Farm stands in the Rogue Encampment, next to
-# the waypoint, in every game you play once you have beaten Baal on that
+# A red portal to the Moo Moo Farm stands in the Rogue Encampment, near the
+# stash, in every game you play once you have beaten Baal on that
 # difficulty (Diablo in a Classic game). No Wirt's Leg needed, offline and in
 # games you host, like the online Legacy of Terror event. The cow level opens
 # even after the Cow King was killed.
@@ -429,10 +495,12 @@ enabled = )") + Bool(Config.enabled) + R"(
 # (Diablo in a Classic game). false: the portal is always there.
 require_baal = )" + Bool(Config.requireBaal) + R"(
 
-# Where the portal stands, in tiles from the waypoint (-30 to 30). The game
-# moves it to the nearest free spot.
-offset_x = )" + std::to_string(Config.offsetX.load()) + R"(
-offset_y = )" + std::to_string(Config.offsetY.load()) + "\n";
+# Where the portal stands, in tiles from the stash (-30 to 30). The game moves
+# it to the nearest free spot. Easiest: drop an item where you want it (or
+# stand there) and type "permanent-cow-portal here" in the console, or use the
+# "Put it here" button in I Hate TOMLs.
+spot_x = )" + std::to_string(Config.offsetX.load()) + R"(
+spot_y = )" + std::to_string(Config.offsetY.load()) + "\n";
 }
 
 void SaveConfig() {
@@ -476,23 +544,28 @@ constexpr const char* Schema = R"S(title = "Permanent Cow Portal"
 key = "enabled"
 type = "bool"
 label = "Cow portal in the Rogue Encampment"
-note = "Opens next to the waypoint. Applies to the next game."
+note = "Applies to the next game."
 [[setting]]
 key = "require_baal"
 type = "bool"
 label = "Only after Baal"
 note = "Once you have beaten Baal on that difficulty (Diablo in a Classic game)."
 [[setting]]
-key = "offset_x"
+key = "place_here"
+type = "action"
+label = "Put it here"
+note = "From the next game, the portal opens on the item on the ground nearest you (within 10 tiles), or where you stand. In the Rogue Encampment."
+[[setting]]
+key = "spot_x"
 type = "int"
-label = "Distance from the waypoint (x)"
+label = "Tiles from the stash (x)"
 min = -30
 max = 30
 step = 1
 [[setting]]
-key = "offset_y"
+key = "spot_y"
 type = "int"
-label = "Distance from the waypoint (y)"
+label = "Tiles from the stash (y)"
 min = -30
 max = 30
 step = 1
@@ -506,6 +579,11 @@ bool __cdecl MenuGet(const char* key, char* out, std::uint32_t size, void*) noex
 
 bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint32_t size, void*) noexcept {
 	if (!key || !value) return false;
+	if (std::string_view(key) == "place_here") {
+		if (!Active.load()) return std::snprintf(error, size, "%s", "the plugin is inactive"), false;
+		RequestPlace();
+		return true;
+	}
 	std::string text;
 	try {
 		text = Trim(value);
@@ -513,7 +591,7 @@ bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint3
 		return false;
 	}
 	if (!Apply(key, text)) {
-		std::snprintf(error, size, "%s", std::string_view(key).starts_with("offset") ? "a whole number from -30 to 30" : "true or false");
+		std::snprintf(error, size, "%s", std::string_view(key).starts_with("spot") ? "a whole number from -30 to 30" : "true or false");
 		return false;
 	}
 	SaveConfig();
@@ -525,8 +603,24 @@ bool __cdecl MenuSet(const char* key, const char* value, char* error, std::uint3
 auto StatusCommand(D2R::Game::Client*, const D2RL::ConsoleCommandContext* command, void*) noexcept -> D2RL::ConsoleCommandResult {
 	if (!command || !command->plugin) return D2RL::ConsoleCommandResult::Failed;
 	char line[300] {};
+	if (command->args && Trim(std::string_view(command->args, command->argsLength)) == "here") {
+		if (!Active.load()) {
+			command->plugin->WriteConsoleMessage("permanent-cow-portal: inactive");
+			return D2RL::ConsoleCommandResult::Handled;
+		}
+		RequestPlace();
+		// The game server runs on its own thread: wait a little for its next frame.
+		for (int wait = 0; wait < 30 && !PlaceDone.load(std::memory_order_acquire); ++wait) Sleep(10);
+		if (PlaceDone.load(std::memory_order_acquire)) {
+			AcquireSRWLockShared(&PlaceLock);
+			std::snprintf(line, sizeof(line), "%s", PlaceResult.c_str());
+			ReleaseSRWLockShared(&PlaceLock);
+		} else std::snprintf(line, sizeof(line), "%s", "permanent-cow-portal: asked, the result goes to the log (no game running?)");
+		command->plugin->WriteConsoleMessage(line);
+		return D2RL::ConsoleCommandResult::Handled;
+	}
 	if (Active.load())
-		std::snprintf(line, sizeof(line), "permanent-cow-portal %s: %s, %s, offset %d,%d; portals opened since launch: %u", PluginVersion, Config.enabled ? "on" : "turned off",
+		std::snprintf(line, sizeof(line), "permanent-cow-portal %s: %s, %s, stash %+d,%+d; portals opened since launch: %u", PluginVersion, Config.enabled ? "on" : "turned off",
 		              Config.requireBaal ? "after Baal" : "always", Config.offsetX.load(), Config.offsetY.load(), Opened.load());
 	else std::snprintf(line, sizeof(line), "permanent-cow-portal %s: inactive (%s)", PluginVersion, Problem.empty() ? "unknown" : Problem.c_str());
 	command->plugin->WriteConsoleMessage(line);
@@ -544,7 +638,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
 	Base    = context->exeBase;
-	(void)context->RegisterConsoleCommand("permanent-cow-portal", StatusCommand, "Show Permanent Cow Portal status.");
+	(void)context->RegisterConsoleCommand("permanent-cow-portal", StatusCommand, "Permanent Cow Portal status; \"here\" puts the portal on the item at your feet (or where you stand).");
 	LoadConfig();
 	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
 	// Hooked even when turned off: it can be turned on while playing.
@@ -553,7 +647,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		return true;
 	}
 	Active.store(true, std::memory_order_release);
-	Log(false, "Permanent Cow Portal %s: %s (%s, offset %d,%d), game update hooked at D2R+0x%llX, waypoint init wrapped", PluginVersion,
+	Log(false, "Permanent Cow Portal %s: %s (%s, stash %+d,%+d), game update hooked at D2R+0x%llX,", PluginVersion,
 	    Config.enabled ? "active" : "loaded but turned off", Config.requireBaal ? "after Baal" : "always", Config.offsetX.load(), Config.offsetY.load(),
 	    static_cast<unsigned long long>(FrameRva));
 	return true;
@@ -561,6 +655,5 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
 	Active.store(false, std::memory_order_release);
-	if (InitSlot && OriginalWaypointInit.load() && *InitSlot == &HookWaypointInit) (void)WriteSlot(OriginalWaypointInit.load());
 	Menu.Stop();
 }
