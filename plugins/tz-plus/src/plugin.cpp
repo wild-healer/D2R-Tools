@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.25";
+constexpr const char* PluginVersion = "0.0.26";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -506,6 +506,14 @@ constexpr ActLevels Acts[5] { { Act1, 38 }, { Act2, 34 }, { Act3, 27 }, { Act4, 
 // TZ Plus zones (see "TZ Plus zones" below): hidden act 5 levels added after the game's own, always terrorized.
 std::atomic<int> ZoneBase { 0 }; // the first one's level id (the game's level count), 0 = none
 constexpr int    ZoneSlots = 10;
+// Monsters made too close to a zone's entry portal, moved away on the next game frame (HookFrameCall).
+struct SafeMove {
+	std::uint8_t* game;
+	void*         unit;
+	std::uint32_t id;
+};
+SRWLOCK               SafeLock = SRWLOCK_INIT;
+std::vector<SafeMove> SafeQueue;
 
 struct BuiltZone {
 	const void* real;
@@ -811,6 +819,11 @@ void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 		return;
 	}
 	const bool terrorized = At<LevelTzFn>(0x489B70)(game, level);
+	if (const int zb = ZoneBase.load(); zb > 0 && level >= zb && level < zb + ZoneSlots && g->safeLevel == level) {
+		AcquireSRWLockExclusive(&SafeLock);
+		if (SafeQueue.size() < 512) SafeQueue.push_back({ game, unit, Field<std::uint32_t>(unit, 8) });
+		ReleaseSRWLockExclusive(&SafeLock);
+	}
 	// Hell: game-wide. Nightmare: only one act is terrorized, so the rewards follow the level the players are in
 	// (monsters, town people included, are created as a player reaches a level).
 	const int players = GiveRewards(game, *g, g->difficulty == 2 || terrorized, g->difficulty == 2 ? -1 : level);
@@ -1965,7 +1978,7 @@ constexpr std::uintptr_t LevelsVec = 0x1460, DefsVec = 0x14A0, MazeVec = 0x18C0;
 constexpr std::size_t    LevelRow = 0x18C, DefRow = 0x9C, MazeRow = 0x1C;
 constexpr std::uintptr_t LvId = 4, LvPal = 12, LvAct = 13, LvQuest = 56, LvNumMon = 58, LvMonCount = 59, LvMon = 62, LvNMon = 112, LvUMon = 162,
                          LvWaypoint = 236, LvName = 253, LvWarpName = 293, LvEntryName = 333, LvDen = 36;
-constexpr int            ZoneDensity = 2200; // monster density of every zone (Stony Tomb's; Pit 600, Crypt 1056)
+constexpr int            ZoneDensity = 3000; // monster density of every zone (vanilla dungeons: Pit 600, Crypt 1056, Stony Tomb 2200)
 constexpr int            ZoneArea    = 2304; // map size of every zone: rooms x room width x room height (Pit, Crypt, Cave in Hell)
 constexpr int            SafeRadius  = 30;   // no monster spawns this close to the zone's entry portal
 constexpr std::uintptr_t DefQuest = 0, DefQuestEx = 4, DefDrlg = 48, DefType = 52, DefDepend = 44, DefVis = 72, DefWarp = 104;
@@ -2338,18 +2351,68 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	                LevelName(Banks[mode], tmpl).c_str(), tmpl, monsters.c_str(), mods.c_str());
 }
 
-using RemoveUnitFn = void (*)(void* game, void* unit) noexcept; // D2R+0x48FAA0 (the game removes a portal it could not link this way)
+using RemoveUnitFn   = void (*)(void* game, void* unit) noexcept;
+using RoomUnitGoneFn = void (*)(void* room, int type, std::uint32_t id) noexcept; // D2R+0x48FAA0 (the game removes a portal it could not link this way)
 
 void CloseZonePortal(std::uint8_t* game) noexcept {
 	GameMods* g = ModsOf(game);
 	if (!g || !g->portal) return ZonePortalOpen = false, SetPortalResult("TZ Plus zones: no zone portal is open in this game");
 	void* portal = At<FindUnitFn>(0x48FE80)(game, 2, g->portalId);
-	if (portal == g->portal) At<RemoveUnitFn>(0x48FAA0)(game, portal);
+	if (portal == g->portal) {
+		// Like the game does for a portal it drops (D2R+0x435EB0): tell the room's clients the unit is gone, then remove it.
+		if (void* room = At<UnitRoomFn>(0x34B440)(portal)) At<RoomUnitGoneFn>(0x2EF4D0)(room, 2, g->portalId);
+		At<RemoveUnitFn>(0x48FAA0)(game, portal);
+	}
 	g->portal = nullptr, g->portalId = 0, ZonePortalOpen = false;
 	SetPortalResult(portal ? "TZ Plus zones: the zone portal is closed" : "TZ Plus zones: the zone portal was already gone");
 }
 
+// Monsters of a zone that ended up within SafeRadius of its entry portal: moved out to the edge of that area.
+using MoveUnitFn = void (*)(void* game, void* unit, void* room, int x, int y, int a6, int a7) noexcept;
+using MoveDoneFn = void (*)(void* unit, int flag) noexcept;
+using RoomAtFn   = void* (*)(void* room, int x, int y) noexcept;
+int SafeLogs = 0;
+
+void MoveOutOfSafeArea(std::uint8_t* game) noexcept {
+	std::vector<SafeMove> moves;
+	AcquireSRWLockExclusive(&SafeLock);
+	for (auto it = SafeQueue.begin(); it != SafeQueue.end();)
+		if (it->game == game) moves.push_back(*it), it = SafeQueue.erase(it);
+		else ++it;
+	ReleaseSRWLockExclusive(&SafeLock);
+	if (moves.empty()) return;
+	GameMods* g = ModsOf(game);
+	if (!g || !g->safeLevel) return;
+	for (const SafeMove& m : moves) {
+		if (At<FindUnitFn>(0x48FE80)(game, 1, m.id) != m.unit) continue;
+		void* room = At<UnitRoomFn>(0x34B440)(m.unit);
+		if (!room || At<RoomLevelFn>(0x2EFC10)(room) != g->safeLevel) continue;
+		Coord at {};
+		At<GetCoordsFn>(0x34A040)(m.unit, &at);
+		const int dx = at.x - g->safeX, dy = at.y - g->safeY;
+		if (std::abs(dx) > SafeRadius || std::abs(dy) > SafeRadius) continue;
+		// Out along the line from the portal through the monster (straight out on x if it stands on the portal).
+		const double length = std::sqrt(static_cast<double>(dx * dx + dy * dy));
+		const double ux = length > 0.5 ? dx / length : 1.0, uy = length > 0.5 ? dy / length : 0.0;
+		bool moved = false;
+		for (int extra = 4; extra <= 24 && !moved; extra += 6) {
+			Coord spot { g->safeX + static_cast<int>(ux * (SafeRadius * 1.42 + extra)), g->safeY + static_cast<int>(uy * (SafeRadius * 1.42 + extra)) };
+			void* nearRoom = At<RoomAtFn>(0x38DFB0)(room, spot.x, spot.y);
+			if (!nearRoom) continue;
+			void* free = nullptr;
+			At<FindFreeSpotFn>(0x517F90)(game, nearRoom, &spot, 3, 0x400, &free, 4, 100);
+			if (!free || (std::abs(spot.x - g->safeX) <= SafeRadius && std::abs(spot.y - g->safeY) <= SafeRadius)) continue;
+			At<MoveUnitFn>(0x491CA0)(game, m.unit, free, spot.x, spot.y, 0, 0);
+			At<MoveDoneFn>(0x34F490)(m.unit, 1);
+			moved = true;
+			if (SafeLogs < 15) ++SafeLogs, Log(false, "zones: monster %u moved from %d,%d to %d,%d (out of the entry area)", m.id, at.x, at.y, spot.x, spot.y);
+		}
+		if (!moved && SafeLogs < 15) ++SafeLogs, Log(false, "zones: monster %u at %d,%d could not be moved out of the entry area", m.id, at.x, at.y);
+	}
+}
+
 std::uint64_t HookFrameCall(void* game) noexcept {
+	if (game) MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
 	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
