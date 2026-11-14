@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.40";
+constexpr const char* PluginVersion = "0.0.41";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -513,6 +513,7 @@ constexpr ActLevels Acts[5] { { Act1, 38 }, { Act2, 34 }, { Act3, 27 }, { Act4, 
 // TZ Plus zones (see "TZ Plus zones" below): hidden act 5 levels added after the game's own, always terrorized.
 std::atomic<int> ZoneBase { 0 }; // the first one's level id (the game's level count), 0 = none
 constexpr int    ZoneSlots = 10;
+std::atomic<std::uint32_t> ZoneSeed[ZoneSlots] {}; // each zone's layout seed, rolled when its portal opens (server and client build the same map)
 std::atomic<int> ZoneTemplate[ZoneSlots] {}; // the template of each zone (0 = none, level 2s too): its stairs rooms (HookMazeBuild)
 // Monsters made too close to a zone's entry portal, moved away on the next game frame (HookFrameCall).
 struct SafeMove {
@@ -2345,7 +2346,7 @@ void MakeTownguardsSelectable(const D2RL::PluginContext* context, const D2RL::Da
 		auto*               row   = const_cast<void*>(guard);
 		const std::uint32_t flags = Field<std::uint32_t>(row, 4);
 		if ((flags & SelIs) && !(flags & SelNo)) continue; // done already (banks can share tables)
-		if (!(known & SelIs) || (known & SelNo) || !(flags & SelNo)) {
+		if (!(known & SelIs) || (known & SelNo)) {
 			Log(true, "zones: bank %d monstats2 row %u flags 0x%X (combatant 0x%X) not as expected, the townguard stays unselectable", bank, index, flags, known);
 			continue;
 		}
@@ -2650,6 +2651,10 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	void* portal = nullptr;
 	g->safeLevel = 0;
 	ZoneTemplate[id - base] = tmpl, ZoneTemplate[id + 1 - base] = 0; // level 2 keeps its own id: one entry room
+	{
+		std::uint64_t layout = Field<std::uint64_t>(game, GameSeed) ^ GetTickCount64() ^ (static_cast<std::uint64_t>(id) << 40);
+		ZoneSeed[id - base] = static_cast<std::uint32_t>(Mix(layout)) | 1, ZoneSeed[id + 1 - base] = static_cast<std::uint32_t>(Mix(layout)) | 1;
+	}
 	Creating     = g;
 	CreatingId   = id;
 	CreatingGame = game;
@@ -2816,8 +2821,12 @@ std::uint64_t HookLevelSeed(void* seed, std::uint32_t value) noexcept {
 	const int base = ZoneBase.load(std::memory_order_relaxed);
 	const int id   = seed ? Field<std::int32_t>(static_cast<std::uint8_t*>(seed) - 0x1E4, 0x1F8) : 0;
 	if (base > 0 && id >= base && id < base + ZoneSlots) {
-		std::uint64_t state = SeedState.fetch_add(0x9E3779B97F4A7C15ull) ^ GetTickCount64() ^ (static_cast<std::uint64_t>(id) << 32);
-		const std::uint32_t random = static_cast<std::uint32_t>(Mix(state));
+		std::uint32_t random = ZoneSeed[id - base].load();
+		if (!random) {
+			std::uint64_t state = SeedState.fetch_add(0x9E3779B97F4A7C15ull) ^ GetTickCount64() ^ (static_cast<std::uint64_t>(id) << 32);
+			random = static_cast<std::uint32_t>(Mix(state)) | 1;
+			ZoneSeed[id - base] = random;
+		}
 		Log(false, "zones: level %d layout seed %u (the map seed would give %u)", id, random, value);
 		value = random;
 	}
