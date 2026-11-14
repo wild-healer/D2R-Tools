@@ -8,13 +8,13 @@
 // 0x1FAE90 `void (mode, bool)` writes it. The key handler (0xC66A0) flips or
 // sets it, then 0xCE450 applies it: it opens or closes the labels HUD and sets
 // the "labels shown" flag read by the rest of the game (0x8AFC0). The labels
-// HUD is panel 12. Nothing clears the state between games while the Item Name
-// Display option is Toggle, so the plugin sets it once, in your first game after
-// launch, through the same two calls the key uses. In every game where the
-// state is on (set by the plugin or by you) but the labels HUD is not open, it
-// applies the state again, retrying for a few seconds while the game's HUD is
-// still being set up. A state you turned off is left off. With the Hold option
-// the game clears it whenever a key is released, as it does for the key.
+// HUD is panel 12. The state is meant to last until the game closes, but it
+// is sometimes found off on a new game without the key being pressed (seen
+// with quick new games), so the plugin sets it at the start of every game
+// through the same two calls the key uses, and applies it again while the
+// labels HUD is not open, retrying for a few seconds while the game's HUD is
+// still being set up. The key still turns them off for the rest of that game.
+// With the Hold option the game clears it whenever a key is released.
 //
 // The automap is the game panel 10. Panel open flags are a byte array at
 // D2R+0x2A2ADA0 (one per panel id), and 0xCD7C0 `bool (int panel, int)` opens
@@ -42,7 +42,7 @@
 namespace {
 
 constexpr const char* PluginId      = "shown-on-start";
-constexpr const char* PluginVersion = "0.0.3";
+constexpr const char* PluginVersion = "0.0.4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -179,13 +179,14 @@ void __cdecl TurnOn(const D2RL::PluginContext*, void*) noexcept {
 		if (!Config.items.load()) {
 			ItemsPending = false;
 		} else {
-			if (!ItemsDone.exchange(true) && !ItemsGet(ModeShowItems)) {
+			if (!ItemsGet(ModeShowItems)) {
 				ItemsSet(ModeShowItems, true);
-				Log(false, "item labels turned on (first game after launch)");
+				Log(false, ItemsDone.exchange(true) ? "item labels were off at the start of this game, turned on" : "item labels turned on (first game after launch)");
 			}
+			ItemsDone.store(true);
 			if (!ItemsGet(ModeShowItems)) {
 				ItemsPending = false;
-				Log(false, "item labels are off (turned off in an earlier game), left off");
+				Log(true, "item labels could not be turned on");
 			} else if (PanelOpen(PanelItemLabels)) {
 				ItemsPending = false;
 				Log(false, "item labels shown (try %d)", Tries);
@@ -256,9 +257,8 @@ std::string Render() {
 	return R"(# Shown on Start
 #
 # Turns on, so you don't have to press their keys after launching D2R:
-# - items: item labels on the ground (the Show Items key), in your first game
-#   after launch. They stay as you leave them after that. Needs the game's
-#   Item Name Display option on Toggle.
+# - items: item labels on the ground (the Show Items key), turned on at the
+#   start of every game. Needs the game's Item Name Display option on Toggle.
 # - automap: the automap (the AutoMap key, Tab), opened in every game.
 # Their keys still turn them off. Every setting can also be changed in game
 # with I Hate TOMLs.
@@ -311,7 +311,7 @@ constexpr const char* Schema = R"toml(title = "Shown on Start"
 key = "items"
 type = "bool"
 label = "Item labels shown on start"
-note = "Turned on in your first game after launch. Needs Item Name Display on Toggle."
+note = "Turned on at the start of every game. Needs Item Name Display on Toggle."
 [[setting]]
 key = "automap"
 type = "bool"

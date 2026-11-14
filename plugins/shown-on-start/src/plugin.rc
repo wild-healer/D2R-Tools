@@ -5,19 +5,19 @@ D2RL_PLUGIN_MANIFEST_RESOURCE_ID RCDATA { D2RL_PLUGIN_RESOURCE_DWORD(D2RL_PLUGIN
 D2RL_PLUGIN_CONFIG_RESOURCE_ID RCDATA "shown-on-start.toml"
 
 1 VERSIONINFO
-FILEVERSION 0,0,3,0
-PRODUCTVERSION 0,0,3,0
+FILEVERSION 0,0,4,0
+PRODUCTVERSION 0,0,4,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Shown on Start D2RLoader plugin"
-      VALUE "FileVersion", "0.0.3"
+      VALUE "FileVersion", "0.0.4"
       VALUE "InternalName", "shown-on-start"
       VALUE "OriginalFilename", "d2rl-shown-on-start.dll"
       VALUE "ProductName", "Shown on Start"
-      VALUE "ProductVersion", "0.0.3"
+      VALUE "ProductVersion", "0.0.4"
     END
   END
   BLOCK "VarFileInfo"
