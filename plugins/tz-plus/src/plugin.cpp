@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.20";
+constexpr const char* PluginVersion = "0.0.21";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1875,7 +1875,8 @@ constexpr std::uint64_t  TablesRva = 0x2A9A580; // the data tables of each game 
 constexpr std::uintptr_t LevelsVec = 0x1460, DefsVec = 0x14A0, MazeVec = 0x18C0; // {rows, count, capacity}
 constexpr std::size_t    LevelRow = 0x18C, DefRow = 0x9C, MazeRow = 0x1C;
 constexpr std::uintptr_t LvId = 4, LvPal = 12, LvAct = 13, LvQuest = 56, LvNumMon = 58, LvMonCount = 59, LvMon = 62, LvNMon = 112, LvUMon = 162,
-                         LvWaypoint = 236, LvName = 253;
+                         LvWaypoint = 236, LvName = 253, LvWarpName = 293, LvEntryName = 333, LvDen = 36;
+constexpr int            ZoneDensity = 4; // monster density x4
 constexpr std::uintptr_t DefQuest = 0, DefQuestEx = 4, DefDrlg = 48, DefType = 52, DefDepend = 44, DefVis = 72, DefWarp = 104;
 constexpr int            MonSlots = 25, ZoneMonsters = 8;
 // Generic dungeons (no level-specific generation code, no quest): cave, crypt, jail, catacombs, tombs, lair, sewers,
@@ -1941,6 +1942,17 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state) noexcept {
 	SetField<std::uint8_t>(row, LvAct, 4);
 	SetField<std::uint8_t>(row, LvQuest, 0);
 	SetField<std::uint8_t>(row, LvWaypoint, 0xFF);
+	for (const std::uintptr_t den : { LvDen, LvDen + 4, LvDen + 8 })
+		SetField<std::int32_t>(row, den, std::min(Field<std::int32_t>(row, den) * ZoneDensity, 100000));
+	// Our names: keys answered by HookStringByKey.
+	const int n = id - b.count + 1;
+	char      key[40] {};
+	std::snprintf(key, sizeof(key), "TZPlusZone%d", n);
+	std::memcpy(row + LvName, key, 40);
+	std::snprintf(key, sizeof(key), "TZPlusWarp%d", n);
+	std::memcpy(row + LvWarpName, key, 40);
+	std::snprintf(key, sizeof(key), "TZPlusEntry%d", n);
+	std::memcpy(row + LvEntryName, key, 40);
 	if (!b.pool.empty()) {
 		std::int16_t picks[MonSlots];
 		int          count = 0;
@@ -2022,6 +2034,59 @@ void __cdecl OnTablesLoaded(const D2RL::PluginContext* context, const D2RL::Life
 std::atomic<bool> PortalRequested { false };
 SRWLOCK           PortalLock = SRWLOCK_INIT;
 std::string       PortalResult;
+struct ZonePortal {
+	std::uint32_t unit;
+	int           level;
+};
+ZonePortal ZonePortals[64] {}; // our portals (unit id -> zone), for their name on the client (same ids in single player)
+int        PortalCursor = 0;
+
+// ---- names: the zones' LevelName/LevelWarp/LevelEntry keys (TZPlusZone<n>...), answered here ----
+// D2R+0x3E2B736 is the game's string-by-key call (jmp [slot]); the slot is pointed at us, everything else goes on.
+
+struct KeyView {
+	const char* text;
+	std::size_t length;
+};
+using StringByKeyFn = const char* (*)(const KeyView* key) noexcept;
+constexpr std::uint64_t StringByKeyThunkRva = 0x3E2B736;
+StringByKeyFn           StringByKeyOrig {};
+char                    ZoneTexts[3][ZoneSlots][48] {};
+
+const char* HookStringByKey(const KeyView* key) noexcept {
+	if (key && key->text && key->length >= 11 && key->length <= 13 && std::memcmp(key->text, "TZPlus", 6) == 0) {
+		const std::string_view k(key->text, key->length);
+		for (int kind = 0; kind < 3; ++kind) {
+			const std::string_view prefix = kind == 0 ? "TZPlusZone" : kind == 1 ? "TZPlusWarp" : "TZPlusEntry";
+			if (k.substr(0, prefix.size()) != prefix) continue;
+			const int n = std::atoi(std::string(k.substr(prefix.size())).c_str());
+			if (n >= 1 && n <= ZoneSlots) {
+				char* text = ZoneTexts[kind][n - 1];
+				if (!text[0]) std::snprintf(text, 48, kind == 0 ? "Terror Zone %d" : kind == 1 ? "To Terror Zone %d" : "Entering Terror Zone %d", n);
+				return text;
+			}
+		}
+	}
+	return StringByKeyOrig(key);
+}
+
+// The portal's level for its name (D2R+0xC1882: call 0x34AD40 (unit) in the client's object name code).
+using ObjectLevelFn = std::uint64_t (*)(void* unit) noexcept;
+constexpr std::uint64_t PortalNameCallRva = 0xC1882, ObjectLevelRva = 0x34AD40;
+int                     PortalNameLogs = 0;
+
+std::uint64_t HookPortalLevel(void* unit) noexcept {
+	std::uint64_t level = At<ObjectLevelFn>(ObjectLevelRva)(unit);
+	if (!unit || Field<std::uint32_t>(unit, 0) != 2) return level;
+	const std::uint32_t id = Field<std::uint32_t>(unit, 8);
+	AcquireSRWLockShared(&PortalLock);
+	for (const ZonePortal& p : ZonePortals)
+		if (p.level && p.unit == id) level = (level & ~0xFFFFull) | static_cast<std::uint16_t>(p.level);
+	ReleaseSRWLockShared(&PortalLock);
+	if (PortalNameLogs < 6 && Field<std::uint32_t>(unit, 4) == 60)
+		++PortalNameLogs, Log(false, "client: red portal %u leads to level %u", id, static_cast<unsigned>(level & 0xFFFF));
+	return level;
+}
 
 void SetPortalResult(const char* format, ...) noexcept {
 	char    line[300] {};
@@ -2092,6 +2157,11 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		return SetPortalResult("TZ Plus zones: the game refused the portal to level %d (%s) at %d,%d%s", id, LevelName(Banks[mode], tmpl).c_str(), spot.x, spot.y,
 		                       freeRoom ? "" : " (no free spot)");
 	++g->zonesUsed;
+	if (portal) {
+		AcquireSRWLockExclusive(&PortalLock);
+		ZonePortals[PortalCursor++ % 64] = { Field<std::uint32_t>(portal, 8), id };
+		ReleaseSRWLockExclusive(&PortalLock);
+	}
 	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d), monsters [%s]; new mods: %s", g->zonesUsed, ZoneSlots, id,
 	                LevelName(Banks[mode], tmpl).c_str(), tmpl, monsters.c_str(), mods.c_str());
 }
@@ -2112,6 +2182,21 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 		return Log(true, "zones: could not listen to table loads, no TZ Plus zones");
 	if (!PatchCall(FrameCallRva, FrameCallTarget, reinterpret_cast<const void*>(&HookFrameCall)))
 		Log(true, "zones: could not patch the game update at D2R+0x%llX, no zone portals", static_cast<unsigned long long>(FrameCallRva));
+	if (!PatchCall(PortalNameCallRva, ObjectLevelRva, reinterpret_cast<const void*>(&HookPortalLevel)))
+		Log(true, "zones: portals keep the game's name, could not patch D2R+0x%llX", static_cast<unsigned long long>(PortalNameCallRva));
+	std::uint8_t thunk[6] {};
+	if (Read(Base + StringByKeyThunkRva, thunk, 6) && thunk[0] == 0xFF && thunk[1] == 0x25) {
+		std::int32_t rel = 0;
+		std::memcpy(&rel, thunk + 2, 4);
+		const std::uint64_t slot = StringByKeyThunkRva + 6 + rel;
+		std::uint8_t        current[8] {}, ours[8] {};
+		const auto          hook = reinterpret_cast<std::uint64_t>(&HookStringByKey);
+		std::memcpy(ours, &hook, 8);
+		if (Read(Base + slot, current, 8)) {
+			std::memcpy(&StringByKeyOrig, current, 8);
+			if (!StringByKeyOrig || !Context->PatchBytes(slot, current, 8, ours, 8)) StringByKeyOrig = nullptr, Log(true, "zones: zone names off, could not patch D2R+0x%llX", static_cast<unsigned long long>(slot));
+		}
+	} else Log(true, "zones: zone names off, D2R+0x%llX differs", static_cast<unsigned long long>(StringByKeyThunkRva));
 }
 
 // ---- console: "tzplus" shows this game's mods ----
