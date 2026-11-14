@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.30";
+constexpr const char* PluginVersion = "0.0.31";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1930,7 +1930,7 @@ void DumpBarbarians() noexcept {
 	using ClientPlayer = void* (*)(int index) noexcept;
 	using ModeFn       = std::uint8_t (*)(void* unit) noexcept;
 	using Ms2Fn        = std::uint8_t* (*)(std::uint8_t mode, int monster) noexcept;
-	if (BarbDumps >= 6) return;
+	if (BarbDumps >= 40) return;
 	++BarbDumps;
 	const int index  = At<LocalIndexFn>(0x8B2D0)();
 	void*     player = At<ClientPlayer>(0x9A480)(index);
@@ -1942,7 +1942,6 @@ void DumpBarbarians() noexcept {
 			for (auto* u = Field<std::uint8_t*>(table, bucket * 8); u && guard < 256; u = Field<std::uint8_t*>(u, 0x158), ++guard) {
 				if (Field<std::uint32_t>(u, 0) != 1) continue;
 				const std::uint32_t cls = Field<std::uint32_t>(u, 4);
-				if (cls != 522 && cls != 523 && cls != 535 && cls != 536 && cls != 511 && cls != 512) continue;
 				++found;
 				const std::uint8_t  mode = At<ModeFn>(0x34A0E0)(u);
 				const std::uint8_t* ms2  = At<Ms2Fn>(0x975B0)(mode, static_cast<int>(cls));
@@ -1955,7 +1954,7 @@ void DumpBarbarians() noexcept {
 	} catch (...) {
 		Log(true, "barb dump: failed while reading the client units");
 	}
-	Log(false, "barb dump %d: %d town people found (player %p)", BarbDumps, found, player);
+	Log(false, "barb dump %d: %d monsters found (player %p)", BarbDumps, found, player);
 }
 
 bool OnGameMessage(UINT message, WPARAM, LPARAM) {
