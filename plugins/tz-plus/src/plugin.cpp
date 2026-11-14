@@ -58,7 +58,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.12";
+constexpr const char* PluginVersion = "0.0.13";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -689,7 +689,8 @@ void ApplyUMod(void* unit, std::uint8_t mode, int id, int tier, bool elite) noex
 	}
 	if (slot < 0) return;
 	void* record = At<UModRecordFn>(0x4983C0)(mode, id);
-	if (!record || !At<UModAllowedFn>(0x4A1E50)(unit, record, 1)) return;
+	// Multiple Shots: the game's check keeps normal monsters out; ours may have it (it acts on their missiles only).
+	if (!record || (id != 29 && !At<UModAllowedFn>(0x4A1E50)(unit, record, 1))) return;
 
 	int before[6] {};
 	constexpr int watched[6] { StatFireRes, StatLightRes, StatColdRes, StatMagicRes, StatPhysRes, StatDefense };
@@ -844,8 +845,9 @@ void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 		if (const std::uint8_t* list = At<UModListFn>(0x38E310)(unit))
 			for (int i = 0; i < 9; ++i)
 				if (list[i]) mods += (mods.empty() ? "" : ",") + std::to_string(list[i]);
-		Trace("monster in level %d (mlvl %d, %s, type 0x%X): mods [%s], cold res %d -> %d, fire res %d -> %d", level, GetStat(unit, StatLevel),
-		      boss ? "boss" : elite ? "elite" : "normal", type, mods.c_str(), cold0, GetStat(unit, StatColdRes), fire0, GetStat(unit, StatFireRes));
+		Trace("monster in level %d (mlvl %d, %s, type 0x%X): mods [%s], cold res %d -> %d, fire res %d -> %d, poison %d-%d/%d", level, GetStat(unit, StatLevel),
+		      boss ? "boss" : elite ? "elite" : "normal", type, mods.c_str(), cold0, GetStat(unit, StatColdRes), fire0, GetStat(unit, StatFireRes),
+		      GetStat(unit, StatPoisonMin), GetStat(unit, StatPoisonMax), GetStat(unit, StatPoisonLength));
 	}
 }
 
@@ -936,6 +938,8 @@ void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
 	if (level <= 0 || !At<LevelTzFn>(0x489B70)(game, level)) return;
 	if (At<IsSpecialFn>(0x38E0E0)(unit, true)) tier = std::min(tier + 1, Ranges[g->difficulty].maxTier);
 	std::uint64_t state = TeleportRandom.fetch_add(0x9E3779B97F4A7C15ULL) ^ reinterpret_cast<std::uintptr_t>(unit);
+	static int logs = 0;
+	if (logs < 20) ++logs, Log(false, "Teleportation: monster %p was hit (tier %d)", unit, tier);
 	if (static_cast<int>(Mix(state) % 100) >= TeleportChance[tier - 1]) return;
 	void* path = Field<void*>(unit, 0x38);
 	if (!path) return;
@@ -944,8 +948,12 @@ void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
 		const double angle    = static_cast<double>(Mix(state) % 6283) / 1000.0;
 		const int    distance = 6 + static_cast<int>(Mix(state) % 7);
 		const int    tx = x + static_cast<int>(std::lround(std::cos(angle) * distance)), ty = y + static_cast<int>(std::lround(std::sin(angle) * distance));
-		if (At<WarpFn>(WarpRva)(game, unit, 0xB8, nullptr, tx, ty)) return;
+		if (At<WarpFn>(WarpRva)(game, unit, 0xB8, nullptr, tx, ty)) {
+			if (logs < 40) ++logs, Log(false, "Teleportation: monster %p moved from %d,%d to %d,%d", unit, x, y, tx, ty);
+			return;
+		}
 	}
+	if (logs < 40) ++logs, Log(false, "Teleportation: monster %p could not move from %d,%d", unit, x, y);
 }
 
 // ---- monster mod events (D2R+0x49D240: game, monster, other unit, event, ...) ----
@@ -980,6 +988,17 @@ std::uint64_t HookModEvent(std::uint64_t a, std::uint64_t b, std::uint64_t c, st
 	std::uint8_t* data = nullptr;
 	bool          raised = false;
 	if (InTzPlusZone(game, unit, &mods)) {
+		static int eventLogs = 0;
+		if (eventLogs < 40) {
+			++eventLogs;
+			std::string list;
+			if (const std::uint8_t* umods = At<UModListFn>(0x38E310)(unit))
+				for (int x = 0; x < 9; ++x)
+					if (umods[x]) list += (list.empty() ? "" : ",") + std::to_string(umods[x]);
+			const void* other = reinterpret_cast<void*>(c);
+			Log(false, "mod event %u: monster %p [%s], other %p (type %d)", static_cast<std::uint32_t>(d), unit, list.c_str(), other,
+			    other ? static_cast<int>(Field<std::uint32_t>(other, 0)) : -1);
+		}
 		data = Field<std::uint8_t*>(unit, 0x10); // MonsterData, +0x1A type flags
 		if (data && !(Field<std::uint16_t>(data, 0x1A) & 8)) SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) | 8), raised = true;
 		void* missile = reinterpret_cast<void*>(c);
@@ -1437,7 +1456,19 @@ GameString* WriteNames(GameString* out, std::uint8_t flag, const std::uint8_t* l
 // D2R+0xCF5AD: IsSpecial(unit, with minions) keeps champions, uniques and minions off the purple line.
 // Minions have no line of their own: in a TZ Plus game they get the purple one (tiers as elites).
 using IsSpecialCheckFn = bool (*)(void* unit, bool minions) noexcept;
-constexpr std::uint64_t NameSpecialCallRva = 0xCF5AD;
+constexpr std::uint64_t NameSpecialCallRva = 0xCF5AD, NameTerrorCallRva = 0xCF59B;
+
+// D2R+0xCF59B: the purple line needs the terror state, which the game gives normal monsters only.
+// In a TZ Plus terror zone, every monster passes (champions and uniques are still sent to their own line).
+bool HookNameTerror(void* unit) noexcept {
+	if (At<TerrorCheckFn>(0x3AF200)(unit)) return true;
+	if (!Config.enabled || !InGame) return false;
+	AcquireSRWLockShared(&Lock);
+	const bool game = Last != nullptr;
+	ReleaseSRWLockShared(&Lock);
+	const int level = CurrentLevel;
+	return game && level > 0 && At<InZoneListFn>(InZoneListRva)(level);
+}
 bool                    NameIsMinion       = false;
 
 bool HookNameSpecial(void* unit, bool minions) noexcept {
@@ -1739,6 +1770,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 			Log(true, "TZ Plus %s: Teleportation keeps the game's behaviour, could not patch D2R+0x%llX", PluginVersion,
 			    static_cast<unsigned long long>(TeleportHitSlotRva));
 	}
+	if (!PatchCall(NameTerrorCallRva, 0x3AF200, reinterpret_cast<const void*>(&HookNameTerror)))
+		Log(true, "TZ Plus %s: minions show no mods line, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(NameTerrorCallRva));
 	if (!PatchCall(NameSpecialCallRva, 0x38E0E0, reinterpret_cast<const void*>(&HookNameSpecial)))
 		Log(true, "TZ Plus %s: minions show no mods line, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(NameSpecialCallRva));
 	if (!PatchCall(NormalNamesCallRva, UModNamesRva, reinterpret_cast<const void*>(&HookNormalNames)) ||
