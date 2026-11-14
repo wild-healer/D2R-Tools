@@ -58,7 +58,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.11";
+constexpr const char* PluginVersion = "0.0.12";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -948,6 +948,53 @@ void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
 	}
 }
 
+// ---- monster mod events (D2R+0x49D240: game, monster, other unit, event, ...) ----
+// The game gives the mods' event handlers "is unique" (MonsterData flag 8) and most of them do nothing
+// without it: Multiple Shots, Lightning Enchanted's bolts, our Teleportation... So for the monsters of a
+// TZ Plus terror zone we raise that flag for the duration of the call.
+// Event 5 is "fired a missile" (other = the missile): Poison Enchanted is weaker on missiles.
+constexpr std::uint64_t ModEventRva = 0x49D240;
+constexpr Code          ModEventBytes { 0x48, 0x89, 0x6C, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x48, 0x89, 0x54, 0x24, 0x10, 0x57 };
+constexpr int           RangedPoisonDivisor = 3;
+std::uint64_t           ModEventOrig {};
+int                     MissileLogs = 0;
+
+bool InTzPlusZone(std::uint8_t* game, void* unit, GameMods** mods = nullptr) noexcept {
+	if (!game || !unit || Field<std::uint32_t>(unit, 0) != 1 || !Config.enabled.load(std::memory_order_relaxed)) return false;
+	GameMods* g = ModsOf(game);
+	if (!g) return false;
+	void* room = At<UnitRoomFn>(0x34B440)(unit);
+	const int level = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
+	if (level <= 0 || !At<LevelTzFn>(0x489B70)(game, level)) return false;
+	if (mods) *mods = g;
+	return true;
+}
+
+std::uint64_t HookModEvent(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d, std::uint64_t e, std::uint64_t f, std::uint64_t g7,
+                           std::uint64_t h, std::uint64_t i, std::uint64_t j, std::uint64_t k, std::uint64_t l, std::uint64_t m, std::uint64_t n) noexcept {
+	using Fn      = std::uint64_t (*)(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                 std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t) noexcept;
+	auto* game    = reinterpret_cast<std::uint8_t*>(a);
+	void* unit    = reinterpret_cast<void*>(b);
+	GameMods* mods = nullptr;
+	std::uint8_t* data = nullptr;
+	bool          raised = false;
+	if (InTzPlusZone(game, unit, &mods)) {
+		data = Field<std::uint8_t*>(unit, 0x10); // MonsterData, +0x1A type flags
+		if (data && !(Field<std::uint16_t>(data, 0x1A) & 8)) SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) | 8), raised = true;
+		void* missile = reinterpret_cast<void*>(c);
+		if (static_cast<std::uint32_t>(d) == 5 && missile && Field<std::uint32_t>(missile, 0) == 3 && TierOf(*mods, 0, Kind::Poison)) {
+			const std::int32_t low = GetStat(missile, StatPoisonMin), high = GetStat(missile, StatPoisonMax);
+			if (low > 0) SetStat(missile, StatPoisonMin, low / RangedPoisonDivisor);
+			if (high > 0) SetStat(missile, StatPoisonMax, high / RangedPoisonDivisor);
+			if (MissileLogs < 10) ++MissileLogs, Log(false, "missile of a Poison Enchanted monster: poison %d-%d -> %d-%d", low, high, GetStat(missile, StatPoisonMin), GetStat(missile, StatPoisonMax));
+		}
+	}
+	const std::uint64_t result = reinterpret_cast<Fn>(ModEventOrig)(a, b, c, d, e, f, g7, h, i, j, k, l, m, n);
+	if (raised) SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) & ~std::uint16_t { 8 });
+	return result;
+}
+
 bool HookTerrorCheck(void* unit, std::uint8_t* game, void* room) noexcept {
 	AddMods(game, unit, room);
 	return At<TerrorCheckFn>(0x3AF200)(unit);
@@ -1387,7 +1434,27 @@ GameString* WriteNames(GameString* out, std::uint8_t flag, const std::uint8_t* l
 	return result;
 }
 
+// D2R+0xCF5AD: IsSpecial(unit, with minions) keeps champions, uniques and minions off the purple line.
+// Minions have no line of their own: in a TZ Plus game they get the purple one (tiers as elites).
+using IsSpecialCheckFn = bool (*)(void* unit, bool minions) noexcept;
+constexpr std::uint64_t NameSpecialCallRva = 0xCF5AD;
+bool                    NameIsMinion       = false;
+
+bool HookNameSpecial(void* unit, bool minions) noexcept {
+	const auto special = At<IsSpecialCheckFn>(0x38E0E0);
+	NameIsMinion       = false;
+	const bool result  = special(unit, minions);
+	if (!result || !minions || !Config.enabled || !InGame || special(unit, false)) return result;
+	AcquireSRWLockShared(&Lock);
+	const bool game = Last != nullptr;
+	ReleaseSRWLockShared(&Lock);
+	if (!game) return result;
+	NameIsMinion = true;
+	return false;
+}
+
 GameString* HookNormalNames(GameString* out, std::uint8_t flag, const std::uint8_t* list, std::uint32_t count, std::int32_t color, const char* width) noexcept {
+	if (NameIsMinion) return NameIsMinion = false, WriteNames(out, flag, list, count, 4, width, true);
 	return WriteNames(out, flag, list, count, color, width, false);
 }
 GameString* HookEliteNames(GameString* out, std::uint8_t flag, const std::uint8_t* list, std::uint32_t count, std::int32_t color, const char* width) noexcept {
@@ -1657,6 +1724,13 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!PatchCall(MapLineCallRva, AppendCharRva, reinterpret_cast<const void*>(&HookMapLine)))
 		Log(true, "TZ Plus %s: the mods are not shown on the map, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(MapLineCallRva));
 	{
+		void* original = nullptr;
+		if (!context->InstallInlineHook(ModEventRva, ModEventBytes.data(), static_cast<std::uint32_t>(ModEventBytes.size()), reinterpret_cast<void*>(&HookModEvent), &original) || !original)
+			Log(true, "TZ Plus %s: mod events keep the game's rules (Multiple Shots, Teleportation on normal monsters), could not hook D2R+0x%llX", PluginVersion,
+			    static_cast<unsigned long long>(ModEventRva));
+		else ModEventOrig = reinterpret_cast<std::uint64_t>(original);
+	}
+	{
 		const std::uint8_t empty[8] {};
 		const auto         handler = reinterpret_cast<std::uint64_t>(&TeleportWhenHit);
 		std::uint8_t       bytes[8];
@@ -1665,6 +1739,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 			Log(true, "TZ Plus %s: Teleportation keeps the game's behaviour, could not patch D2R+0x%llX", PluginVersion,
 			    static_cast<unsigned long long>(TeleportHitSlotRva));
 	}
+	if (!PatchCall(NameSpecialCallRva, 0x38E0E0, reinterpret_cast<const void*>(&HookNameSpecial)))
+		Log(true, "TZ Plus %s: minions show no mods line, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(NameSpecialCallRva));
 	if (!PatchCall(NormalNamesCallRva, UModNamesRva, reinterpret_cast<const void*>(&HookNormalNames)) ||
 	    !PatchCall(EliteNamesCallRva, UModNamesRva, reinterpret_cast<const void*>(&HookEliteNames)))
 		Log(true, "TZ Plus %s: monster names show the game's mods only, could not patch their calls", PluginVersion);
