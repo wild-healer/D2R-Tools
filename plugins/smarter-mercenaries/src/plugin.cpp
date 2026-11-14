@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.34";
+constexpr const char* PluginVersion = "0.0.35";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -997,7 +997,7 @@ double SpeedOf(void* unit) noexcept {
 // Room a ranged mercenary keeps from a monster: more for a fast one, since it
 // covers the gap before the mercenary can step away again.
 double Exclusion(void* unit, double base) noexcept {
-	return std::clamp(base + SpeedOf(unit) * 0.4, base, base + 6.0);
+	return std::clamp(base + SpeedOf(unit) * 0.4, base, base + 4.0);
 }
 
 // Life over the last seconds, to see a mercenary in trouble.
@@ -1310,53 +1310,60 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	return true;
 }
 
-// Self positioning: the place closest to you (then to where it stands) that
-// keeps at least `exclusion` from every monster. False when where it stands
-// already does.
-// Each monster's room grows with its speed (Exclusion); `scale` widens it
-// all (safe mode keeps further away).
+// Self positioning: keeps `danger_range` from every monster (more from fast
+// ones, see Exclusion), as close to you as that allows but up to 4 past the
+// danger range away from you. Up to 0.0.34 it kept only 5 and went for the
+// spot nearest you, so ranged mercenaries hugged you inside the danger zone.
+// With no spot clear of every monster it takes the one with the most room.
+// False when where it stands already does. `scale` widens the room (safe mode).
 bool Reposition(void* game, void* merc, void* owner, const Scan& scan, Role role, double scale = 1.0) noexcept {
 	int ox = 0, oy = 0, mx = 0, my = 0;
 	if (!Position(owner, ox, oy) || !Position(merc, mx, my)) return false;
+	const double base   = Config.danger.load();
+	const double tether = base + 4.0;
 	int    ex[MaxCandidates], ey[MaxCandidates], count = 0;
 	double room[MaxCandidates], widest = 0;
 	for (std::size_t index = 0; index < scan.count; ++index)
 		if (Position(scan.units[index], ex[count], ey[count])) {
-			room[count] = Exclusion(scan.units[index], 5.0) * scale;
+			room[count] = Exclusion(scan.units[index], base) * scale;
 			widest      = std::max(widest, room[count]);
 			++count;
 		}
-	const auto clear = [&](double x, double y) {
+	if (!count) return false;
+	// How much room a place has: under 1, a monster is inside its range.
+	const auto slack = [&](double x, double y) {
+		double least = 1e9;
 		for (int index = 0; index < count; ++index)
-			if ((ex[index] - x) * (ex[index] - x) + (ey[index] - y) * (ey[index] - y) < room[index] * room[index]) return false;
-		return true;
+			least = std::min(least, std::sqrt((ex[index] - x) * (ex[index] - x) + (ey[index] - y) * (ey[index] - y)) / room[index]);
+		return least;
 	};
 	const auto fromOwner = [&](double x, double y) { return std::sqrt((x - ox) * (x - ox) + (y - oy) * (y - oy)); };
-	// Where it stands is good enough while a little looser than the target
-	// distances: no hopping between two nearly equal places.
-	const auto loose = [&](double x, double y) {
-		for (int index = 0; index < count; ++index)
-			if ((ex[index] - x) * (ex[index] - x) + (ey[index] - y) * (ey[index] - y) < (room[index] - 1) * (room[index] - 1)) return false;
-		return true;
-	};
-	if (loose(mx, my) && fromOwner(mx, my) <= 9.0) return Mv(merc, " safe: current place ok (%d monsters, widest room %.1f)", count, widest), false;
-	double bestScore = 1e9;
-	int    bx = 0, by = 0;
-	for (const double radius : { 2.0, 3.5, 5.0, 6.5, 8.0, 10.0, 12.0 }) {
+	const double here = slack(mx, my);
+	// A little looser for where it already stands: no hopping between two nearly equal places.
+	if (here >= 0.9 && fromOwner(mx, my) <= tether) return Mv(merc, " safe: current place ok (%d monsters, room %.1f, slack %.2f)", count, widest, here), false;
+	double bestScore = 1e9, bestSlack = here + 0.15;
+	int    bx = 0, by = 0, fx = 0, fy = 0;
+	bool   clear = false, fallback = false;
+	for (double radius = 2.0; radius <= tether + 0.01; radius += 1.5)
 		for (int step = 0; step < 16; ++step) {
 			const double angle = step * 3.14159265358979 / 8.0;
-			const double x = ox + radius * std::cos(angle), y = oy + radius * std::sin(angle);
-			if (!clear(x, y)) continue;
-			const double score = radius * 3.0 + std::sqrt((x - mx) * (x - mx) + (y - my) * (y - my));
-			if (score < bestScore) bestScore = score, bx = static_cast<int>(std::lround(x)), by = static_cast<int>(std::lround(y));
+			const int    x = ox + static_cast<int>(std::lround(radius * std::cos(angle))), y = oy + static_cast<int>(std::lround(radius * std::sin(angle)));
+			if (GridAt(merc, x, y, GridWall)) continue;
+			const double roomy = slack(x, y);
+			if (roomy >= 1.0) {
+				const double score = radius + std::sqrt(double(x - mx) * (x - mx) + double(y - my) * (y - my)) * 0.7;
+				if (score < bestScore) bestScore = score, bx = x, by = y, clear = true;
+			} else if (roomy > bestSlack) bestSlack = roomy, fx = x, fy = y, fallback = true;
 		}
+	if (!clear) {
+		if (!fallback) return Mv(merc, " safe: no better place (%d monsters, slack here %.2f)", count, here), false;
+		bx = fx, by = fy;
 	}
-	if (bestScore >= 1e9) return Mv(merc, " safe: no safe place found (%d monsters)", count), false;
 	if (Cheb(bx, by, mx, my) <= 1) return Mv(merc, " safe: best place is here"), false;
-	Mv(merc, " safe: goes to (%d,%d) score %.1f, you at (%d,%d), %d monsters", bx, by, bestScore, ox, oy, count);
+	Mv(merc, " safe: goes to (%d,%d) %s, slack %.2f here, you at (%d,%d), %d monsters, room %.1f", bx, by, clear ? "clear of all" : "most room", here, ox, oy, count, widest);
 	DeleteEvent(game, merc, 2, 0);
 	if (!Go(game, merc, nullptr, bx, by, true)) return false;
-	Note(merc, role, nullptr, -6, "moves to a safe place close to you");
+	Note(merc, role, nullptr, -6, clear ? "moves out of the monsters' reach, close to you" : "moves to where monsters are furthest");
 	return true;
 }
 
@@ -1415,7 +1422,7 @@ void SafeThink(void* game, void* merc, void* owner, MercState& state, int sx, in
 	int         distance = 0;
 	void* const nearest  = Nearest(merc, scan, distance);
 	if (nearest && distance <= 4 && AttackRoll(merc, tick, IsMelee(role)) && CrowdControl(game, merc, role, nearest)) return;
-	if (Reposition(game, merc, owner, scan, role, 1.6)) return;
+	if (Reposition(game, merc, owner, scan, role, 1.3)) return;
 	if (nearest && distance <= 3) {
 		DeleteEvent(game, merc, 2, 0);
 		if (Escape(game, merc, nearest, 5, 1)) return Note(merc, role, nearest, -14, "safe mode: backs away from a monster");
@@ -1526,7 +1533,8 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	// back off with you (the formation moves away) instead of standing to
 	// hit and run, unless something is in their face.
 	const int  dangerRange = Config.danger.load(std::memory_order_relaxed) - (Now.intent == Intent::Advance ? 3 : 0);
-	const bool danger      = Now.intent != Intent::Retreat && nearOwner <= dangerRange;
+	// Also whenever a monster is well inside its own range, whatever you do.
+	const bool danger      = (Now.intent != Intent::Retreat && nearOwner <= dangerRange) || nearMerc <= Config.danger.load() * 7 / 10;
 	if (Now.intent == Intent::Retreat && closest && nearMerc <= 3 && !walking) {
 		DeleteEvent(game, merc, 2, 0);
 		if (Escape(game, merc, closest, 5, 1)) return Note(merc, role, closest, -16, "backs off with you, away from a monster in its face");
@@ -1815,8 +1823,8 @@ leash = )" + ValueOf("leash") + R"(
 engage_range = )" + ValueOf("engage_range") + R"(
 
 # Ranged mercenaries (Rogue, Iron Wolf) stay in formation and shoot from there
-# until you get this close to enemies; then they position themselves away from
-# monsters, hitting and running.
+# until you get this close to enemies; then they keep this far from every
+# monster (more from fast ones), hitting and running.
 danger_range = )" + ValueOf("danger_range") + R"(
 
 # Melee mercenaries drop what they're doing and regroup on you when a monster
@@ -1923,7 +1931,7 @@ ctrl_step = 4
 key = "danger_range"
 type = "int"
 label = "Ranged danger range"
-note = "Ranged mercenaries start keeping away from monsters when you get this close to them. 4 to 24."
+note = "When you get this close to monsters, ranged mercenaries keep this far from them. 4 to 24."
 min = 4
 max = 24
 step = 1

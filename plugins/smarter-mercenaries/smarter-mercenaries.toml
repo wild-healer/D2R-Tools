@@ -24,8 +24,8 @@ leash = 14
 engage_range = 10
 
 # Ranged mercenaries (Rogue, Iron Wolf) stay in formation and shoot from there
-# until you get this close to enemies; then they position themselves away from
-# monsters, hitting and running.
+# until you get this close to enemies; then they keep this far from every
+# monster (more from fast ones), hitting and running.
 danger_range = 10
 
 # Melee mercenaries drop what they're doing and regroup on you when a monster
