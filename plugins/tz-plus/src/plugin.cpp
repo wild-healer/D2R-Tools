@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.31";
+constexpr const char* PluginVersion = "0.0.32";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1893,7 +1893,6 @@ void WatchWindow() {
 }
 
 // ---- the fire barbarian (an Act 5 Combatant in Harrogath): a click on him opens his menu ----
-constexpr std::uint32_t CombatantA = 522, CombatantB = 523; // monstats ids of act5barb1/act5barb2 (act5barb3/4, the Townguards: 535/536)
 using HoveredUnitFn = void* (*)(int index) noexcept;     // the unit under the mouse of a local player (D2R+0xF1900)
 int TalkLogs = 0;
 
@@ -1969,7 +1968,7 @@ bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 	if (CurrentLevel.load() == 109) DumpBarbarians();
 	if (CurrentLevel.load() != 109 || !unit || Field<std::uint32_t>(unit, 0) != 1) return false;
 	const std::uint32_t cls = Field<std::uint32_t>(unit, 4);
-	if (cls != CombatantA && cls != CombatantB && cls != 535 && cls != 536) return false;
+	if (cls != 567 && cls != 568 && cls != 569) return false; // injuredbarb1-3, the barbarians at the fires
 	Gui::Commands::Post("talk");
 	return false; // the click goes on: you walk to him
 }
@@ -2201,7 +2200,7 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state) noexcept {
 
 // The Act 5 Townguards (act5barb3/4, the barbarians standing at Harrogath's fires) can't be selected (monstats2 noSel):
 // made selectable like the Combatants, so they show their name and can be clicked. monstats2 flags: dword +4, isSel bit 3, noSel bit 5.
-constexpr std::uint32_t Townguards[] { 535, 536 }, Combatant = 522; // monstats ids (act5barb3/4, act5barb1)
+constexpr std::uint32_t Townguards[] { 567, 568, 569 }, Combatant = 522; // monstats ids: injuredbarb1-3 (the barbarians at Harrogath's fires), act5barb1
 constexpr std::uint32_t SelIs = 1u << 3, SelNo = 1u << 5;
 
 // The monstats2 row of a monster: MonStats word +0x4C (the table skips the "Expansion" line, so ids and rows differ).
