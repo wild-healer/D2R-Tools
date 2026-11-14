@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.26";
+constexpr const char* PluginVersion = "0.0.27";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1662,7 +1662,9 @@ constexpr std::uint64_t NameSpecialCallRva = 0xCF5AD, NameTerrorCallRva = 0xCF59
 
 // D2R+0xCF59B: the purple line needs the terror state, which the game gives normal monsters only.
 // In a TZ Plus terror zone, every monster passes (champions and uniques are still sent to their own line).
-bool HookNameTerror(void* unit) noexcept {
+void NoteHover(void* unit) noexcept;
+
+bool InClientZone(void* unit) noexcept {
 	if (At<TerrorCheckFn>(0x3AF200)(unit)) return true;
 	if (!Config.enabled || !InGame) return false;
 	AcquireSRWLockShared(&Lock);
@@ -1671,7 +1673,12 @@ bool HookNameTerror(void* unit) noexcept {
 	const int level = CurrentLevel;
 	return game && level > 0 && At<InZoneListFn>(InZoneListRva)(level);
 }
-bool ClientZone(void* unit) noexcept { return HookNameTerror(unit); }
+// The name bar of the monster under the mouse asks this (D2R+0xCF59B): that monster is the one hovered.
+bool HookNameTerror(void* unit) noexcept {
+	NoteHover(unit);
+	return InClientZone(unit);
+}
+bool ClientZone(void* unit) noexcept { return InClientZone(unit); }
 bool                    NameIsMinion       = false;
 
 bool HookNameSpecial(void* unit, bool minions) noexcept {
@@ -1852,13 +1859,17 @@ std::atomic<std::uint64_t> LastLabelTick { 0 };
 int                        LabelLogs = 0;
 std::uint32_t              LabelLogged[32] {};
 
-std::uint64_t HookLabel(void* unit, std::uint64_t b, std::uint64_t c, std::uint64_t d) noexcept {
+void NoteHover(void* unit) noexcept {
 	if (unit) {
 		LastLabel = unit, LastLabelTick = GetTickCount64();
 		const std::uint32_t key = (Field<std::uint32_t>(unit, 0) << 16) | (Field<std::uint32_t>(unit, 4) & 0xFFFF);
 		if (Field<std::uint32_t>(unit, 0) == 1 && LabelLogs < 32 && std::find(LabelLogged, LabelLogged + LabelLogs, key) == LabelLogged + LabelLogs)
 			LabelLogged[LabelLogs++] = key, Log(false, "hover: monster class %u (unit %u) shows its name", Field<std::uint32_t>(unit, 4), Field<std::uint32_t>(unit, 8));
 	}
+}
+
+std::uint64_t HookLabel(void* unit, std::uint64_t b, std::uint64_t c, std::uint64_t d) noexcept {
+	NoteHover(unit);
 	return At<LabelFn>(LabelRva)(unit, b, c, d);
 }
 
