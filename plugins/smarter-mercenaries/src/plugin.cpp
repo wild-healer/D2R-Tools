@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.32";
+constexpr const char* PluginVersion = "0.0.33";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -456,9 +456,9 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 	// You're backing off: melee mercenaries come with you, whatever is on them
 	// or on you (fighting there kept them behind; a ring of monsters is still
 	// broken out of, see BreakOut).
-	// Only a real retreat: backing off for most of a second and already more
-	// than 5 away from it. A step back while it fights next to you is not one.
-	if (melee && Now.intent == Intent::Retreat && Now.retreatMs >= 800 && Distance(merc, owner) > 5) return nullptr;
+	// Only a real retreat: backing off for half a second and already more
+	// than 4 away from it. A step back while it fights next to you is not one.
+	if (melee && Now.intent == Intent::Retreat && Now.retreatMs >= 500 && Distance(merc, owner) > 4) return nullptr;
 	const int      leash    = Config.leash.load();
 	const int      engage   = Config.engage.load();
 	const unsigned elements = ElementsOf(merc, role);
@@ -474,7 +474,7 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 		// Protecting you: melee only looks at what is right around you.
 		if (melee && Now.protect) {
 			if (fromOwner > Config.protect.load() + 2 && !(selfDefense && fromMerc <= 2)) continue;
-		} else if ((fromOwner > leash || (melee && fromMerc > (Now.intent == Intent::Retreat && Now.retreatMs >= 800 ? 3 : engage))) && !selfDefense) continue;
+		} else if ((fromOwner > leash || (melee && fromMerc > (Now.intent == Intent::Retreat && Now.retreatMs >= 500 ? 3 : engage))) && !selfDefense) continue;
 		// Ranged: only targets it can shoot from where it stands (missile line,
 		// as the game's own ranged target choice checks), so it never runs
 		// around looking for a shot.
@@ -758,6 +758,7 @@ struct OwnerState {
 	DWORD         stillSince; // first moment seen standing (0: moving)
 	bool          stopped;    // standing for more than the frame between two moves
 	DWORD         retreatSince; // backing off since (0: not backing off)
+	DWORD         retreatAt;    // last time seen backing off
 };
 struct MercState {
 	std::uint32_t id, owner;
@@ -782,7 +783,7 @@ OwnerState& OwnerOf(void* owner) noexcept {
 	for (auto& entry : Owners)
 		if (entry.id == id && (entry.fx != 0 || entry.fy != 0)) return entry;
 	OwnerState& entry = Owners[id % Owners.size()];
-	entry = { id, -1, -1, 0.0, 1.0, -1, -1, 0.0, 0.0, -1, -1, 0, false, 1, 0, true, 0 };
+	entry = { id, -1, -1, 0.0, 1.0, -1, -1, 0.0, 0.0, -1, -1, 0, false, 1, 0, true, 0, 0 };
 	return entry;
 }
 
@@ -1457,9 +1458,20 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	// What you're doing and how things stand, for the choices below.
 	Now        = {};
 	Now.intent = ReadIntent(owner, ownerState, scan);
-	if (Now.intent != Intent::Retreat) ownerState.retreatSince = 0;
-	else if (!ownerState.retreatSince) ownerState.retreatSince = GetTickCount();
-	Now.retreatMs = ownerState.retreatSince ? GetTickCount() - ownerState.retreatSince : 0;
+	// A retreat goes on through short gaps: the frame you stand between two
+	// moves, or a moment when the monsters are more beside you than behind
+	// you, read as hold or travel and cut every retreat short (in a test most
+	// lasted under half a second, so the melee mercenaries never came along).
+	{
+		const DWORD now = GetTickCount();
+		if (Now.intent == Intent::Retreat) {
+			if (!ownerState.retreatSince || now - ownerState.retreatAt > 500) ownerState.retreatSince = now;
+			ownerState.retreatAt = now;
+		}
+		const bool going = ownerState.retreatSince && now - ownerState.retreatAt <= 500 && Now.intent != Intent::Advance;
+		if (going) Now.intent = Intent::Retreat;
+		Now.retreatMs = going ? now - ownerState.retreatSince : 0;
+	}
 	Now.hx = ownerState.hx, Now.hy = ownerState.hy;
 	for (std::size_t index = 0; index < scan.count; ++index)
 		if (Distance(owner, scan.units[index]) <= Config.protect.load()) Now.protect = true;
