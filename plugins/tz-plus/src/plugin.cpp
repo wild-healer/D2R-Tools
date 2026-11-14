@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.29";
+constexpr const char* PluginVersion = "0.0.30";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -309,6 +309,7 @@ struct GameMods {
 	Rolled              mods[3] {};
 	int                 gold = 0, magic = 0, xp = 0; // % bonuses
 	std::atomic<int>    monsters { 0 };
+	std::atomic<int>    zoneCount[4] {}; // monsters of the open TZ Plus zone: trash, champions, uniques, minions
 	int                 zonesUsed = 0; // TZ Plus zones opened in this game
 	void*               portal    = nullptr; // the open zone portal in Harrogath (checked by its id before use)
 	int                 safeLevel = 0, safeX = 0, safeY = 0; // the zone's entry portal: no spawns around it
@@ -877,6 +878,14 @@ void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	}
 	CapLevel(unit);
 	g->monsters.fetch_add(1, std::memory_order_relaxed);
+	if (const int zb = ZoneBase.load(); zb > 0 && level >= zb && level < zb + ZoneSlots) {
+		const int kind  = (type & 0x10) ? 3 : (type & 0x0A) ? 2 : (type & 0x04) ? 1 : 0; // minion, unique/superunique, champion, trash
+		const int total = 1 + g->zoneCount[0] + g->zoneCount[1] + g->zoneCount[2] + g->zoneCount[3];
+		g->zoneCount[kind].fetch_add(1, std::memory_order_relaxed);
+		if (total % 25 == 0)
+			Log(false, "zone level %d: %d monsters so far: %d trash, %d champions, %d uniques, %d minions", level, total, g->zoneCount[0].load(), g->zoneCount[1].load(),
+			    g->zoneCount[2].load(), g->zoneCount[3].load());
+	}
 	AcquireSRWLockExclusive(&g->modLock);
 	try {
 		g->modded[unit] = Field<std::uint32_t>(unit, 8);
@@ -1910,15 +1919,55 @@ std::uint64_t HookLabel(void* unit, std::uint64_t b, std::uint64_t c, std::uint6
 	return At<LabelFn>(LabelRva)(unit, b, c, d);
 }
 
+// Diagnostics: every fire barbarian the client knows, with each check of the game's "can be selected" test
+// (0x9B840: 0x34F8D0 must be 0, 0x971E0 player-vs-unit, unit flags +0x124 bit 1 targetable, flagsEx +0x128 0x80).
+int BarbDumps = 0;
+void DumpBarbarians() noexcept {
+	using UnitFlagFn   = int (*)(void* unit) noexcept;
+	using UnitFlagExFn = int (*)(void* unit, std::uint32_t mask) noexcept;
+	using CanFn        = int (*)(void* player, void* unit, int skill) noexcept;
+	using SelectFn     = int (*)(void* unit, int x, int y, int mode, int a5) noexcept;
+	using ClientPlayer = void* (*)(int index) noexcept;
+	using ModeFn       = std::uint8_t (*)(void* unit) noexcept;
+	using Ms2Fn        = std::uint8_t* (*)(std::uint8_t mode, int monster) noexcept;
+	if (BarbDumps >= 6) return;
+	++BarbDumps;
+	const int index  = At<LocalIndexFn>(0x8B2D0)();
+	void*     player = At<ClientPlayer>(0x9A480)(index);
+	int       found  = 0;
+	try {
+		auto* table = reinterpret_cast<std::uint8_t*>(Base + 0x2A23910 + 0x400); // client units, type 1: 128 lists (next +0x158)
+		for (int bucket = 0; bucket < 128; ++bucket) {
+			int guard = 0;
+			for (auto* u = Field<std::uint8_t*>(table, bucket * 8); u && guard < 256; u = Field<std::uint8_t*>(u, 0x158), ++guard) {
+				if (Field<std::uint32_t>(u, 0) != 1) continue;
+				const std::uint32_t cls = Field<std::uint32_t>(u, 4);
+				if (cls != 522 && cls != 523 && cls != 535 && cls != 536 && cls != 511 && cls != 512) continue;
+				++found;
+				const std::uint8_t  mode = At<ModeFn>(0x34A0E0)(u);
+				const std::uint8_t* ms2  = At<Ms2Fn>(0x975B0)(mode, static_cast<int>(cls));
+				Log(false, "barb dump %d: unit %u class %u anim %u flags 0x%08X ex 0x%08X | bank %u monstats2 flags 0x%X | 34F8D0 %d targetable %d ex80 %d canInteract %d selectable %d",
+				    BarbDumps, Field<std::uint32_t>(u, 8), cls, Field<std::uint32_t>(u, 0xC), Field<std::uint32_t>(u, 0x124), Field<std::uint32_t>(u, 0x128), mode,
+				    ms2 ? Field<std::uint32_t>(ms2, 4) : 0xFFFFFFFFu, At<UnitFlagFn>(0x34F8D0)(u), At<UnitFlagFn>(0x3500E0)(u), At<UnitFlagExFn>(0x34FB00)(u, 0x80),
+				    player ? At<CanFn>(0x971E0)(player, u, -1) : -1, At<SelectFn>(0x9B840)(u, 0, 0, -1, -1));
+			}
+		}
+	} catch (...) {
+		Log(true, "barb dump: failed while reading the client units");
+	}
+	Log(false, "barb dump %d: %d town people found (player %p)", BarbDumps, found, player);
+}
+
 bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 	if (message != WM_LBUTTONDOWN || !InGame.load()) return false;
 	const int index = At<LocalIndexFn>(0x8B2D0)();
 	void*     unit  = index >= 0 && index < 8 ? At<HoveredUnitFn>(0xF1900)(index) : nullptr;
 	if (!unit && GetTickCount64() - LastLabelTick.load() < 400) unit = LastLabel.load(); // named a moment ago
-	if (TalkLogs < 12)
+	if (TalkLogs < 20 && CurrentLevel.load() == 109)
 		++TalkLogs, Log(false, "click: level %d, player %d, unit under the mouse %p (type %d, class %d, id %u)", CurrentLevel.load(), index, unit,
 		                unit ? static_cast<int>(Field<std::uint32_t>(unit, 0)) : -1, unit ? static_cast<int>(Field<std::uint32_t>(unit, 4)) : -1,
 		                unit ? Field<std::uint32_t>(unit, 8) : 0u);
+	if (CurrentLevel.load() == 109) DumpBarbarians();
 	if (CurrentLevel.load() != 109 || !unit || Field<std::uint32_t>(unit, 0) != 1) return false;
 	const std::uint32_t cls = Field<std::uint32_t>(unit, 4);
 	if (cls != CombatantA && cls != CombatantB && cls != 535 && cls != 536) return false;
@@ -2399,6 +2448,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	// New mods for the game when a zone opens.
 	AcquireSRWLockExclusive(&Lock);
 	g->seed ^= Mix(state);
+	for (auto& c : g->zoneCount) c = 0;
 	Roll(*g);
 	const std::string mods = Describe(*g);
 	ReleaseSRWLockExclusive(&Lock);
