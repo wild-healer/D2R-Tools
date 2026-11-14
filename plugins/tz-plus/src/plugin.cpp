@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.18";
+constexpr const char* PluginVersion = "0.0.19";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -139,7 +139,7 @@ constexpr int RowMinionAr = 12, RowMinionStrong = 14, RowMinionElemMin = 16, Row
 constexpr int StrongDamage[3] { 75, 114, 152 }; // row 14: Hell +49% / +75% / +100% damage
 constexpr int StrongAr[3]     { 50, 76, 114 };  // row 12: Hell +33% / +50% / +75% attack rating
 constexpr int ElemScale[3]    { 100, 150, 200 }; // rows 16-21: 33-50% / 50-75% / 66-100% of base damage
-constexpr int CursePct[3]     { 25, 50, 75 };
+constexpr int CurseLevelPct[3] { 50, 100, 150 }; // Amplify Damage level, % of the game's (monster level / 5 + 1)
 constexpr int FastMove[3]     { 0, 33, 66 };  // % run/walk speed on top of the game's Extra Fast
 constexpr int FastAttack[3]   { 0, 0, 20 };   // % attack speed
 
@@ -476,8 +476,7 @@ void SetConstants(const GameMods& g, std::uint8_t mode) noexcept {
 		const std::int32_t base = Original(mode, row);
 		SetRow(mode, row, elem ? base * ElemScale[elem - 1] / 100 : base);
 	}
-	const int curse = TierOf(g, 7);
-	SetRow(mode, RowCurse, curse ? CursePct[curse - 1] : Original(mode, RowCurse));
+	SetRow(mode, RowCurse, Original(mode, RowCurse)); // the game's chance; the tier scales the curse level (HookCurse)
 }
 
 // Back to the game's values (a game without TZ Plus).
@@ -939,7 +938,7 @@ struct SpawnHook {
 // (Lightning Enchanted's charged bolts). Teleportation has none: we add ours. The move is the game's own
 // warp for the monster teleport skill (D2R+0x5A7510, skill 0xB8 to x, y; it checks the destination).
 constexpr std::uint64_t TeleportHitSlotRva = 0x2396210 + (26 * 6 + 4) * 8, WarpRva = 0x5A7510;
-constexpr int           TeleportChance[3] { 15, 25, 35 };
+constexpr int           TeleportChance[3] { 2, 5, 15 };
 using WarpFn      = int (*)(void* game, void* unit, int skill, void* target, int x, int y) noexcept;
 using CastFn      = int (*)(void* game, void* unit, int skill, void* target, int x, int y) noexcept;
 constexpr std::uint64_t CastRva = 0x4A7CF0;
@@ -981,6 +980,33 @@ void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
 		}
 	if (slot) *slot = { unit, Field<std::uint32_t>(unit, 8), game, GetTickCount64() }, PendingCount.store(1, std::memory_order_relaxed);
 	ReleaseSRWLockExclusive(&TeleportLock);
+}
+
+bool InTzPlusZone(std::uint8_t* game, void* unit, GameMods** mods) noexcept;
+
+// D2R+0x4346F0 (game, 3, monster, level, duration, callback): Cursed's Amplify Damage around the monster,
+// only called by the Cursed handler (0x4A0970). The tier scales the level the game picked.
+constexpr std::uint64_t CurseRva = 0x4346F0;
+constexpr Code          CurseBytes { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x48, 0x89, 0x7C, 0x24, 0x18, 0x55 };
+std::uint64_t           CurseOrig {};
+
+std::uint64_t HookCurse(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d, std::uint64_t e, std::uint64_t f, std::uint64_t g7,
+                        std::uint64_t h, std::uint64_t i, std::uint64_t j, std::uint64_t k, std::uint64_t l, std::uint64_t m, std::uint64_t n) noexcept {
+	using Fn = std::uint64_t (*)(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
+                                 std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t) noexcept;
+	auto*     game = reinterpret_cast<std::uint8_t*>(a);
+	void*     unit = reinterpret_cast<void*>(c);
+	GameMods* mods = nullptr;
+	if (InTzPlusZone(game, unit, &mods)) {
+		if (int tier = TierOf(*mods, 7)) {
+			if (At<IsSpecialFn>(0x38E0E0)(unit, true)) tier = std::min(tier + 1, Ranges[mods->difficulty].maxTier);
+			const int before = static_cast<int>(d), after = std::clamp(before * CurseLevelPct[tier - 1] / 100, 1, 99);
+			d = static_cast<std::uint64_t>(after);
+			static int logs = 0;
+			if (logs < 10) ++logs, Log(false, "Cursed: monster %p, tier %d, Amplify Damage level %d -> %d", unit, tier, before, after);
+		}
+	}
+	return reinterpret_cast<Fn>(CurseOrig)(a, b, c, d, e, f, g7, h, i, j, k, l, m, n);
 }
 
 // D2R+0x4A2A00 (game, monster, ...): a monster's AI think.
@@ -1910,6 +1936,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		if (!context->InstallInlineHook(ThinkRva, ThinkBytes.data(), static_cast<std::uint32_t>(ThinkBytes.size()), reinterpret_cast<void*>(&HookThink), &original) || !original)
 			Log(true, "TZ Plus %s: Teleportation off, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(ThinkRva));
 		else ThinkOrig = reinterpret_cast<std::uint64_t>(original);
+		original = nullptr;
+		if (!context->InstallInlineHook(CurseRva, CurseBytes.data(), static_cast<std::uint32_t>(CurseBytes.size()), reinterpret_cast<void*>(&HookCurse), &original) || !original)
+			Log(true, "TZ Plus %s: Cursed keeps the game's curse level, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(CurseRva));
+		else CurseOrig = reinterpret_cast<std::uint64_t>(original);
 		original = nullptr;
 		if (!context->InstallInlineHook(ClientModEventRva, ClientModEventBytes.data(), static_cast<std::uint32_t>(ClientModEventBytes.size()), reinterpret_cast<void*>(&HookClientModEvent), &original) || !original)
 			Log(true, "TZ Plus %s: Multiple Shots not drawn on normal monsters, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(ClientModEventRva));
