@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.37";
+constexpr const char* PluginVersion = "0.0.38";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -836,7 +836,7 @@ void NoteZoneMonster(int level, std::uint16_t type, void* room) noexcept {
 	ReleaseSRWLockExclusive(&StatsLock);
 }
 
-void WriteZoneStats(GameMods& g) noexcept {
+void WriteZoneStats(GameMods& g, bool floor) noexcept {
 	AcquireSRWLockExclusive(&StatsLock);
 	try {
 		if (Stats.level) {
@@ -849,7 +849,7 @@ void WriteZoneStats(GameMods& g) noexcept {
 			const int total = g.zoneCount[0] + g.zoneCount[1] + g.zoneCount[2] + g.zoneCount[3];
 			Log(false, "zone level %d final: %d monsters: %d trash, %d champions, %d uniques, %d minions; type flags [%s]; %zu rooms with monsters", Stats.level, total,
 			    g.zoneCount[0].load(), g.zoneCount[1].load(), g.zoneCount[2].load(), g.zoneCount[3].load(), types.c_str(), Stats.rooms.size());
-			if (std::uint8_t* level = Stats.drlgLevel) {
+			if (std::uint8_t* level = floor ? Stats.drlgLevel : nullptr) {
 				int rooms = 0;
 				long long tiles = 0;
 				std::string sizes;
@@ -1580,6 +1580,8 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 		InGame = false, CurrentLevel = -1, ZonePortalOpen = false;
 		D2RGui::LeftPanel::InGame(false);
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
+		for (GameMods* g : Games)
+			if (g->zoneId) WriteZoneStats(*g, false); // a zone left open: its counts (its floor is gone with the game)
 		Games.clear();
 		Last       = nullptr;
 		RewardLogs = 0;
@@ -2351,10 +2353,43 @@ void MakeTownguardsSelectable(const D2RL::PluginContext* context, const D2RL::Da
 	}
 }
 
+// Roran (act5barb3) like the injured barbarians: Idle AI (stands still) and not killable (no life bar).
+// Found by comparing rows: the flags dword has npc/interact (bits 8, 9) on Larzuk, killable (bit 15) on the Townguard and none of
+// them on the injured barbarian, inTown (bit 10) on all three; the AI word (+0x52) is the same for Larzuk and the Townguard (Npc).
+void MakeRoranStill(const D2RL::PluginContext* context, const D2RL::DataTableService* service, int bank) noexcept {
+	using namespace D2RL::DataTables;
+	RowView larzuk { .structSize = RowViewSize }, guard { .structSize = RowViewSize }, injured { .structSize = RowViewSize };
+	if (service->getRow(context, static_cast<Bank>(bank), TableId::MonStats, 511, &larzuk) != Result::Success || !larzuk.row ||
+	    service->getRow(context, static_cast<Bank>(bank), TableId::MonStats, 535, &guard) != Result::Success || !guard.row ||
+	    service->getRow(context, static_cast<Bank>(bank), TableId::MonStats, 567, &injured) != Result::Success || !injured.row || guard.rowSize < 0x60)
+		return Log(true, "Roran: bank %d monstats rows missing, he keeps the Townguard's behaviour", bank);
+	auto*                    row  = static_cast<std::uint8_t*>(const_cast<void*>(guard.row));
+	constexpr std::uint32_t  Npc = 1u << 8, Interact = 1u << 9, InTown = 1u << 10, Killable = 1u << 15;
+	int                      flagsAt = -1, matches = 0;
+	for (int at = 0; at < 0x4C; at += 4) {
+		const std::uint32_t l = Field<std::uint32_t>(larzuk.row, at), g = Field<std::uint32_t>(row, at), i = Field<std::uint32_t>(injured.row, at);
+		if ((l & (Npc | Interact)) == (Npc | Interact) && !(l & Killable) && (g & Killable) && !(g & (Npc | Interact)) && !(i & (Npc | Interact | Killable)) &&
+		    (l & g & i & InTown))
+			flagsAt = at, ++matches;
+	}
+	if (matches == 1) {
+		const std::uint32_t before = Field<std::uint32_t>(row, flagsAt);
+		SetField<std::uint32_t>(row, flagsAt, before & ~Killable);
+		Log(false, "Roran: bank %d monstats flags at +0x%X: 0x%X -> 0x%X (not killable)", bank, flagsAt, before, Field<std::uint32_t>(row, flagsAt));
+	} else if (!(Field<std::uint32_t>(row, flagsAt < 0 ? 0 : flagsAt) & Killable) && matches == 0) {
+		Log(true, "Roran: bank %d monstats flags not found (%d matches), he keeps his life bar", bank, matches);
+	}
+	const std::uint16_t ai = Field<std::uint16_t>(row, 0x52), aiLarzuk = Field<std::uint16_t>(larzuk.row, 0x52), aiIdle = Field<std::uint16_t>(injured.row, 0x52);
+	if (ai == aiLarzuk && ai != aiIdle) {
+		SetField<std::uint16_t>(row, 0x52, aiIdle);
+		Log(false, "Roran: bank %d AI %u -> %u (Idle, stands still)", bank, ai, aiIdle);
+	} else if (ai != aiIdle) Log(true, "Roran: bank %d AI word not as expected (%u, Larzuk %u, injured %u), he keeps walking", bank, ai, aiLarzuk, aiIdle);
+}
+
 void __cdecl OnTablesLoaded(const D2RL::PluginContext* context, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
 	const auto* service = Query<D2RL::DataTableService>("data table");
 	if (service && D2RL::HasDataTableServiceField(service, D2RL::DataTableServiceRequiredSize))
-		for (int bank = 1; bank <= 3; ++bank) MakeTownguardsSelectable(context, service, bank);
+		for (int bank = 1; bank <= 3; ++bank) MakeTownguardsSelectable(context, service, bank), MakeRoranStill(context, service, bank);
 	int         base    = 0;
 	for (int bank = 1; bank <= 3; ++bank) {
 		auto* tables = Field<std::uint8_t*>(reinterpret_cast<void*>(Base + TablesRva), static_cast<std::uintptr_t>(bank) * 16);
@@ -2580,7 +2615,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	if (!tmpl) return SetPortalResult("TZ Plus zones: no dungeon to copy was found in the level tables");
 	for (int bank = 1; bank <= 3; ++bank) {
 		std::uint64_t copy = state; // the same monsters in every bank
-		SetupZone(Banks[bank], id, tmpl, copy, id + 1, id + 1); // both stairs lead to level 2
+		SetupZone(Banks[bank], id, tmpl, copy, Harrogath, id + 1); // entry stairs: back to town (HookWarp), exit stairs: level 2
 		std::uint64_t copy2 = state;
 		SetupZone(Banks[bank], id + 1, tmpl, copy2, id, 0, true); // level 2: one empty room of the same area type
 	}
@@ -2594,7 +2629,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	// New mods for the game when a zone opens.
 	AcquireSRWLockExclusive(&Lock);
 	g->seed ^= Mix(state);
-	WriteZoneStats(*g);
+	WriteZoneStats(*g, true);
 	for (auto& c : g->zoneCount) c = 0;
 	Roll(*g);
 	const std::string mods = Describe(*g);
@@ -2644,7 +2679,7 @@ void CloseZonePortal(std::uint8_t* game) noexcept {
 		if (void* room = At<UnitRoomFn>(0x34B440)(portal)) At<RoomUnitGoneFn>(0x2EF4D0)(room, 2, g->portalId);
 		At<RemoveUnitFn>(0x48FAA0)(game, portal);
 	}
-	WriteZoneStats(*g);
+	WriteZoneStats(*g, true);
 	g->portal = nullptr, g->portalId = 0, ZonePortalOpen = false;
 	SetPortalResult(portal ? "TZ Plus zones: the zone portal is closed" : "TZ Plus zones: the zone portal was already gone");
 }
@@ -2739,6 +2774,41 @@ void OpenExitPortal(std::uint8_t* game) noexcept {
 	}
 }
 
+// Warps (D2R+0x488180 (game, unit, level, reason)): a zone's entry stairs lead to Harrogath; sent as a waypoint arrival
+// (reason 0xD: the game puts you at Harrogath's waypoint) since Harrogath has no stairs back to the zone.
+constexpr std::uint64_t LevelWarpRva = 0x488180;
+constexpr std::array<std::uint8_t, 15> LevelWarpBytes { 0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x48, 0x89, 0x68, 0x18, 0x56, 0x57, 0x41, 0x54 };
+using LevelWarpFn = std::uint64_t (*)(void* game, void* unit, int level, int reason) noexcept;
+LevelWarpFn           WarpOrig {};
+std::atomic<int> WarpLogs { 0 };
+
+std::uint64_t HookWarp(void* game, void* unit, int level, int reason) noexcept {
+	const int base = ZoneBase.load(std::memory_order_relaxed);
+	if (base > 0 && unit) {
+		void*     room = At<UnitRoomFn>(0x34B440)(unit);
+		const int from = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
+		if (from >= base && from < base + ZoneSlots) {
+			const bool toTown = level == Harrogath && reason != 0xD;
+			if (WarpLogs.fetch_add(1) < 20)
+				Log(false, "warp: unit type %u from level %d to level %d (reason 0x%X)%s", Field<std::uint32_t>(unit, 0), from, level, reason,
+				    toTown ? ", the entry stairs: sent to Harrogath's waypoint" : "");
+			if (toTown) reason = 0xD;
+		}
+	}
+	return WarpOrig(game, unit, level, reason);
+}
+
+// Roran's name (the client's unit name, D2R+0x9A1B0 (unit)).
+constexpr std::uint64_t UnitNameRva = 0x9A1B0;
+constexpr std::array<std::uint8_t, 12> UnitNameBytes { 0x40, 0x53, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x40, 0x4C, 0x8B, 0xF1 };
+using UnitNameFn = const char* (*)(void* unit) noexcept;
+UnitNameFn UnitNameOrig {};
+
+const char* HookUnitName(void* unit) noexcept {
+	if (unit && Field<std::uint32_t>(unit, 0) == 1 && Field<std::uint32_t>(unit, 4) == 535 && CurrentLevel.load(std::memory_order_relaxed) == 109) return "Roran Stronghammer";
+	return UnitNameOrig(unit);
+}
+
 // Roran Stronghammer: an Act 5 Townguard (act5barb3) put at the fire south of Harrogath's waypoint once a player is near.
 // Spawn: D2R+0x492CF0 (game, room, x, y, monster, mode, a7, a8), as the game's own calls do (a7 -1 then 4, a8 0x42).
 // Room at a spot: D2R+0x38DFB0 (room near it, x, y).
@@ -2795,6 +2865,16 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
 	if (!PatchCall(PortalSpotCallRva, RoomHasRva, reinterpret_cast<const void*>(&HookPortalSpot), { 0x49, 0x89, 0xE9 })) // mov r9, rbp
 		Log(true, "zones: portal spot not logged, could not patch D2R+0x%llX", static_cast<unsigned long long>(PortalSpotCallRva));
+	{
+		void* original = nullptr;
+		if (!context->InstallInlineHook(LevelWarpRva, LevelWarpBytes.data(), static_cast<std::uint32_t>(LevelWarpBytes.size()), reinterpret_cast<void*>(&HookWarp), &original) || !original)
+			Log(true, "zones: the entry stairs lead nowhere safe, could not hook D2R+0x%llX", static_cast<unsigned long long>(LevelWarpRva));
+		else WarpOrig = reinterpret_cast<LevelWarpFn>(original);
+		original = nullptr;
+		if (!context->InstallInlineHook(UnitNameRva, UnitNameBytes.data(), static_cast<std::uint32_t>(UnitNameBytes.size()), reinterpret_cast<void*>(&HookUnitName), &original) || !original)
+			Log(true, "zones: Roran keeps the Townguard's name, could not hook D2R+0x%llX", static_cast<unsigned long long>(UnitNameRva));
+		else UnitNameOrig = reinterpret_cast<UnitNameFn>(original);
+	}
 	if (!PatchCall(PortalNameCallRva, ObjectLevelRva, reinterpret_cast<const void*>(&HookPortalLevel)))
 		Log(true, "zones: portals keep the game's name, could not patch D2R+0x%llX", static_cast<unsigned long long>(PortalNameCallRva));
 	std::uint8_t thunk[6] {};
