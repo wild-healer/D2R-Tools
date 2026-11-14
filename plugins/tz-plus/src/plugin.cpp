@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.27";
+constexpr const char* PluginVersion = "0.0.28";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1135,6 +1135,43 @@ std::uint64_t HookModEvent(std::uint64_t a, std::uint64_t b, std::uint64_t c, st
 	return result;
 }
 
+// Poison: 0x4518C0(attacker, defender, damage, length, ...) puts the poison state on the defender (called at 0x44D21A,
+// 0x44D262, 0x44D380 from the hit code). A hit weaker than the poison already running is dropped by the game, so it
+// doesn't even refresh it. In TZ Plus games every hit refreshes the duration and the strongest damage stays: never more
+// time than one hit's length, never more damage than one hit. A Poison Enchanted monster's hits last its poison length.
+constexpr std::uint64_t PoisonRva = 0x4518C0;
+constexpr std::uint64_t PoisonCallRvas[] { 0x44D21A, 0x44D262, 0x44D380 };
+using PoisonFn     = void (*)(void* attacker, void* defender, int damage, int length, int a5, int a6, int a7) noexcept;
+using GameOfUnitFn = std::uint8_t* (*)(void* unit) noexcept;
+using StateListFn  = void* (*)(void* unit, int state) noexcept;
+using ListStatFn   = std::int32_t (*)(std::uint8_t mode, void* list, int stat, int layer) noexcept;
+int PoisonLogs = 0;
+
+void HookPoison(void* attacker, void* defender, int damage, int length, int a5, int a6, int a7) noexcept {
+	if (attacker && defender && damage > 0 && length > 0 && Config.enabled.load(std::memory_order_relaxed)) {
+		std::uint8_t* game = At<GameOfUnitFn>(0x48FF00)(attacker);
+		if (game && ModsOf(game)) {
+			const int asked = length, rolled = damage;
+			GameMods* mods  = nullptr;
+			if (InTzPlusZone(game, attacker, &mods) && TierOf(*mods, 0, Kind::Poison)) {
+				const int own = GetStat(attacker, StatPoisonLength);
+				if (own > 0 && length > own) length = own;
+			}
+			int old = 0;
+			if (void* list = At<StateListFn>(0x2F5940)(defender, 2)) {
+				old = -At<ListStatFn>(0x2F5DF0)(Field<std::uint8_t>(game, GameMode), list, 0x4A, 0);
+				if (old > damage) damage = old; // a weaker hit refreshes the running poison
+			}
+			if (PoisonLogs < 30) {
+				++PoisonLogs;
+				Log(false, "poison on %s (attacker type %d): damage %d (rolled %d, running %d), length %d (asked %d)",
+				    Field<std::uint32_t>(defender, 0) == 0 ? "player" : "monster", static_cast<int>(Field<std::uint32_t>(attacker, 0)), damage, rolled, old, length, asked);
+			}
+		}
+	}
+	At<PoisonFn>(PoisonRva)(attacker, defender, damage, length, a5, a6, a7);
+}
+
 // Missiles take another way: 0x499160(game, monster, missile) runs the mods' event 5 (Multiple Shots)
 // from missile creation (call at 0x537B96), with the same "is unique" rule. We raise the flag there too,
 // and give the missiles of a Poison Enchanted monster a third of its poison (missiles hit with their own stats).
@@ -1847,7 +1884,7 @@ void WatchWindow() {
 }
 
 // ---- the fire barbarian (an Act 5 Combatant in Harrogath): a click on him opens his menu ----
-constexpr std::uint32_t CombatantA = 523, CombatantB = 524; // monstats act5barb1/act5barb2
+constexpr std::uint32_t CombatantA = 522, CombatantB = 523; // monstats ids of act5barb1/act5barb2 (act5barb3/4, the Townguards: 535/536)
 using HoveredUnitFn = void* (*)(int index) noexcept;     // the unit under the mouse of a local player (D2R+0xF1900)
 int TalkLogs = 0;
 
@@ -1884,7 +1921,7 @@ bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 		                unit ? Field<std::uint32_t>(unit, 8) : 0u);
 	if (CurrentLevel.load() != 109 || !unit || Field<std::uint32_t>(unit, 0) != 1) return false;
 	const std::uint32_t cls = Field<std::uint32_t>(unit, 4);
-	if (cls != CombatantA && cls != CombatantB && cls != 536 && cls != 537) return false;
+	if (cls != CombatantA && cls != CombatantB && cls != 535 && cls != 536) return false;
 	Gui::Commands::Post("talk");
 	return false; // the click goes on: you walk to him
 }
@@ -1989,7 +2026,10 @@ constexpr std::uintptr_t LevelsVec = 0x1460, DefsVec = 0x14A0, MazeVec = 0x18C0;
 constexpr std::size_t    LevelRow = 0x18C, DefRow = 0x9C, MazeRow = 0x1C;
 constexpr std::uintptr_t LvId = 4, LvPal = 12, LvAct = 13, LvQuest = 56, LvNumMon = 58, LvMonCount = 59, LvMon = 62, LvNMon = 112, LvUMon = 162,
                          LvWaypoint = 236, LvName = 253, LvWarpName = 293, LvEntryName = 333, LvDen = 36;
-constexpr int            ZoneDensity = 3000; // monster density of every zone (vanilla dungeons: Pit 600, Crypt 1056, Stony Tomb 2200)
+constexpr int            ZoneDensity = 3000; // monster density of a zone whose monsters come in groups of GroupRef (vanilla: Pit 600, Crypt 1056, Stony Tomb 2200, Cow Level 800)
+constexpr int            GroupRef = 25;      // x10: the average group (with minions) ZoneDensity is tuned for; zones of bigger groups get fewer of them
+constexpr std::uintptr_t MonStatsVec = 0xF58; // MonStats {rows, count}: row 0x1FC, minion1 word +0x5A, PartyMin/Max +0x62/+0x63, MinGrp/MaxGrp +0x65/+0x66
+constexpr std::size_t    MonStatsRow = 0x1FC;
 constexpr int            ZoneArea    = 2304; // map size of every zone: rooms x room width x room height (Pit, Crypt, Cave in Hell)
 constexpr int            SafeRadius  = 30;   // no monster spawns this close to the zone's entry portal
 constexpr std::uintptr_t DefQuest = 0, DefQuestEx = 4, DefDrlg = 48, DefType = 52, DefDepend = 44, DefVis = 72, DefWarp = 104;
@@ -2077,6 +2117,23 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state) noexcept {
 		for (const std::uintptr_t list : { LvMon, LvNMon, LvUMon })
 			for (int i = 0; i < MonSlots; ++i) SetField<std::int16_t>(row, list + i * 2, i < count ? picks[i] : static_cast<std::int16_t>(-1));
 		for (int i = 0; i < 3; ++i) SetField<std::uint8_t>(row, LvMonCount + i, static_cast<std::uint8_t>(count));
+		// The same number of monsters in every zone: density scaled by the average group size of the picks.
+		const auto* stats = Field<std::uint8_t*>(b.tables, MonStatsVec);
+		const auto  total = Field<std::uint64_t>(b.tables, MonStatsVec + 8);
+		int         sum = 0, counted = 0;
+		for (int i = 0; stats && i < count; ++i) {
+			if (picks[i] < 0 || static_cast<std::uint64_t>(picks[i]) >= total) continue;
+			const std::uint8_t* m     = stats + picks[i] * MonStatsRow;
+			const int           lo    = Field<std::uint8_t>(m, 0x65), hi = std::max<int>(lo, Field<std::uint8_t>(m, 0x66));
+			const std::uint16_t minion = Field<std::uint16_t>(m, 0x5A);
+			int                 group = std::max(10, (lo + hi) * 5);
+			if (minion != 0xFFFF && static_cast<std::uint64_t>(minion) < total) group += (Field<std::uint8_t>(m, 0x62) + Field<std::uint8_t>(m, 0x63)) * 5;
+			sum += group, ++counted;
+		}
+		if (counted) {
+			const int density = std::clamp(ZoneDensity * GroupRef * counted / sum, ZoneDensity / 4, ZoneDensity * 2);
+			for (const std::uintptr_t den : { LvDen, LvDen + 4, LvDen + 8 }) SetField<std::int32_t>(row, den, density);
+		}
 	}
 	std::uint8_t* def = b.defs + id * DefRow;
 	std::memcpy(def, b.defs + tmpl * DefRow, DefRow);
@@ -2358,8 +2415,8 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		ZonePortals[PortalCursor++ % 64] = { Field<std::uint32_t>(portal, 8), id };
 		ReleaseSRWLockExclusive(&PortalLock);
 	}
-	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d), monsters [%s]; new mods: %s", g->zonesUsed, ZoneSlots, id,
-	                LevelName(Banks[mode], tmpl).c_str(), tmpl, monsters.c_str(), mods.c_str());
+	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d), monsters [%s], density %d; new mods: %s", g->zonesUsed, ZoneSlots, id,
+	                LevelName(Banks[mode], tmpl).c_str(), tmpl, monsters.c_str(), Field<std::int32_t>(Banks[mode].levels + id * LevelRow, LvDen + 8), mods.c_str());
 }
 
 using RemoveUnitFn   = void (*)(void* game, void* unit) noexcept;
@@ -2574,6 +2631,9 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 			Log(true, "TZ Plus %s: Multiple Shots not drawn on normal monsters, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(ClientModEventRva));
 		else ClientModEventOrig = reinterpret_cast<std::uint64_t>(original);
 	}
+	for (const std::uint64_t site : PoisonCallRvas)
+		if (!PatchCall(site, PoisonRva, reinterpret_cast<const void*>(&HookPoison)))
+			Log(true, "TZ Plus %s: poison hits may stack, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(site));
 	if (!PatchCall(MissileEventCallRva, MissileEventRva, reinterpret_cast<const void*>(&HookMissileEvent)))
 		Log(true, "TZ Plus %s: Multiple Shots and ranged poison off, could not patch D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(MissileEventCallRva));
 	if (!PatchCall(NameTerrorCallRva, 0x3AF200, reinterpret_cast<const void*>(&HookNameTerror)))
