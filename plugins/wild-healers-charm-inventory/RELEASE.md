@@ -1,5 +1,16 @@
 # Wild Healer's Charm Inventory 1.1.2: release texts
 
+## Test build 1.1.2-dev-1 (not released)
+
+```
+**Wild Healer's Charm Inventory 1.1.2-dev-1**
+
+**New**
+
+* The button, panel and cells are now made with the D2R GUI library, shared with the other wild-healer plugins.
+* The panel uses the character screen's background, as I Hate TOMLs does.
+```
+
 ## Patch notes
 
 ```
