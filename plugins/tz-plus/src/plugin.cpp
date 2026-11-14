@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.28";
+constexpr const char* PluginVersion = "0.0.29";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2153,18 +2153,33 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state) noexcept {
 
 // The Act 5 Townguards (act5barb3/4, the barbarians standing at Harrogath's fires) can't be selected (monstats2 noSel):
 // made selectable like the Combatants, so they show their name and can be clicked. monstats2 flags: dword +4, isSel bit 3, noSel bit 5.
-constexpr std::uint32_t Townguards[] { 536, 537 }, CombatantRow = 523;
+constexpr std::uint32_t Townguards[] { 535, 536 }, Combatant = 522; // monstats ids (act5barb3/4, act5barb1)
 constexpr std::uint32_t SelIs = 1u << 3, SelNo = 1u << 5;
 
-void MakeTownguardsSelectable(const D2RL::PluginContext* context, const D2RL::DataTableService* service, int bank) noexcept {
+// The monstats2 row of a monster: MonStats word +0x4C (the table skips the "Expansion" line, so ids and rows differ).
+const void* MonStats2Row(const D2RL::PluginContext* context, const D2RL::DataTableService* service, int bank, std::uint32_t monster, std::uint32_t* index) noexcept {
 	using namespace D2RL::DataTables;
-	RowView combatant { .structSize = RowViewSize };
-	if (service->getRow(context, static_cast<Bank>(bank), TableId::MonStats2, CombatantRow, &combatant) != Result::Success || !combatant.row || combatant.rowSize < 8) return;
-	const std::uint32_t known = Field<std::uint32_t>(combatant.row, 4);
-	for (const std::uint32_t index : Townguards) {
-		RowView guard { .structSize = RowViewSize };
-		if (service->getRow(context, static_cast<Bank>(bank), TableId::MonStats2, index, &guard) != Result::Success || !guard.row) continue;
-		auto*               row   = const_cast<void*>(guard.row);
+	RowView stats { .structSize = RowViewSize };
+	if (service->getRow(context, static_cast<Bank>(bank), TableId::MonStats, monster, &stats) != Result::Success || !stats.row || stats.rowSize < 0x4E) return nullptr;
+	const std::int16_t row = Field<std::int16_t>(stats.row, 0x4C);
+	RowView            view { .structSize = RowViewSize };
+	if (row < 0 || service->getRow(context, static_cast<Bank>(bank), TableId::MonStats2, static_cast<std::uint32_t>(row), &view) != Result::Success || !view.row || view.rowSize < 8) return nullptr;
+	*index = static_cast<std::uint32_t>(row);
+	return view.row;
+}
+
+void MakeTownguardsSelectable(const D2RL::PluginContext* context, const D2RL::DataTableService* service, int bank) noexcept {
+	std::uint32_t index = 0;
+	const void*   combatant = MonStats2Row(context, service, bank, Combatant, &index);
+	if (!combatant) return;
+	const std::uint32_t known = Field<std::uint32_t>(combatant, 4);
+	for (const std::uint32_t monster : Townguards) {
+		const void* guard = MonStats2Row(context, service, bank, monster, &index);
+		if (!guard) {
+			Log(true, "zones: bank %d monster %u has no monstats2 row, the townguard stays unselectable", bank, monster);
+			continue;
+		}
+		auto*               row   = const_cast<void*>(guard);
 		const std::uint32_t flags = Field<std::uint32_t>(row, 4);
 		if ((flags & SelIs) && !(flags & SelNo)) continue; // done already (banks can share tables)
 		if (!(known & SelIs) || (known & SelNo) || !(flags & SelNo)) {
@@ -2172,7 +2187,7 @@ void MakeTownguardsSelectable(const D2RL::PluginContext* context, const D2RL::Da
 			continue;
 		}
 		SetField<std::uint32_t>(row, 4, (flags | SelIs) & ~SelNo);
-		Log(false, "zones: bank %d townguard (monstats2 %u) made selectable, flags 0x%X -> 0x%X", bank, index, flags, Field<std::uint32_t>(row, 4));
+		Log(false, "zones: bank %d townguard %u (monstats2 %u) made selectable, flags 0x%X -> 0x%X", bank, monster, index, flags, Field<std::uint32_t>(row, 4));
 	}
 }
 
