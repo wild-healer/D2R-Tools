@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.35";
+constexpr const char* PluginVersion = "0.0.36";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -856,7 +856,9 @@ void WriteZoneStats(GameMods& g) noexcept {
 					tiles += static_cast<long long>(w) * h;
 					if (rooms < 64) {
 						char item[48];
-						std::snprintf(item, sizeof(item), "%s%dx%d%s", sizes.empty() ? "" : " ", w, h, (Field<std::uint32_t>(r, 0x50) & 0x30) ? ((Field<std::uint32_t>(r, 0x50) & 0x10) ? "(entry)" : "(exit)") : "");
+						if (const std::uint32_t vis = Field<std::uint32_t>(r, 0x50) & 0xFF0)
+							std::snprintf(item, sizeof(item), "%s%dx%d@%d,%d(stairs 0x%X)", sizes.empty() ? "" : " ", w, h, Field<std::int32_t>(r, 0x60), Field<std::int32_t>(r, 0x64), vis);
+						else std::snprintf(item, sizeof(item), "%s%dx%d", sizes.empty() ? "" : " ", w, h);
 						sizes += item;
 					}
 				}
@@ -2279,9 +2281,17 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state, int vis0 = 0
 	SetField<std::int32_t>(def, DefQuest, 0);
 	SetField<std::int32_t>(def, DefQuestEx, 0);
 	SetField<std::int32_t>(def, DefDepend, 0);
+	// Keep the template's stair tiles (its first two warps) so the maze builds real entry and exit rooms.
+	std::int32_t warps[2] { -1, -1 };
+	for (int i = 0, k = 0; i < 8 && k < 2; ++i)
+		if (const std::int32_t w = Field<std::int32_t>(def, DefWarp + i * 4); w >= 0 && Field<std::int32_t>(def, DefVis + i * 4) > 0) warps[k++] = w;
+	if (warps[1] < 0) warps[1] = warps[0];
 	for (int i = 0; i < 8; ++i) SetField<std::int32_t>(def, DefVis + i * 4, 0), SetField<std::int32_t>(def, DefWarp + i * 4, -1);
 	SetField<std::int32_t>(def, DefVis, vis0);
+	SetField<std::int32_t>(def, DefWarp, vis0 ? warps[0] : -1);
 	SetField<std::int32_t>(def, DefVis + 4, vis1);
+	SetField<std::int32_t>(def, DefWarp + 4, vis1 ? warps[1] : -1);
+	Log(false, "zones: level %d from template %d: vis %d/%d, warps %d/%d", id, tmpl, vis0, vis1, vis0 ? warps[0] : -1, vis1 ? warps[1] : -1);
 	if (empty) {
 		for (const std::uintptr_t den : { LvDen, LvDen + 4, LvDen + 8 }) SetField<std::int32_t>(row, den, 0);
 		for (int i = 0; i < 6; ++i) SetField<std::uint8_t>(row, 48 + i, 0); // MonUMin/MonUMax
@@ -2535,7 +2545,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	if (!tmpl) return SetPortalResult("TZ Plus zones: no dungeon to copy was found in the level tables");
 	for (int bank = 1; bank <= 3; ++bank) {
 		std::uint64_t copy = state; // the same monsters in every bank
-		SetupZone(Banks[bank], id, tmpl, copy, Harrogath, id + 1);
+		SetupZone(Banks[bank], id, tmpl, copy, id + 1, id + 1); // both stairs lead to level 2
 		std::uint64_t copy2 = state;
 		SetupZone(Banks[bank], id + 1, 9, copy2, id, 0, true); // level 2: one large cave room (Cave Level 2 rooms are 24x24 tiles)
 	}
@@ -2663,7 +2673,11 @@ void OpenExitPortal(std::uint8_t* game) noexcept {
 		if (!level) return;
 		int guardRooms = 0;
 		for (auto* r = Field<std::uint8_t*>(level, 0x10); r && guardRooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++guardRooms) {
-			if (!(Field<std::uint32_t>(r, 0x50) & 0x20)) continue;
+			if (!(Field<std::uint32_t>(r, 0x50) & 0xFF0)) continue; // a stair room
+			const int rx = Field<std::int32_t>(r, 0x60), ry = Field<std::int32_t>(r, 0x64);
+			if (g->safeLevel == g->zoneId && g->safeX / 5 >= rx && g->safeX / 5 < rx + Field<std::int32_t>(r, 0x68) && g->safeY / 5 >= ry &&
+			    g->safeY / 5 < ry + Field<std::int32_t>(r, 0x6C))
+				continue; // the entry portal's room
 			void* exitRoom = Field<void*>(r, 0x58);
 			if (!exitRoom) return; // not loaded yet
 			Coord spot { (Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2) * 5, (Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2) * 5 };
