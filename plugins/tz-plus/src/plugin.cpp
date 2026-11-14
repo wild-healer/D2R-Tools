@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.34";
+constexpr const char* PluginVersion = "0.0.35";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2003,41 +2003,47 @@ void DumpBarbarians() noexcept {
 	using ModeFn       = std::uint8_t (*)(void* unit) noexcept;
 	using Ms2Fn        = std::uint8_t* (*)(std::uint8_t mode, int monster) noexcept;
 	using CoordsFn = void (*)(void* unit, void* coord) noexcept;
-	static std::uint32_t seen[128] {};
+	static std::uint32_t seen[512] {};
 	static int           seenCount = 0;
 	if (BarbDumps >= 200) return;
 	++BarbDumps;
 	const int index  = At<LocalIndexFn>(0x8B2D0)();
 	void*     player = At<ClientPlayer>(0x9A480)(index);
-	int       found  = 0;
 	std::int32_t at[2] {};
 	if (player) At<CoordsFn>(0x34A040)(player, at);
 	Log(false, "barb dump %d: player at %d,%d", BarbDumps, at[0], at[1]);
 	try {
-		auto* table = reinterpret_cast<std::uint8_t*>(Base + 0x2A23910 + 0x400); // client units, type 1: 128 lists (next +0x158)
-		for (int bucket = 0; bucket < 128; ++bucket) {
-			int guard = 0;
-			for (auto* u = Field<std::uint8_t*>(table, bucket * 8); u && guard < 256; u = Field<std::uint8_t*>(u, 0x158), ++guard) {
-				if (Field<std::uint32_t>(u, 0) != 1) continue;
-				const std::uint32_t cls = Field<std::uint32_t>(u, 4);
-				++found;
-				const std::uint32_t id = Field<std::uint32_t>(u, 8);
-				if (std::find(seen, seen + seenCount, id) != seen + seenCount || seenCount >= 128) continue;
-				seen[seenCount++] = id;
-				std::int32_t xy[2] {};
-				At<CoordsFn>(0x34A040)(u, xy);
-				const std::uint8_t  mode = At<ModeFn>(0x34A0E0)(u);
-				const std::uint8_t* ms2  = At<Ms2Fn>(0x975B0)(mode, static_cast<int>(cls));
-				Log(false, "barb dump %d: unit %u class %u at %d,%d anim %u flags 0x%08X ex 0x%08X | bank %u monstats2 flags 0x%X | 34F8D0 %d targetable %d ex80 %d canInteract %d selectable %d",
-				    BarbDumps, id, cls, xy[0], xy[1], Field<std::uint32_t>(u, 0xC), Field<std::uint32_t>(u, 0x124), Field<std::uint32_t>(u, 0x128), mode,
-				    ms2 ? Field<std::uint32_t>(ms2, 4) : 0xFFFFFFFFu, At<UnitFlagFn>(0x34F8D0)(u), At<UnitFlagFn>(0x3500E0)(u), At<UnitFlagExFn>(0x34FB00)(u, 0x80),
-				    player ? At<CanFn>(0x971E0)(player, u, -1) : -1, At<SelectFn>(0x9B840)(u, 0, 0, -1, -1));
+		for (const std::uint32_t type : { 1u, 2u, 5u }) { // monsters, objects, tiles
+			auto* table = reinterpret_cast<std::uint8_t*>(Base + 0x2A23910 + type * 0x400); // client units: 128 lists (next +0x158)
+			for (int bucket = 0; bucket < 128; ++bucket) {
+				int guard = 0;
+				for (auto* u = Field<std::uint8_t*>(table, bucket * 8); u && guard < 256; u = Field<std::uint8_t*>(u, 0x158), ++guard) {
+					if (Field<std::uint32_t>(u, 0) != type) continue;
+					const std::uint32_t cls = Field<std::uint32_t>(u, 4);
+					const std::uint32_t id  = Field<std::uint32_t>(u, 8);
+					const std::uint32_t key = type << 28 | (id & 0x0FFFFFFF);
+					if (std::find(seen, seen + seenCount, key) != seen + seenCount || seenCount >= 512) continue;
+					std::int32_t xy[2] {};
+					At<CoordsFn>(0x34A040)(u, xy);
+					if (player && (std::abs(xy[0] - at[0]) > 40 || std::abs(xy[1] - at[1]) > 40)) continue; // log it once it's near
+					seen[seenCount++] = key;
+					if (type != 1) {
+						Log(false, "barb dump %d: %s %u class %u at %d,%d anim %u flags 0x%08X ex 0x%08X", BarbDumps, type == 2 ? "object" : "tile", id, cls, xy[0], xy[1],
+						    Field<std::uint32_t>(u, 0xC), Field<std::uint32_t>(u, 0x124), Field<std::uint32_t>(u, 0x128));
+						continue;
+					}
+					const std::uint8_t  mode = At<ModeFn>(0x34A0E0)(u);
+					const std::uint8_t* ms2  = At<Ms2Fn>(0x975B0)(mode, static_cast<int>(cls));
+					Log(false, "barb dump %d: unit %u class %u at %d,%d anim %u flags 0x%08X ex 0x%08X | bank %u monstats2 flags 0x%X | 34F8D0 %d targetable %d ex80 %d canInteract %d selectable %d",
+					    BarbDumps, id, cls, xy[0], xy[1], Field<std::uint32_t>(u, 0xC), Field<std::uint32_t>(u, 0x124), Field<std::uint32_t>(u, 0x128), mode,
+					    ms2 ? Field<std::uint32_t>(ms2, 4) : 0xFFFFFFFFu, At<UnitFlagFn>(0x34F8D0)(u), At<UnitFlagFn>(0x3500E0)(u), At<UnitFlagExFn>(0x34FB00)(u, 0x80),
+					    player ? At<CanFn>(0x971E0)(player, u, -1) : -1, At<SelectFn>(0x9B840)(u, 0, 0, -1, -1));
+				}
 			}
 		}
 	} catch (...) {
 		Log(true, "barb dump: failed while reading the client units");
 	}
-	(void)found;
 }
 
 bool OnGameMessage(UINT message, WPARAM, LPARAM) {
