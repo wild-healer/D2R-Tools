@@ -93,6 +93,24 @@ the UI thread.
 - **Two scaling styles.** Bilinear, as I Hate TOMLs uses, and area average, as Grail On! uses.
 - **Picture tools.** Icons from masks, glows, ring charts, gems and gold rules.
 
+## Icons
+
+120 icons from [game-icons.net](https://game-icons.net), at any size and in
+any colour: gear, weapons, classes, potions, menus and buttons.
+
+```cpp
+#include <d2r_gui/icons.h>
+
+c += Gui::Image("Settings", 40, 40, Gui::Icons::Sprite("cog", 64, {215, 200, 150}));
+```
+
+![The icon set](docs/icons.png)
+
+Another of the site's 4000 icons is one line in `tools/gen_icons.py`. The
+set is opt-in, so a plugin that doesn't use icons doesn't carry them. The
+icons are CC BY 3.0: a plugin that uses them credits them
+([ICONS-CREDITS.txt](ICONS-CREDITS.txt)).
+
 ## Text and languages
 
 - **Translated strings** in all 13 of the game's languages, named from layouts as `@my-plugin:Key`.

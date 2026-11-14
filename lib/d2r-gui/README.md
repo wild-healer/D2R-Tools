@@ -58,6 +58,7 @@ button and a long scrolling list. Console command `guidemo`.
 | `stash_art.h`, `stash_kit.h` | the stash and settings art at any size (ticks, arrows, boxes, tiles, table rows, chart) | Grail On! |
 | `item_grid.h` | the plugin's item grid drawn its way: half-cell tiles, peeking past the grid, no cannot-wear colour | Grail On! |
 | `panels.h` | `SinglePanel` (one panel, a new layout per show) and `ViewCache` (many panels that each keep a view) | Grail On! |
+| `icons.h` (opt-in) | 120 game-icons.net icons at any size and colour, as pictures or sprites ([preview](docs/icons.png), [credits](ICONS-CREDITS.txt)) | Grail On! |
 
 ## Rules the library follows
 

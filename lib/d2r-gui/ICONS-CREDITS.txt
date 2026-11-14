@@ -1,0 +1,27 @@
+Icons (include/d2r_gui/icons_data.inc, docs/icons.png): game-icons.net
+(https://game-icons.net), licensed under CC BY 3.0
+(https://creativecommons.org/licenses/by/3.0/).
+
+By the game-icons.net contributors (Lorc, Delapouite and others):
+visored-helm, breastplate, chest-armor, round-shield, templar-shield,
+gauntlet, boots, belt, horned-helm, wolf-head, totem-head, black-knight-helm,
+battle-axe, broadsword, rune-sword, crossed-swords, plain-dagger, thrown-
+daggers, pocket-bow, crossbow, stone-spear, trident, halberd, spiked-mace,
+winged-scepter, wizard-staff, crystal-wand, crystal-ball, wolverine-claws,
+evil-book, spell-book, open-book, ring, gem-pendant, cut-diamond, rune-stone,
+gems, crystal-cluster, gold-stack, coins, swap-bag, backpack, chest, open-
+treasure-chest, woman-elf-face, ninja-head, barbarian, bear-head, dread-skull,
+witch-face, warlock-hood, potion-ball, heart-bottle, magic-potion, vial,
+poison-bottle, scroll-unfurled, scroll-quill, treasure-map, key, wax-seal,
+holy-grail, trophy-cup, crown, star-medal, swords-emblem, rank-1, rank-2,
+rank-3, upgrade, flag-objective, target-arrows, death-skull, horned-skull,
+skull-crossed-bones, dragon-head, castle, portal, campfire, anvil, anvil-
+impact, hourglass, stopwatch, fire, ice-bolt, lightning-branches, bolt-shield,
+sword-clash, pentagram-rose, sun, moon, world, compass, hand, feather,
+histogram, pie-chart, linked-rings, checklist, eyeball, magnifying-glass, cog,
+cycle, anticlockwise-rotation, dice-six-faces-five, gift-of-knowledge, quill-
+ink, pencil, check-mark, cancel, broom, trash-can, save, padlock, padlock-
+open, bookmarklet, info, help, hazard-sign, exit-door.
+
+Rendered as coverage masks, resized and recoloured (tools/gen_icons.py).
+A plugin that uses them carries this credit (README and DLL).
