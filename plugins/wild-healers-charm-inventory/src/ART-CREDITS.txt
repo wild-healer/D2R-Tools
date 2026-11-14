@@ -1,8 +1,9 @@
-Panel frame pieces and cell (src/frame_art.inc): cropped from the stash art
-Grail On! packages (plugins/grail-on/src/art/stash.png) by tools/make_art.py.
+Charm icon: "rune-stone" from game-icons.net (https://game-icons.net), by the
+game-icons.net contributors (Lorc, Delapouite and others), licensed under
+CC BY 3.0 (https://creativecommons.org/licenses/by/3.0/). It comes from the
+D2R GUI library's icon set (lib/d2r-gui/ICONS-CREDITS.txt), recoloured and
+resized for the button.
 
-Charm icon (src/charm_icon.inc): "rune-stone" from game-icons.net
-(https://game-icons.net), by the game-icons.net contributors (Lorc, Delapouite
-and others), licensed under CC BY 3.0
-(https://creativecommons.org/licenses/by/3.0/). Recoloured and resized for the
-plugin.
+The inventory button's mold and the cells' slot art come from the D2R GUI
+library (lib/d2r-gui); the panel's background is the game's own character
+screen art.

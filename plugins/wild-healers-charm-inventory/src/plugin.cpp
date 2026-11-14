@@ -1,23 +1,24 @@
 // Wild Healer's Charm Inventory: a charm grid on Player Page Host's page.
 //   - reserves one area of the host's page (10x4 by default, the size of the inventory),
 //     with active charms, and takes only charms;
-//   - shows it in a game-style left panel: the stash frame Run Counter ships
-//     (its border in src/frame_art.inc, the plain stone inside drawn here), and the
-//     area's cells;
-//   - a button on the inventory's left edge, made like Grail On!'s (the mold
-//     and Grail On!'s charm category icon), under Grail On!'s, opens and
-//     closes it;
+//   - shows it in a game-style left panel (D2R GUI's character screen window)
+//     with the area's cells;
+//   - a button on the inventory's left edge (D2R GUI's inventory button, the
+//     "rune-stone" icon), under Grail On!'s, opens and closes it;
 //   - charms in the normal inventory give no bonus (the local player's), and
 //     the charm inventory holds one of each unique charm (a second copy can
 //     only be swapped with the first);
 //   - every setting applies at once, from the config or I Hate TOMLs.
+// Every window part comes from the D2R GUI library (lib/d2r-gui).
 #include "page_host_api.h"
 #include "i_hate_tomls_client.h"
+
+#include <d2r_gui.h>
+#include <d2r_gui/icons.h>
 
 #include <windows.h>
 #include <algorithm>
 #include <atomic>
-#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -27,18 +28,13 @@
 #include <string_view>
 #include <vector>
 
-#include "mold.inc"
-#include "charm_icon.inc"
-#include "frame_art.inc"
-
 namespace {
 
-namespace Comm   = D2RL::PluginCommunication;
-namespace Events = D2RL::SharedEvents;
+namespace Comm = D2RL::PluginCommunication;
+namespace Gui  = D2RGui;
 
 constexpr const char* PluginId      = "wild-healers-charm-inventory";
-constexpr const char* PluginVersion = "1.1.2";
-constexpr const char* CommandPrefix = "wild-healers-charm-inventory/Cmd-";
+constexpr const char* PluginVersion = "1.1.2-dev-1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -53,9 +49,6 @@ const D2RL::PluginInfo Info {
 
 const D2RL::PluginContext*              Context {};
 const D2RL::PluginCommunicationService* CommApi {};
-const D2RL::ResourceService*            ResourceApi {};
-const D2RL::PanelService*               PanelApi {};
-const D2RL::SharedEventService*         EventApi {};
 const D2RL::InventoryService*           Inventory {};
 const D2RL::ItemService*                ItemApi {};
 Comm::ServiceLease<PageHost::Service>   Host;
@@ -66,8 +59,7 @@ constexpr int                           MaxColumns = 10, MaxRows = 12;
 int                                     Columns = 10, Rows = 4;
 std::atomic<bool>                       Enabled { true };
 std::atomic<bool>                       InventoryCharms { false }; // charms in the normal inventory give their bonuses
-const D2RL::ThreadService*              Threads {};
-const D2RL::WidgetService*              WidgetApi {};
+bool                                    GuiReady = false; // D2R GUI has its services
 
 void Log(bool error, const char* format, ...) noexcept {
 	char    line[512] {};
@@ -79,245 +71,47 @@ void Log(bool error, const char* format, ...) noexcept {
 	else Context->LogInfo(line);
 }
 
-// ---- pictures ----
+// ---- the inventory button (D2R GUI) ----
 
-struct Picture {
-	int                        width {}, height {};
-	std::vector<unsigned char> rgba;
-	unsigned char*             at(int x, int y) { return rgba.data() + (static_cast<std::size_t>(y) * width + x) * 4; }
-	const unsigned char*       at(int x, int y) const { return rgba.data() + (static_cast<std::size_t>(y) * width + x) * 4; }
-};
-
-Picture Blank(int width, int height) { return { width, height, std::vector<unsigned char>(static_cast<std::size_t>(width) * height * 4) }; }
-
-Picture Half(const Picture& in) {
-	Picture out = Blank(std::max(1, in.width / 2), std::max(1, in.height / 2));
-	for (int y = 0; y < out.height; ++y)
-		for (int x = 0; x < out.width; ++x)
-			for (int k = 0; k < 4; ++k) {
-				int total = 0;
-				for (int dy = 0; dy < 2; ++dy)
-					for (int dx = 0; dx < 2; ++dx) total += in.at(std::min(in.width - 1, 2 * x + dx), std::min(in.height - 1, 2 * y + dy))[k];
-				out.at(x, y)[k] = static_cast<unsigned char>(total / 4);
-			}
-	return out;
-}
-
-// Frames side by side, all the same size (SpA1 version 31).
-std::string SpriteFile(const std::vector<Picture>& frames) {
-	const auto& first = frames.front();
-	const auto  count = static_cast<std::uint32_t>(frames.size());
-	std::string out(40, '\0');
-	const auto  put = [&](std::size_t at, std::uint32_t value, int bytes) {
-        for (int i = 0; i < bytes; ++i) out[at + i] = static_cast<char>((value >> (8 * i)) & 0xFF);
-	};
-	std::memcpy(out.data(), "SpA1", 4);
-	put(4, 31, 2);
-	put(6, static_cast<std::uint32_t>(first.width), 2);
-	put(8, static_cast<std::uint32_t>(first.width) * count, 4);
-	put(12, static_cast<std::uint32_t>(first.height), 4);
-	put(20, count, 4);
-	const std::size_t row = static_cast<std::size_t>(first.width) * 4;
-	for (int y = 0; y < first.height; ++y)
-		for (const auto& frame : frames) out.append(reinterpret_cast<const char*>(frame.rgba.data()) + y * row, row);
-	return out;
-}
-
-bool RegisterResource(const std::string& path, const std::string& bytes) {
-	static std::vector<std::string> kept;
-	kept.push_back(bytes);
-	const D2RL::Resources::ResourceRegistration resource {
-		.structSize = D2RL::Resources::ResourceRegistrationSize,
-		.path       = path.c_str(),
-		.bytes      = kept.back().data(),
-		.byteCount  = kept.back().size(),
-	};
-	D2RL::Resources::RegistrationHandle ignored = D2RL::Resources::InvalidHandle;
-	return ResourceApi->registerResource(Context, &resource, &ignored) == D2RL::Resources::Result::Success;
-}
-
-// A sprite and its low-end copy (half size unless given).
-bool RegisterSprite(const std::string& name, const std::vector<Picture>& frames, std::vector<Picture> low = {}) {
-	if (low.empty())
-		for (const auto& frame : frames) low.push_back(Half(frame));
-	const std::string path = std::string("data/hd/global/ui/d2rloader/") + PluginId + "/" + name;
-	return RegisterResource(path + ".sprite", SpriteFile(frames))
-	    && RegisterResource(path + ".lowend.sprite", SpriteFile(low));
-}
-
-// ---- packaged art ----
-
-// A 256-colour piece of the frame (tools/make_art.py), opaque.
-Picture Unpack(const ArtPiece& piece) {
-	Picture out = Blank(piece.width, piece.height);
-	for (std::size_t p = 0; p < static_cast<std::size_t>(piece.width) * piece.height; ++p) {
-		std::memcpy(out.rgba.data() + p * 4, piece.palette + piece.pixels[p] * 3, 3);
-		out.rgba[p * 4 + 3] = 255;
-	}
-	return out;
-}
-
-// ---- the inventory button (as Grail On!'s) ----
-
-// Under Grail On!'s button (its mold at 3,954). Frames: 0 normal, 1 pressed,
-// 2 disabled, 3 hovered.
-constexpr int ButtonX = 3, ButtonY = 954 + MoldHeight, ButtonWidth = 52, ButtonHeight = 60, IconDrawn = 42;
-
-// The charm icon in the game's gold, alone (no button frame), with a soft
-// light behind it on hover.
-std::vector<Picture> CharmButton() {
-	std::vector<double> cover(static_cast<std::size_t>(IconDrawn) * IconDrawn);
-	const double        step = static_cast<double>(IconSize) / IconDrawn;
-	for (int y = 0; y < IconDrawn; ++y)
-		for (int x = 0; x < IconDrawn; ++x) {
-			double sum = 0;
-			int    n   = 0;
-			for (int sy = static_cast<int>(y * step); sy < static_cast<int>((y + 1) * step) && sy < IconSize; ++sy)
-				for (int sx = static_cast<int>(x * step); sx < static_cast<int>((x + 1) * step) && sx < IconSize; ++sx) sum += Icon_char[sy * IconSize + sx], ++n;
-			cover[static_cast<std::size_t>(y) * IconDrawn + x] = n ? sum / n / 255.0 : 0;
-		}
-	const struct {
-		int    r, g, b, dy;
-		double glow;
-	} looks[] { { 215, 200, 150, 0, 0 }, { 170, 155, 110, 1, 0 }, { 110, 105, 95, 0, 0 }, { 255, 238, 180, 0, 0.35 } };
-	std::vector<Picture> frames;
-	for (const auto& look : looks) {
-		Picture   frame = Blank(ButtonWidth, ButtonHeight);
-		const int left = (ButtonWidth - IconDrawn) / 2, top = (ButtonHeight - IconDrawn) / 2 + look.dy;
-		for (int y = 0; y < ButtonHeight; ++y)
-			for (int x = 0; x < ButtonWidth; ++x) {
-				const int    ix = x - left, iy = y - top;
-				const double a  = ix >= 0 && iy >= 0 && ix < IconDrawn && iy < IconDrawn ? cover[static_cast<std::size_t>(iy) * IconDrawn + ix] : 0;
-				double       light = 0;
-				if (look.glow > 0) {
-					const double dx = (x + 0.5 - ButtonWidth / 2.0) / (ButtonWidth / 2.0), dy = (y + 0.5 - ButtonHeight / 2.0) / (ButtonHeight / 2.0);
-					light           = look.glow * std::max(0.0, 1.0 - std::sqrt(dx * dx + dy * dy));
-				}
-				const double alpha = a + light * (1 - a);
-				if (alpha <= 0) continue;
-				auto* px = frame.at(x, y);
-				px[0]    = static_cast<unsigned char>((look.r * a + 200 * light * (1 - a)) / alpha);
-				px[1]    = static_cast<unsigned char>((look.g * a + 160 * light * (1 - a)) / alpha);
-				px[2]    = static_cast<unsigned char>((look.b * a + 80 * light * (1 - a)) / alpha);
-				px[3]    = static_cast<unsigned char>(255 * alpha);
-			}
-		frames.push_back(std::move(frame));
-	}
-	return frames;
-}
-
-std::string Json(const std::string& text) {
-	std::string out = "\"";
-	for (const char c : text) {
-		if (c == '"' || c == '\\') out += '\\';
-		out += c;
-	}
-	return out + "\"";
-}
+// Under Grail On!'s button (its mold at 3,954). While the plugin is off it is
+// moved off the screen (in the game's widget and in its layout).
+constexpr int        ButtonX = 3, ButtonY = 954 + Gui::InventoryButton::Height, HiddenX = -5000;
+constexpr int        IconSize = 98, IconDrawn = 42;
+Gui::InventoryButton Button;
 
 void AddButton() {
-	const Picture mold { MoldWidth, MoldHeight, std::vector<unsigned char>(MoldRgba, MoldRgba + sizeof(MoldRgba)) };
-	if (!RegisterSprite("mold", { mold }) || !RegisterSprite("button", CharmButton())) Log(true, "could not register the button art");
-	const std::string click = Json(std::string("PanelManager:ClosePanel:") + CommandPrefix + "toggle");
-	char              button[1024] {};
-	std::snprintf(button, sizeof(button),
-	              R"({"type": "ImageWidget", "name": "%s/InventoryButton", "fields": {"rect": {"x": %d, "y": %d, "width": %d, "height": %d}, "filename": "d2rloader/%s/mold"}, "children": [)"
-	              R"({"type": "ButtonWidget", "name": "%s/CharmButton", "fields": {"rect": {"x": 1, "y": 39}, "filename": "d2rloader/%s/button", "normalFrame": 0, "pressedFrame": 1, "hoveredFrame": 3, )"
-	              R"("pressLabelOffset": {"x": 0, "y": 2}, "tooltipString": "Charms", "sound": "cursor_menu_select_hd", "onClickMessage": %s}}]})",
-	              PluginId, ButtonX, ButtonY, MoldWidth, MoldHeight, PluginId, PluginId, PluginId, click.c_str());
-	(void)RegisterResource(std::string("data/global/ui/layouts/") + PluginId + "/InventoryButtonhd.json", button);
-	const D2RL::Panels::ChildLayoutRegistration child {
-		.structSize = D2RL::Panels::ChildLayoutRegistrationSize,
-		.flags      = D2RL::Panels::ChildLayoutFlags::KeyboardMouseOnly,
-		.stockPanel = D2RL::Panels::StockPanel::PlayerInventory,
-		.localId    = "InventoryButton",
-	};
-	D2RL::Panels::ChildLayoutHandle handle {};
-	if (PanelApi->registerChildLayout(Context, &child, &handle) != D2RL::Panels::Result::Success) Log(true, "could not add the inventory button");
+	const auto icon = Gui::Icons::Mask("rune-stone", IconSize);
+	if (icon.empty() || !Gui::RegisterSprite("mold", { Gui::MoldPicture() })
+	    || !Gui::RegisterSprite("button", Gui::MaskButton(icon.data(), IconSize, Gui::InventoryButton::Width - 2, 60, IconDrawn)))
+		Log(true, "could not register the button art");
+	const Gui::InventoryButton::Look look { .moldSprite = "mold", .buttonSprite = "button", .button = "CharmButton", .tooltip = "Charms", .command = "toggle" };
+	if (!Button.Register("InventoryButton", look, Enabled.load() ? ButtonX : HiddenX, ButtonY)) Log(true, "could not add the inventory button");
 }
 
-// ---- the panel ----
-
-// The size and place of the game's left panels (as Run Counter's window),
-// hung from the vanilla $LeftPanelAnchor's place (x 0, y 39.7% of the screen)
-// written out, not from $LeftPanelAnchor: mods that move that anchor would
-// carry the panel off screen.
-// Inside the frame's gold line: x 59..1103, y 178..1451; the cells centred there.
-constexpr int PanelWidth = 1162, PanelHeight = 1507, PanelY = -651;
-int GridX = 0, GridY = 0;
-void PlaceGrid() noexcept { GridX = (PanelWidth - Columns * Cell) / 2, GridY = 178 + (1451 - 178 - Rows * Cell) / 2; }
-
-// The frame: the border pieces around dark stone with the grain of the
-// game's panels (fine noise over a coarser 3x3 one).
-bool MakeFrame(Picture& frame) {
-	const Picture top = Unpack(TopArt), bottom = Unpack(BottomArt), left = Unpack(LeftArt), right = Unpack(RightArt);
-	const int width = top.width, height = top.height + left.height + bottom.height;
-	if (bottom.width != width || right.height != left.height || left.width + right.width >= width) return false;
-	frame = Blank(width, height);
-	const auto noise = [](std::uint32_t x, std::uint32_t y, std::uint32_t seed) {
-		std::uint32_t h = x * 374761393u + y * 668265263u + seed * 2246822519u;
-		h               = (h ^ (h >> 13)) * 1274126177u;
-		return ((h ^ (h >> 16)) & 0xFF) / 255.0;
-	};
-	for (int y = top.height; y < top.height + left.height; ++y)
-		for (int x = left.width; x < width - right.width; ++x) {
-			const double n  = 0.6 * noise(x, y, 1) + 0.4 * noise(x / 3, y / 3, 2) - 0.5;
-			auto*        px = frame.at(x, y);
-			px[0] = px[1] = static_cast<unsigned char>(std::clamp(18 + static_cast<int>(n * 12), 0, 255));
-			px[2]         = static_cast<unsigned char>(std::clamp(19 + static_cast<int>(n * 12), 0, 255));
-			px[3]         = 255;
-		}
-	const auto paste = [&](const Picture& part, int x0, int y0) {
-		for (int y = 0; y < part.height; ++y) std::memcpy(frame.at(x0, y0 + y), part.at(0, y), static_cast<std::size_t>(part.width) * 4);
-	};
-	paste(top, 0, 0);
-	paste(bottom, 0, height - bottom.height);
-	paste(left, 0, top.height);
-	paste(right, width - right.width, top.height);
-	return true;
+void ShowButton() {
+	if (GuiReady) (void)Gui::RunOnUi([] { Button.Move(Enabled.load() ? ButtonX : HiddenX, ButtonY); });
 }
 
-// The cells picture of the current size, one file per size (the game keeps a
-// sprite it has loaded once).
-std::string CellsName() { return "cells-" + std::to_string(Columns) + "x" + std::to_string(Rows); }
+// ---- the panel (D2R GUI's character screen window) ----
 
-bool RegisterCells() {
-	static std::vector<std::string> done;
-	const std::string name = CellsName();
-	if (std::find(done.begin(), done.end(), name) != done.end()) return true;
-	const Picture slot = Unpack(SlotArt);
-	if (slot.width != Cell || slot.height != Cell) return false;
-	Picture cells = Blank(Columns * Cell, Rows * Cell);
-	for (int y = 0; y < cells.height; ++y)
-		for (int x = 0; x < cells.width; ++x) std::memcpy(cells.at(x, y), slot.at(x % Cell, y % Cell), 4);
-	if (!RegisterSprite(name, { cells })) return false;
-	done.push_back(name);
-	return true;
+// The cells centred on the window's plain stone, or between its header and
+// its bottom when taller (the cells cover what is under them).
+namespace Window = Gui::CharacterWindow;
+int           GridX = 0, GridY = 0;
+void PlaceGrid() noexcept {
+	const int height = Rows * Cell;
+	GridX = Window::CoverX + (Window::CoverWidth - Columns * Cell) / 2;
+	GridY = height <= Window::CoverHeight ? Window::CoverY + (Window::CoverHeight - height) / 2 : 178 + (1451 - 178 - height) / 2;
 }
 
-bool RegisterPanelArt() {
-	Picture frame;
-	if (!MakeFrame(frame) || frame.width != PanelWidth || frame.height != PanelHeight || !RegisterSprite("frame", { frame })) return false;
-	return RegisterCells();
-}
-
+// The host's layout: @PANEL@ and @GRID@ are its tokens.
 std::string PanelLayout() {
-	char layout[2048] {};
-	std::snprintf(layout, sizeof(layout),
-	              R"({"type": "Panel", "name": "@PANEL@", "fields": {"priority": 10, "rect": {"x": 236, "y": %d, "width": %d, "height": %d}, "anchor": {"x": 0.0, "y": 0.397}}, "children": [)"
-	              R"({"type": "ClickCatcherWidget", "name": "PanelClickCatcher", "fields": {"rect": {"x": 0, "y": 0, "width": %d, "height": %d}}})"
-	              R"(, {"type": "ImageWidget", "name": "Background", "fields": {"rect": {"x": 0, "y": 0}, "filename": "d2rloader\\%s\\frame"}})"
-	              R"(, {"type": "TextBoxWidget", "name": "Title", "fields": {"rect": {"x": 0, "y": 74, "width": %d, "height": 84}, "text": "Charms", )"
-	              R"("style": {"fontColor": "$FontColorGoldYellow", "pointSize": 52, "dropShadow": "$DefaultDropShadow", "alignment": {"h": "center", "v": "center"}}}})"
-	              R"(, {"type": "ImageWidget", "name": "Cells", "fields": {"rect": {"x": %d, "y": %d}, "filename": "d2rloader\\%s\\%s"}})"
-	              R"(, @GRID@)"
-	              R"(, {"type": "ButtonWidget", "name": "CloseButton", "fields": {"rect": {"x": %d, "y": 9}, "filename": "PANEL\\closebtn_4x", "hoveredFrame": 3, "tooltipString": "@d2r:strClose", )"
-	              R"("sound": "cursor_close_window_hd", "onClickMessage": "PanelManager:ClosePanel:@PANEL@"}}]})",
-	              PanelY, PanelWidth, PanelHeight, PanelWidth, PanelHeight, PluginId, PanelWidth, GridX, GridY, PluginId, CellsName().c_str(), PanelWidth - 87);
-	return layout;
+	std::string cells;
+	const auto  slot = Gui::StashKit::Slot(Cell, Cell);
+	for (int y = 0; y < Rows; ++y)
+		for (int x = 0; x < Columns; ++x) cells += Gui::Image("Cell" + std::to_string(y * MaxColumns + x), GridX + x * Cell, GridY + y * Cell, slot);
+	return Window::Layout("@PANEL@", "Probe0", "Charms", "close", cells + ", @GRID@");
 }
-
-// ---- the area ----
 
 // ---- no bonus from inventory charms ----
 // The game asks whether a charm gives its bonuses through a D2RCore jump table
@@ -533,70 +327,46 @@ auto __cdecl FindItem(const D2RL::PluginContext*, const Items::ItemInfo* item, v
 // Page Host's, which already answers with the held item's top-left PAGE cell
 // for an area grid: the last answer for this plugin's grid is kept.
 
-constexpr std::uint64_t GridVtableRva = 0x1CF3800, CursorItemRva = 0x15F100, ItemSizeRva = 0x371850;
-constexpr int           VtCellAtPoint = 19;
-constexpr std::size_t   WidgetMarker = 0x634;
+constexpr std::uint64_t CursorItemRva = 0x15F100, ItemSizeRva = 0x371850;
 constexpr std::uint64_t NoCell = ~std::uint64_t { 0 };
 constexpr std::uint8_t  CursorItemBytes[] { 0x48, 0x83, 0xEC, 0x28, 0xE8, 0xC7, 0xC1, 0xF2, 0xFF, 0x8B, 0xC8, 0xE8, 0x70, 0xB3, 0xF3, 0xFF };
 constexpr std::uint8_t  ItemSizeBytes[] { 0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7C, 0x24, 0x20, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x20 };
-using CellFn       = std::uint64_t* (*)(void* widget, std::uint64_t* out, std::uint64_t point) noexcept;
 using CursorItemFn = void* (*)() noexcept;
 using ItemSizeFn   = void (*)(void* item, std::uint8_t* width, std::uint8_t* height, const char* file, int line) noexcept;
-CellFn                     NextCellAtPoint {};
-CursorItemFn               CursorItem {};
-ItemSizeFn                 ItemSize {};
-float                      GridMarker[2] {};
-std::atomic<std::uint64_t> HoverCell { NoCell }, HoverTick {};
+CursorItemFn      CursorItem {};
+ItemSizeFn        ItemSize {};
+float             GridMarker[2] {};
+std::atomic<bool> MarkerKnown {};
 
-std::uint64_t* HookCellAtPoint(void* widget, std::uint64_t* out, std::uint64_t point) noexcept {
-	std::uint64_t* const result = NextCellAtPoint(widget, out, point);
-	float marker[2] {};
-	if (widget) std::memcpy(marker, static_cast<const std::uint8_t*>(widget) + WidgetMarker, sizeof(marker));
-	if (widget && marker[0] == GridMarker[0] && marker[1] == GridMarker[1]) HoverCell = *out, HoverTick = GetTickCount64();
-	return result;
-}
-
-// Once, when the charm inventory first opens (Player Page Host wrapped the
-// grid at load, so this goes on top of it).
-void WrapCellAtPoint() noexcept {
-	static bool tried = false;
+// UI thread, when the charm inventory opens: the area's grid marker (it
+// follows the area's panel, so a new size has a new one), then once the
+// item lookups and D2R GUI's grid wrap (on top of Player Page Host's, which
+// answers with page cells for an area grid).
+void PrepareDrops() noexcept {
+	static bool        tried = false;
 	PageHost::AreaInfo info { .structSize = sizeof(info) };
-	if (tried) {
-		// The area may have been reserved again (a new size): its grid marker follows its panel.
-		if (NextCellAtPoint && Area && Host->getAreaInfo(Area, &info) == PageHost::Result::Success) std::memcpy(GridMarker, info.gridMarker, sizeof(GridMarker));
-		return;
-	}
-	if (!Base) return;
+	if (Area && Host->getAreaInfo(Area, &info) == PageHost::Result::Success) std::memcpy(GridMarker, info.gridMarker, sizeof(GridMarker)), MarkerKnown.store(true);
+	if (tried || !Base || !MarkerKnown.load()) return;
 	tried = true;
-	if (Host->getAreaInfo(Area, &info) != PageHost::Result::Success || std::memcmp(reinterpret_cast<const void*>(Base + CursorItemRva), CursorItemBytes, sizeof(CursorItemBytes)) != 0
+	if (std::memcmp(reinterpret_cast<const void*>(Base + CursorItemRva), CursorItemBytes, sizeof(CursorItemBytes)) != 0
 	    || std::memcmp(reinterpret_cast<const void*>(Base + ItemSizeRva), ItemSizeBytes, sizeof(ItemSizeBytes)) != 0) {
 		Log(true, "this game build's item lookups aren't the expected ones: a second copy of a unique charm can't be swapped with the first");
 		return;
 	}
-	std::memcpy(GridMarker, info.gridMarker, sizeof(GridMarker));
-	CursorItem   = reinterpret_cast<CursorItemFn>(Base + CursorItemRva);
-	ItemSize     = reinterpret_cast<ItemSizeFn>(Base + ItemSizeRva);
-	auto* const entry = reinterpret_cast<std::uint64_t*>(Base + GridVtableRva) + VtCellAtPoint;
-	const auto  current = *entry;
-	NextCellAtPoint     = reinterpret_cast<CellFn>(current);
-	if (!current || !SwapSlot(entry, current, reinterpret_cast<std::uint64_t>(&HookCellAtPoint))) {
-		NextCellAtPoint = nullptr;
-		Log(true, "the grid's cell lookup could not be wrapped: a second copy of a unique charm can't be swapped with the first");
-		return;
-	}
-	Log(false, "grid cell lookup wrapped (charm area marker %.0f,%.0f)", GridMarker[0], GridMarker[1]);
-}
-
-void UnwrapCellAtPoint() noexcept {
-	if (NextCellAtPoint && SwapSlot(reinterpret_cast<std::uint64_t*>(Base + GridVtableRva) + VtCellAtPoint, reinterpret_cast<std::uint64_t>(&HookCellAtPoint), reinterpret_cast<std::uint64_t>(NextCellAtPoint)))
-		NextCellAtPoint = nullptr;
+	CursorItem = reinterpret_cast<CursorItemFn>(Base + CursorItemRva);
+	ItemSize   = reinterpret_cast<ItemSizeFn>(Base + ItemSizeRva);
+	Gui::TileGrid::Options options;
+	options.mine              = [](const void* widget) { return MarkerKnown.load(std::memory_order_relaxed) && Gui::TileGrid::Marked(widget, GridMarker[0], GridMarker[1]); };
+	options.clearRequirements = false;
+	options.problem           = [](const char* what) { Log(true, "%s: a second copy of a unique charm can't be swapped with the first", what); };
+	if (Gui::TileGrid::Wrap(std::move(options))) Log(false, "grid wrapped (charm area marker %.0f,%.0f)", GridMarker[0], GridMarker[1]);
 }
 
 // Whether the held item, put at the cell under the mouse, covers the copy
 // (the game then swaps them; covering another item too means no drop at all).
 bool DropsOnCopy(std::uint32_t copy, D2RL::PlayerHandle player) {
-	const std::uint64_t cell = HoverCell.load();
-	if (!NextCellAtPoint || !CursorItem || cell == NoCell || GetTickCount64() - HoverTick.load() > 500) return false;
+	const std::uint64_t cell = Gui::TileGrid::HoverCell();
+	if (!Gui::TileGrid::Wrapped() || !CursorItem || cell == NoCell) return false;
 	void* const held = CursorItem();
 	if (!held) return false;
 	std::uint8_t w = 1, h = 1;
@@ -640,7 +410,15 @@ auto __cdecl OnItemClick(const D2RL::PluginContext*, const Clicks::ItemInteracti
 }
 
 
-bool PanelArt = false;
+bool PanelArt = false; // D2R GUI has read the game's art (after the data tables loaded)
+
+void SetLayout() {
+	if (!PanelArt || !Area || !Host) return;
+	static std::string layout;
+	layout = PanelLayout();
+	const PageHost::LayoutRequest request { .structSize = sizeof(request), .flags = 0, .layout = layout.c_str(), .gridX = GridX, .gridY = GridY };
+	if (const auto set = Host->setAreaLayout(Area, &request); set != PageHost::Result::Success) Log(true, "the host refused the panel layout (result %u): the plain one shows", static_cast<unsigned>(set));
+}
 
 // Gets the host (once), then reserves the area at the current size when the
 // plugin is on.
@@ -655,12 +433,7 @@ bool Join() {
 	}
 	Area = info.handle;
 	(void)Host->setItemPolicy(Area, CharmsOnly, nullptr);
-	if (PanelArt && RegisterCells()) {
-		static std::string layout;
-		layout = PanelLayout();
-		const PageHost::LayoutRequest request { .structSize = sizeof(request), .flags = 0, .layout = layout.c_str(), .gridX = GridX, .gridY = GridY };
-		if (const auto set = Host->setAreaLayout(Area, &request); set != PageHost::Result::Success) Log(true, "the host refused the panel layout (result %u): the plain one shows", static_cast<unsigned>(set));
-	}
+	SetLayout();
 	Log(false, "%dx%d charm area reserved", Columns, Rows);
 	return true;
 }
@@ -673,6 +446,11 @@ void __cdecl AfterAllLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::D
 	PageHost::AreaInfo info { .structSize = sizeof(info) };
 	const bool         gotInfo = Area && Host->getAreaInfo(Area, &info) == PageHost::Result::Success;
 	WrapCharmSlot();
+	if (GuiReady) {
+		Gui::Kit::Read();
+		PanelArt = true;
+		SetLayout();
+	}
 	if (gotInfo)
 		Log(false, "area at %d,%d of the page (-1: not placed yet), charms active %u", info.x, info.y, info.charmsActive);
 }
@@ -690,23 +468,22 @@ void Toggle() {
 		(void)Host->closeArea(Area);
 		return;
 	}
-	WrapCellAtPoint();
+	PrepareDrops();
 	const auto opened = Host->openArea(Area);
 	if (opened == PageHost::Result::NoRoom) Context->WriteConsoleMessage("Charms: no room on the player page beside the other plugins' areas");
 	else if (opened != PageHost::Result::Success) Log(true, "open: result %u", static_cast<unsigned>(opened));
 }
 
-auto __cdecl OnUiMessage(const D2RL::PluginContext*, const Events::UiMessageEvent* event, void*) noexcept -> Events::UiMessageAction {
-	if (!event || !event->text) return Events::UiMessageAction::Continue;
-	const std::size_t prefix = std::strlen(CommandPrefix);
-	if (std::strncmp(event->text, CommandPrefix, prefix) != 0) return Events::UiMessageAction::Continue;
-	// D2R reports a button's message twice, about a millisecond apart.
-	static ULONGLONG last {};
-	const ULONGLONG  now = GetTickCount64();
-	if (now - last < 150) return Events::UiMessageAction::Consume;
-	last = now;
-	if (!std::strcmp(event->text + prefix, "toggle")) Toggle();
-	return Events::UiMessageAction::Consume;
+// Button clicks (D2R GUI, UI thread).
+void OnCommand(const std::string& command) {
+	if (command == "toggle") Toggle();
+	else if (command == "close" && Area && Host && Host->isAreaOpen(Area)) (void)Host->closeArea(Area);
+}
+
+// A key or the console: on the UI thread, as the button.
+void PostToggle() {
+	if (GuiReady) Gui::Commands::Post("toggle");
+	else Toggle();
 }
 
 // The "Open/close charms" action of the game's Controls menu (unbound by
@@ -714,47 +491,16 @@ auto __cdecl OnUiMessage(const D2RL::PluginContext*, const Events::UiMessageEven
 auto OnCharmsAction(const D2RL::PluginContext*, const D2RL::Input::ActionEvent* event, void*) noexcept -> D2RL::Input::ActionResult {
 	if (!D2RL::Input::HasActionEventField(event, D2RL::Input::ActionEventRequiredSize) || event->kind != D2RL::Input::ActionEventKind::Pressed)
 		return D2RL::Input::ActionResult::Ignored;
-	Toggle();
+	PostToggle();
 	return D2RL::Input::ActionResult::Handled;
 }
 
 auto Command(D2R::Game::Client*, const D2RL::ConsoleCommandContext*, void*) noexcept -> D2RL::ConsoleCommandResult {
-	Toggle();
+	PostToggle();
 	return D2RL::ConsoleCommandResult::Handled;
 }
 
 // ---- settings, applied at once ----
-
-// The inventory button: hidden while the plugin is off. D2R rebuilds the
-// inventory with every widget shown, so the button is hidden again every
-// quarter second while off (the widget is found again each time).
-constexpr const char* ButtonName = "wild-healers-charm-inventory/InventoryButton";
-constexpr const char* InventoryPanels[] { "PlayerInventoryExpansionLayout", "PlayerInventoryOriginalLayout" };
-std::atomic<bool>     ButtonQueued {}, ButtonStop {};
-HANDLE                ButtonThread {};
-
-void __cdecl ApplyButton(const D2RL::PluginContext*, void*) noexcept {
-	const bool shown = Enabled.load();
-	for (const char* name : InventoryPanels) {
-		D2RL::Widgets::WidgetHandle panel {}, button {};
-		if (WidgetApi->findPanel(Context, name, &panel) == D2RL::Widgets::Result::Success && WidgetApi->findWidget(Context, panel, ButtonName, &button) == D2RL::Widgets::Result::Success)
-			(void)WidgetApi->setWidgetVisible(Context, button, shown);
-	}
-	ButtonQueued.store(false);
-}
-
-void QueueButton() {
-	if (!Threads || !WidgetApi || ButtonQueued.exchange(true)) return;
-	if (Threads->runOnUiThread(Context, ApplyButton, nullptr) != D2RL::Threads::Result::Success) ButtonQueued.store(false);
-}
-
-DWORD WINAPI ButtonWatch(void*) {
-	while (!ButtonStop.load()) {
-		if (!Enabled.load()) QueueButton();
-		Sleep(250);
-	}
-	return 0;
-}
 
 // The height of a charm by its code (cm1 1, cm2 2, cm3 3; else the tallest).
 int CharmHeight(std::uint32_t code) {
@@ -808,7 +554,7 @@ bool SetEnabled(bool on, std::string& error) {
 		Enabled.store(false);
 		return error = Host ? "the host has no room for the charm area (see the log)" : "Player Page Host isn't loaded", false;
 	}
-	QueueButton();
+	ShowButton();
 	Log(false, "turned %s in the settings", on ? "on" : "off");
 	return true;
 }
@@ -843,7 +589,7 @@ bool SetSize(int columns, int rows, std::string& error) {
 		if (Enabled.load()) (void)Join();
 	}
 	if (wasOpen && Area) {
-		WrapCellAtPoint();
+		PrepareDrops();
 		(void)Host->openArea(Area);
 	}
 	if (ok) Log(false, "size %dx%d", Columns, Rows);
@@ -1021,29 +767,21 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	PlaceGrid();
 	Log(false, "%s %s loading, %dx%d%s", Info.name, PluginVersion, Columns, Rows, Enabled.load() ? "" : " (off: enabled = false)");
 	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
-	if (context->QueryService(&Threads) != D2RL::ServiceQueryResult::Success || !D2RL::HasThreadServiceField(Threads, D2RL::ThreadServiceRequiredSize)) Threads = nullptr;
-	if (context->QueryService(&WidgetApi) != D2RL::ServiceQueryResult::Success) WidgetApi = nullptr;
+	GuiReady = Gui::Init(context, PluginId);
+	if (!GuiReady) Log(true, "a window service is missing: no button or panel art (use the charms console command)");
 	if (context->QueryService(&CommApi) != D2RL::ServiceQueryResult::Success) CommApi = nullptr;
-	if (context->QueryService(&ResourceApi) != D2RL::ServiceQueryResult::Success) ResourceApi = nullptr;
-	if (context->QueryService(&PanelApi) != D2RL::ServiceQueryResult::Success) PanelApi = nullptr;
-	if (context->QueryService(&EventApi) != D2RL::ServiceQueryResult::Success) EventApi = nullptr;
 	if (context->QueryService(&Inventory) != D2RL::ServiceQueryResult::Success) Inventory = nullptr;
 	if (context->QueryService(&ItemApi) != D2RL::ServiceQueryResult::Success) ItemApi = nullptr;
 	if (!Inventory || !ItemApi) Log(true, "no inventory or item service: unique charms aren't limited to one each");
-	PanelArt = ResourceApi && RegisterPanelArt();
-	if (!PanelArt) Log(true, "could not unpack the panel's art: the host's plain panel shows");
 	(void)Join(); // the host loads first (its DLL name sorts first); else after every plugin has loaded
 	if (const D2RL::LifecycleService* lifecycle = nullptr; context->QueryService(&lifecycle) == D2RL::ServiceQueryResult::Success && lifecycle) {
 		const D2RL::Lifecycle::DataTablesLoadedListener listener { .structSize = D2RL::Lifecycle::DataTablesLoadedListenerSize, .callback = AfterAllLoaded };
 		D2RL::Lifecycle::ListenerHandle                 handle {};
 		(void)lifecycle->registerDataTablesLoadedListener(context, &listener, &handle);
 	}
-	if (ResourceApi && PanelApi) AddButton();
-	else Log(true, "no resource or panel service: no inventory button (use the charms console command)");
-	if (EventApi) {
-		const Events::UiMessageListener listener { .structSize = Events::UiMessageListenerSize, .priority = 100, .callback = OnUiMessage };
-		Events::ListenerHandle          handle = Events::InvalidHandle;
-		if (EventApi->registerUiMessageListener(Context, &listener, &handle) != Events::Result::Success) Log(true, "could not listen to button clicks");
+	if (GuiReady) {
+		AddButton();
+		if (!Gui::Commands::Listen(OnCommand)) Log(true, "could not listen to button clicks");
 	}
 	if (const D2RL::InputService* input = nullptr;
 	    context->QueryService(&input) == D2RL::ServiceQueryResult::Success && input && D2RL::HasInputServiceField(input, D2RL::InputServiceRequiredSize)) {
@@ -1066,17 +804,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		if (clicks->registerListener(Context, &listener, &handle) != Clicks::Result::Success) Log(true, "could not listen to Ctrl+clicks: a second copy of a unique charm can be Ctrl+clicked in");
 	}
 	(void)context->RegisterConsoleCommand("charms", Command, "Opens or closes the charm inventory.");
-	if (Threads && WidgetApi) ButtonThread = CreateThread(nullptr, 0, ButtonWatch, nullptr, 0, nullptr);
-	else Log(true, "no thread or widget service: the button stays while the plugin is off");
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
-	ButtonStop.store(true);
-	if (ButtonThread) WaitForSingleObject(ButtonThread, 1000), CloseHandle(ButtonThread);
-	ButtonThread = nullptr;
 	Menu.Stop();
-	UnwrapCellAtPoint();
+	Gui::TileGrid::Unwrap();
 	UnwrapCharmSlot();
 	if (Area && Host) (void)Host->releaseArea(Context, Area);
 	Area = 0;
