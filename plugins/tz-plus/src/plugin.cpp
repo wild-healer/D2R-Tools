@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.39";
+constexpr const char* PluginVersion = "0.0.40";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -513,6 +513,7 @@ constexpr ActLevels Acts[5] { { Act1, 38 }, { Act2, 34 }, { Act3, 27 }, { Act4, 
 // TZ Plus zones (see "TZ Plus zones" below): hidden act 5 levels added after the game's own, always terrorized.
 std::atomic<int> ZoneBase { 0 }; // the first one's level id (the game's level count), 0 = none
 constexpr int    ZoneSlots = 10;
+std::atomic<int> ZoneTemplate[ZoneSlots] {}; // the template of each zone (0 = none, level 2s too): its stairs rooms (HookMazeBuild)
 // Monsters made too close to a zone's entry portal, moved away on the next game frame (HookFrameCall).
 struct SafeMove {
 	std::uint8_t* game;
@@ -2648,6 +2649,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	// a10 = 1: past the game's town check (only the cow level and Pandemonium from towns); the act must still match.
 	void* portal = nullptr;
 	g->safeLevel = 0;
+	ZoneTemplate[id - base] = tmpl, ZoneTemplate[id + 1 - base] = 0; // level 2 keeps its own id: one entry room
 	Creating     = g;
 	CreatingId   = id;
 	CreatingGame = game;
@@ -2822,6 +2824,25 @@ std::uint64_t HookLevelSeed(void* seed, std::uint32_t value) noexcept {
 	return At<SeedFn>(SeedInitRva)(seed, value);
 }
 
+// Maze stair rooms (D2R+0x3E69E0 (mode, level)): the game places the exit stairs room only for the level ids it knows
+// (a switch on the level id per level type). Our zone is built under its template's id, then gets its own back.
+constexpr std::uint64_t MazeBuildRva = 0x3E69E0;
+constexpr std::array<std::uint8_t, 16> MazeBuildBytes { 0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x55, 0x41, 0x56, 0x48, 0x8B, 0xEC, 0x48, 0x83, 0xEC, 0x28 };
+using MazeBuildFn = std::uint64_t (*)(std::uint8_t mode, void* level) noexcept;
+MazeBuildFn      MazeBuildOrig {};
+
+std::uint64_t HookMazeBuild(std::uint8_t mode, void* level) noexcept {
+	const int base = ZoneBase.load(std::memory_order_relaxed);
+	const int id   = level ? Field<std::int32_t>(level, 0x1F8) : 0;
+	const int tmpl = base > 0 && id >= base && id < base + ZoneSlots ? ZoneTemplate[id - base].load() : 0;
+	if (!tmpl) return MazeBuildOrig(mode, level);
+	SetField<std::int32_t>(level, 0x1F8, tmpl);
+	const std::uint64_t result = MazeBuildOrig(mode, level);
+	SetField<std::int32_t>(level, 0x1F8, id);
+	Log(false, "zones: level %d built as level %d (its stairs rooms)", id, tmpl);
+	return result;
+}
+
 // Roran's name (the client's unit name, D2R+0x9A1B0 (unit)).
 constexpr std::uint64_t UnitNameRva = 0x9A1B0;
 constexpr std::array<std::uint8_t, 12> UnitNameBytes { 0x40, 0x53, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x40, 0x4C, 0x8B, 0xF1 };
@@ -2898,6 +2919,10 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 		if (!context->InstallInlineHook(UnitNameRva, UnitNameBytes.data(), static_cast<std::uint32_t>(UnitNameBytes.size()), reinterpret_cast<void*>(&HookUnitName), &original) || !original)
 			Log(true, "zones: Roran keeps the Townguard's name, could not hook D2R+0x%llX", static_cast<unsigned long long>(UnitNameRva));
 		else UnitNameOrig = reinterpret_cast<UnitNameFn>(original);
+		original = nullptr;
+		if (!context->InstallInlineHook(MazeBuildRva, MazeBuildBytes.data(), static_cast<std::uint32_t>(MazeBuildBytes.size()), reinterpret_cast<void*>(&HookMazeBuild), &original) || !original)
+			Log(true, "zones: no exit stairs, could not hook D2R+0x%llX", static_cast<unsigned long long>(MazeBuildRva));
+		else MazeBuildOrig = reinterpret_cast<MazeBuildFn>(original);
 	}
 	if (!PatchCall(LevelSeedCallRva, SeedInitRva, reinterpret_cast<const void*>(&HookLevelSeed)))
 		Log(true, "zones: layouts follow the map seed, could not patch D2R+0x%llX", static_cast<unsigned long long>(LevelSeedCallRva));
