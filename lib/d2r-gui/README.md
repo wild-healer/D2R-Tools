@@ -6,6 +6,8 @@ The in-game window parts shared by the D2RLoader plugins in this repo, taken
 out of Grail On! and I Hate TOMLs so a new plugin can have a window that looks
 and behaves like theirs without copying a thousand lines.
 
+What it can do, with an example: [SHOWCASE.md](SHOWCASE.md).
+
 ## How plugins use it
 
 D2R GUI is header-only. A plugin includes `d2r_gui.h` in its `.cpp`, and the

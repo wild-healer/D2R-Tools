@@ -111,7 +111,7 @@ std::string Build(const std::string& panelName, const std::string& probe) {
 	c += Bar.Layout(ListTop, ListRoom, total, Scroll);
 
 	if (DropOpen) c += Gui::DropDown::List("ChoiceList", dropX, dropY + BoxHeight, 420, 52, Choices, Choice, "pick:", "drop", PanelWidth, PanelHeight);
-	return Gui::Panel(panelName, PanelX, PanelY, PanelWidth, PanelHeight, c, 10, R"(, "anchor": "$LeftPanelAnchor")");
+	return Gui::Panel(panelName, PanelX, PanelY, PanelWidth, PanelHeight, c, 10, Gui::LeftAnchor);
 }
 
 void CloseWindow() {
