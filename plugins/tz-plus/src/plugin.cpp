@@ -49,6 +49,7 @@
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <d2r_gui.h>
@@ -58,7 +59,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.14";
+constexpr const char* PluginVersion = "0.0.15";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -307,7 +308,17 @@ struct GameMods {
 	Rolled              mods[3] {};
 	int                 gold = 0, magic = 0, xp = 0; // % bonuses
 	std::atomic<int>    monsters { 0 };
+	SRWLOCK             modLock = SRWLOCK_INIT;
+	std::unordered_map<void*, std::uint32_t> modded; // monsters given our mods (unit -> unit id): not mercs or summons
 };
+
+bool Modded(GameMods& g, void* unit) noexcept {
+	AcquireSRWLockShared(&g.modLock);
+	const auto it = g.modded.find(unit);
+	const bool ok = it != g.modded.end() && it->second == Field<std::uint32_t>(unit, 8);
+	ReleaseSRWLockShared(&g.modLock);
+	return ok;
+}
 
 SRWLOCK               Lock = SRWLOCK_INIT;
 std::vector<GameMods*> Games; // never freed (a few per session)
@@ -839,6 +850,11 @@ void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	}
 	CapLevel(unit);
 	g->monsters.fetch_add(1, std::memory_order_relaxed);
+	AcquireSRWLockExclusive(&g->modLock);
+	try {
+		g->modded[unit] = Field<std::uint32_t>(unit, 8);
+	} catch (...) {}
+	ReleaseSRWLockExclusive(&g->modLock);
 	if (trace) {
 		++Traced;
 		std::string mods;
@@ -924,6 +940,8 @@ struct SpawnHook {
 constexpr std::uint64_t TeleportHitSlotRva = 0x2396210 + (26 * 6 + 4) * 8, WarpRva = 0x5A7510;
 constexpr int           TeleportChance[3] { 15, 25, 35 };
 using WarpFn      = int (*)(void* game, void* unit, int skill, void* target, int x, int y) noexcept;
+using CastFn      = int (*)(void* game, void* unit, int skill, void* target, int x, int y) noexcept;
+constexpr std::uint64_t CastRva = 0x4A7CF0;
 using PathCoordFn = int (*)(void* path) noexcept;
 std::atomic<std::uint64_t> TeleportRandom { 0x9E3779B97F4A7C15ULL };
 
@@ -935,7 +953,7 @@ void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
 	if (!tier) return; // a monster's own Teleportation: the game's behaviour only
 	void* room = At<UnitRoomFn>(0x34B440)(unit);
 	const int level = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
-	if (level <= 0 || !At<LevelTzFn>(0x489B70)(game, level)) return;
+	if (level <= 0 || !At<LevelTzFn>(0x489B70)(game, level) || !Modded(*g, unit)) return;
 	if (At<IsSpecialFn>(0x38E0E0)(unit, true)) tier = std::min(tier + 1, Ranges[g->difficulty].maxTier);
 	std::uint64_t state = TeleportRandom.fetch_add(0x9E3779B97F4A7C15ULL) ^ reinterpret_cast<std::uintptr_t>(unit);
 	static int logs = 0;
@@ -948,8 +966,10 @@ void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
 		const double angle    = static_cast<double>(Mix(state) % 6283) / 1000.0;
 		const int    distance = 6 + static_cast<int>(Mix(state) % 7);
 		const int    tx = x + static_cast<int>(std::lround(std::cos(angle) * distance)), ty = y + static_cast<int>(std::lround(std::sin(angle) * distance));
+		// 0x5A7510 only checks that the skill can land there; 0x4A7CF0 makes the monster cast it (what its AI does).
 		if (At<WarpFn>(WarpRva)(game, unit, 0xB8, nullptr, tx, ty)) {
-			if (logs < 40) ++logs, Log(false, "Teleportation: monster %p moved from %d,%d to %d,%d", unit, x, y, tx, ty);
+			const int cast = At<CastFn>(CastRva)(game, unit, 0xB8, nullptr, tx, ty);
+			if (logs < 40) ++logs, Log(false, "Teleportation: monster %p at %d,%d casts to %d,%d (%d)", unit, x, y, tx, ty, cast);
 			return;
 		}
 	}
@@ -972,7 +992,7 @@ bool InTzPlusZone(std::uint8_t* game, void* unit, GameMods** mods = nullptr) noe
 	if (!g) return false;
 	void* room = At<UnitRoomFn>(0x34B440)(unit);
 	const int level = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
-	if (level <= 0 || !At<LevelTzFn>(0x489B70)(game, level)) return false;
+	if (level <= 0 || !At<LevelTzFn>(0x489B70)(game, level) || !Modded(*g, unit)) return false;
 	if (mods) *mods = g;
 	return true;
 }
@@ -1022,7 +1042,11 @@ void HookMissileEvent(std::uint8_t* game, void* monster, void* missile) noexcept
 		data = Field<std::uint8_t*>(monster, 0x10);
 		if (data && !(Field<std::uint16_t>(data, 0x1A) & 8)) SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) | 8), raised = true;
 	}
+	static thread_local int depth = 0;
+	const bool extra = depth > 0; // created by a mod's handler (Multiple Shots) while the first missile is set up
+	++depth;
 	At<MissileEventFn>(MissileEventRva)(game, monster, missile);
+	--depth;
 	if (raised) SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) & ~std::uint16_t { 8 });
 	if (!ours || !missile || Field<std::uint32_t>(missile, 0) != 3) return;
 	const bool poison = TierOf(*mods, 0, Kind::Poison) != 0;
@@ -1034,13 +1058,13 @@ void HookMissileEvent(std::uint8_t* game, void* monster, void* missile) noexcept
 			SetStat(missile, StatPoisonLength, length);
 		}
 	}
-	if (MissileLogs < 15) {
+	if (MissileLogs < 30) {
 		++MissileLogs;
 		std::string list;
 		if (const std::uint8_t* umods = At<UModListFn>(0x38E310)(monster))
 			for (int x = 0; x < 9; ++x)
 				if (umods[x]) list += (list.empty() ? "" : ",") + std::to_string(umods[x]);
-		Log(false, "missile %p of monster %p [%s]%s: poison %d-%d/%d", missile, monster, list.c_str(), raised ? " (unique flag raised)" : "",
+		Log(false, "missile %p of monster %p [%s]%s%s: poison %d-%d/%d", missile, monster, list.c_str(), raised ? " (unique flag raised)" : "", extra ? " (extra shot)" : "",
 		    GetStat(missile, StatPoisonMin), GetStat(missile, StatPoisonMax), GetStat(missile, StatPoisonLength));
 	}
 }
