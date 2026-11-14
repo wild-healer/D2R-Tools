@@ -60,7 +60,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.21";
+constexpr const char* PluginVersion = "0.0.22";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -310,6 +310,8 @@ struct GameMods {
 	int                 gold = 0, magic = 0, xp = 0; // % bonuses
 	std::atomic<int>    monsters { 0 };
 	int                 zonesUsed = 0; // TZ Plus zones opened in this game
+	void*               portal    = nullptr; // the open zone portal in Harrogath (checked by its id before use)
+	std::uint32_t       portalId  = 0;
 	SRWLOCK             modLock = SRWLOCK_INIT;
 	std::unordered_map<void*, std::uint32_t> modded; // monsters given our mods (unit -> unit id): not mercs or summons
 };
@@ -1428,15 +1430,17 @@ const D2RL::LifecycleService* Lifecycle {};
 std::atomic<bool>             InGame { false };
 std::atomic<int>              CurrentLevel { -1 };
 void ShowRewards(int level) noexcept;
+void StartWindowHook() noexcept;
+std::atomic<bool> ZonePortalOpen { false }; // this game has an open TZ Plus zone portal (the barbarian offers to close it)
 
 void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
 	using EventKind = D2RL::Lifecycle::GameplayEventKind;
 	if (!D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) return;
 	switch (event->kind) {
 	case EventKind::GameJoined: InGame = true, CurrentLevel = -1; break;
-	case EventKind::LocalPlayerReady: D2RGui::LeftPanel::InGame(true); break;
+	case EventKind::LocalPlayerReady: D2RGui::LeftPanel::InGame(true), StartWindowHook(); break;
 	case EventKind::GameLeft: {
-		InGame = false, CurrentLevel = -1;
+		InGame = false, CurrentLevel = -1, ZonePortalOpen = false;
 		D2RGui::LeftPanel::InGame(false);
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
 		Games.clear();
@@ -1729,8 +1733,29 @@ std::vector<std::string> GameLines() {
 	return lines;
 }
 
+std::atomic<bool> TalkMode { false };
+extern std::atomic<bool> PortalRequested, CloseRequested; // the window is the fire barbarian's menu
+
+std::string BuildTalk(const std::string& panelName, std::string c) {
+	int y = Gui::StashWindow::InnerY + 40;
+	c += Gui::Text("TalkLine0", Left, y, Right - Left, LineHeight, "The fire shows me places full of terror.", Gui::Style::Label);
+	y += LineHeight;
+	c += Gui::Text("TalkLine1", Left, y, Right - Left, LineHeight, "I can open the way to one of them.", Gui::Style::Label);
+	y += LineHeight + 40;
+	const int width = Right - Left - 200;
+	if (ZonePortalOpen.load())
+		c += Gui::TextButton("TalkClose", Left + 100, y, width, 80, "Close the portal", "zone-close", "Closes the portal to this game's terror zone");
+	else
+		c += Gui::TextButton("TalkOpen", Left + 100, y, width, 80, "Open a portal to a terror zone", "zone-open",
+		                     "A random dungeon with monsters from every act. The game's mods roll again");
+	y += 110;
+	c += Gui::TextButton("TalkLeave", Left + 100, y, width, 80, "Leave", "close");
+	return Gui::StashWindow::Layout(panelName, "Barbarian", "close", c);
+}
+
 std::string BuildWindow(const std::string& panelName, const std::string& probe) {
 	std::string c = Gui::Probe(probe);
+	if (TalkMode.load()) return BuildTalk(panelName, c);
 
 	int y = Gui::StashWindow::InnerY + 12;
 	c += Gui::Text("GameTitle", Left, y, Right - Left, LineHeight, "This game", Gui::Style::Section);
@@ -1794,26 +1819,60 @@ void WatchWindow() {
 	if (Gui::LeftPanel::Watch(open, Window.Busy())) CloseWindow();
 }
 
-void ToggleWindow() {
-	if (Window.IsOpen()) return CloseWindow();
-	Gui::Font::Refresh();
+// ---- the fire barbarian (an Act 5 Combatant in Harrogath): a click on him opens his menu ----
+constexpr std::uint32_t CombatantA = 523, CombatantB = 524; // monstats act5barb1/act5barb2
+using HoveredUnitFn = void* (*)(int index) noexcept;     // the unit under the mouse of a local player (D2R+0xF1900)
+int TalkLogs = 0;
+
+bool OnGameMessage(UINT message, WPARAM, LPARAM) {
+	if (message != WM_LBUTTONDOWN || !InGame.load() || CurrentLevel.load() != 109) return false;
+	const int index = At<LocalIndexFn>(0x8B2D0)();
+	if (index < 0 || index >= 8) return false;
+	void* unit = At<HoveredUnitFn>(0xF1900)(index);
+	if (!unit || Field<std::uint32_t>(unit, 0) != 1) return false;
+	const std::uint32_t cls = Field<std::uint32_t>(unit, 4);
+	if (TalkLogs < 5) ++TalkLogs, Log(false, "click on monster class %u (unit %u) in Harrogath", cls, Field<std::uint32_t>(unit, 8));
+	if (cls != CombatantA && cls != CombatantB) return false;
+	Gui::Commands::Post("talk");
+	return false; // the click goes on: you walk to him
+}
+
+void StartWindowHook() noexcept {
 	Gui::WindowHook::Start({
 	    .active = [] { return WindowOpen.load(); },
 	    .wheel  = [](int notches) {
             Scroll = std::clamp(Scroll + notches * WheelStep, 0, std::max(0, Bar.Max()));
             Window.Show();
 	    },
+	    .extra = OnGameMessage,
 	    .watch = WatchWindow,
 	});
+}
+
+void OpenWindow(bool talk) {
+	TalkMode = talk;
+	Gui::Font::Refresh();
+	StartWindowHook();
 	static bool attached = false;
 	if (!attached) Bar.Attach(), attached = true;
-	Gui::LeftPanel::Opening();
+	if (!Window.IsOpen()) Gui::LeftPanel::Opening();
 	Window.Show();
 	WindowOpen = true;
 }
 
+void ToggleWindow() {
+	if (Window.IsOpen() && !TalkMode.load()) return CloseWindow();
+	OpenWindow(false);
+}
+
 void OnWindowCommand(const std::string& command) {
 	if (command == "toggle") return ToggleWindow();
+	if (command == "talk") return OpenWindow(true);
+	if (command == "zone-open" || command == "zone-close") {
+		if (command == "zone-open") PortalRequested = true;
+		else CloseRequested = true;
+		return CloseWindow();
+	}
 	if (!Window.IsOpen() && command != "close") return;
 	if (Bar.Handle(command)) return;
 	if (command == "close") return CloseWindow();
@@ -2031,7 +2090,7 @@ void __cdecl OnTablesLoaded(const D2RL::PluginContext* context, const D2RL::Life
 
 // ---- opening a zone portal (console "tzplus portal" for now), on the game's thread ----
 
-std::atomic<bool> PortalRequested { false };
+std::atomic<bool> PortalRequested { false }, CloseRequested { false };
 SRWLOCK           PortalLock = SRWLOCK_INIT;
 std::string       PortalResult;
 struct ZonePortal {
@@ -2116,6 +2175,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		if (Field<std::uint32_t>(client, 4) == 4) player = At<ClientPlayerFn>(0x484C90)(client, 0);
 	void* room = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
 	if (!room || At<RoomLevelFn>(0x2EFC10)(room) != Harrogath) return SetPortalResult("TZ Plus zones: stand in Harrogath to open a zone portal");
+	if (g->portal) return SetPortalResult("TZ Plus zones: a zone portal is already open in this game, close it first");
 	if (g->zonesUsed >= ZoneSlots) return SetPortalResult("TZ Plus zones: all %d zones of this game are used, make a new game for more", ZoneSlots);
 	const int     id    = base + g->zonesUsed;
 	std::uint64_t state = Field<std::uint64_t>(game, GameSeed) ^ (static_cast<std::uint64_t>(std::time(nullptr)) << 16) ^ static_cast<std::uint64_t>(id);
@@ -2157,6 +2217,9 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		return SetPortalResult("TZ Plus zones: the game refused the portal to level %d (%s) at %d,%d%s", id, LevelName(Banks[mode], tmpl).c_str(), spot.x, spot.y,
 		                       freeRoom ? "" : " (no free spot)");
 	++g->zonesUsed;
+	g->portal   = portal;
+	g->portalId = portal ? Field<std::uint32_t>(portal, 8) : 0;
+	ZonePortalOpen = portal != nullptr;
 	if (portal) {
 		AcquireSRWLockExclusive(&PortalLock);
 		ZonePortals[PortalCursor++ % 64] = { Field<std::uint32_t>(portal, 8), id };
@@ -2166,8 +2229,20 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	                LevelName(Banks[mode], tmpl).c_str(), tmpl, monsters.c_str(), mods.c_str());
 }
 
+using RemoveUnitFn = void (*)(void* game, void* unit) noexcept; // D2R+0x48FAA0 (the game removes a portal it could not link this way)
+
+void CloseZonePortal(std::uint8_t* game) noexcept {
+	GameMods* g = ModsOf(game);
+	if (!g || !g->portal) return ZonePortalOpen = false, SetPortalResult("TZ Plus zones: no zone portal is open in this game");
+	void* portal = At<FindUnitFn>(0x48FE80)(game, 2, g->portalId);
+	if (portal == g->portal) At<RemoveUnitFn>(0x48FAA0)(game, portal);
+	g->portal = nullptr, g->portalId = 0, ZonePortalOpen = false;
+	SetPortalResult(portal ? "TZ Plus zones: the zone portal is closed" : "TZ Plus zones: the zone portal was already gone");
+}
+
 std::uint64_t HookFrameCall(void* game) noexcept {
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
+	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
 }
 
@@ -2203,6 +2278,11 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 
 D2RL::ConsoleCommandResult __cdecl Command(D2R::Game::Client*, const D2RL::ConsoleCommandContext* command, void*) noexcept {
 	const std::string_view args = command && command->args ? std::string_view(command->args, command->argsLength) : std::string_view();
+	if (args.find("close") != std::string_view::npos) {
+		CloseRequested.store(true);
+		Context->WriteConsoleMessage("TZ Plus: closing the zone portal");
+		return D2RL::ConsoleCommandResult::Handled;
+	}
 	if (args.find("portal") != std::string_view::npos) {
 		AcquireSRWLockShared(&PortalLock);
 		const std::string last = PortalResult;
