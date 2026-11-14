@@ -56,7 +56,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.8";
+constexpr const char* PluginVersion = "0.0.9";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -115,7 +115,7 @@ constexpr int ModCount = static_cast<int>(sizeof(Mods) / sizeof(Mods[0]));
 
 // Stats
 constexpr int StatHp = 6, StatMaxHp = 7, StatLevel = 12, StatDefense = 31, StatPhysRes = 36, StatMagicRes = 37, StatFireRes = 39, StatLightRes = 41,
-              StatColdRes = 43, StatLifeSteal = 60, StatVelocity = 67, StatAttackRate = 68, StatRegen = 74, StatGoldFind = 79, StatMagicFind = 80;
+              StatColdRes = 43, StatLifeSteal = 60, StatVelocity = 67, StatAttackRate = 68, StatRegen = 74, StatGoldFind = 79, StatMagicFind = 80, StatExperience = 85;
 
 // Per tier values (index = tier - 1).
 constexpr int OwnResist[3]   { 50, 75, 100 }; // Fire/Lightning/Cold Enchanted
@@ -277,7 +277,7 @@ void SetStat(void* unit, int stat, std::int32_t value) noexcept {
 
 // ---- game offsets ----
 
-constexpr std::uintptr_t GameClients = 0x138, GameRefLevel = 0x102, GameDifficulty = 0x104, GameMode = 0x106, GameSeed = 0x1A8, GameUMod = 0x1A5C8,
+constexpr std::uintptr_t GameTerrorOn = 0x120, GameClients = 0x138, GameRefLevel = 0x102, GameDifficulty = 0x104, GameMode = 0x106, GameSeed = 0x1A8, GameUMod = 0x1A5C8,
                          GameUModRolled = 0x1A5CC;
 constexpr std::uintptr_t ClientNext = 0x628, ClientFlags = 0x4E0, ClientUnit = 0x278, ClientGame = 0x2B0, ClientUnitType = 0x26C, ClientUnitId = 0x270;
 constexpr std::uintptr_t ConfigStart = 0x00, ConfigZoneMin = 0x10, ConfigBreakMin = 0x14, ConfigZones = 0x250, ConfigZoneCount = 0x258;
@@ -464,6 +464,12 @@ void SetConstants(const GameMods& g, std::uint8_t mode) noexcept {
 	SetRow(mode, RowCurse, curse ? CursePct[curse - 1] : Original(mode, RowCurse));
 }
 
+// Back to the game's values (a game without TZ Plus).
+void RestoreConstants() noexcept {
+	for (const Saved& saved : Originals)
+		if (std::int32_t* at = RowValue(saved.mode, saved.row)) *at = saved.value;
+}
+
 // ---- the terrorized levels ----
 
 constexpr int Act1[] { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39 };
@@ -603,6 +609,7 @@ int GiveRewards(std::uint8_t* game, const GameMods& g, bool on, int level = -1) 
 		const std::int32_t total0 = GetStat(unit, StatGoldFind), totalMagic0 = GetStat(unit, StatMagicFind);
 		if (gold0 != gold) SetStat(unit, StatGoldFind, gold);
 		if (magic0 != magic) SetStat(unit, StatMagicFind, magic);
+		if (GetBaseStat(unit, StatExperience) != (on ? g.xp : 0)) SetStat(unit, StatExperience, on ? g.xp : 0);
 		if ((gold0 != gold || magic0 != magic) && RewardLogs < 24)
 			++RewardLogs, Log(false, "rewards on server player %p: gold find %d -> %d (bonus %d -> %d), magic find %d -> %d (bonus %d -> %d)", unit, total0,
 			                  GetStat(unit, StatGoldFind), gold0, gold, totalMagic0, GetStat(unit, StatMagicFind), magic0, magic);
@@ -618,6 +625,8 @@ std::uint64_t HookApply(std::uint8_t* game, std::uint8_t* zone, std::uint8_t fla
 	const int          difficulty = Field<std::uint8_t>(game, GameDifficulty);
 	const std::uint8_t mode       = Field<std::uint8_t>(game, GameMode);
 	if (mode < 2 || difficulty < 1 || difficulty > 2 || (difficulty == 1 && !Config.nightmare) || (difficulty == 2 && !Config.hell)) return Apply(game, zone, flag);
+	// Terror zones turned off for this game (the game's own setting, checked first thing in Apply).
+	if (Field<std::int32_t>(game, GameTerrorOn) == 0) return Apply(game, zone, flag);
 
 	const std::int64_t now     = static_cast<std::int64_t>(std::time(nullptr));
 	bool               changed = false;
@@ -630,13 +639,31 @@ std::uint64_t HookApply(std::uint8_t* game, std::uint8_t* zone, std::uint8_t fla
 	// No game mod: ours replace it, and it must not roll again on rotation.
 	SetField<std::int32_t>(game, GameUMod, 0);
 	SetField<std::uint8_t>(game, GameUModRolled, 1);
-	SetConstants(*g, mode);
 
 	Applying.maxLevel = Ranges[difficulty].maxLevel;
-	Applying.xp       = g->xp;
+	Applying.xp       = 0; // the experience bonus is a player stat (see GiveRewards)
 	Applying.thread.store(GetCurrentThreadId());
 	const std::uint64_t result = Apply(game, static_cast<std::uint8_t*>(ours ? ours : zone), flag);
 	Applying.thread.store(0);
+	// The game may still refuse terror zones (its other checks: quests, game type). Then no TZ Plus either.
+	const auto* used = static_cast<const std::uint8_t*>(ours ? ours : zone);
+	const auto* levels = Field<const std::uint8_t*>(used, 0x88);
+	const int   first  = levels && Field<std::uint64_t>(used, 0x90) ? Field<std::int32_t>(levels, 0) : 0;
+	if (first > 0 && !At<LevelTzFn>(0x489B70)(game, first)) {
+		GiveRewards(game, *g, false);
+		RestoreConstants();
+		AcquireSRWLockExclusive(&Lock);
+		for (auto it = Games.begin(); it != Games.end(); ++it)
+			if (*it == g) {
+				Games.erase(it);
+				break;
+			}
+		if (Last == g) Last = nullptr;
+		ReleaseSRWLockExclusive(&Lock);
+		Log(false, "terror zones are off in this game: no TZ Plus mods or rewards");
+		return result;
+	}
+	SetConstants(*g, mode);
 	// Hell: every level counts. Nightmare: set as the players reach a level (see AddMods).
 	// At game creation the player may not be in yet: AddMods gives them again.
 	const int players = GiveRewards(game, *g, difficulty == 2);
@@ -1122,6 +1149,7 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 		Games.clear();
 		Last       = nullptr;
 		RewardLogs = 0;
+		RestoreConstants();
 		ReleaseSRWLockExclusive(&Lock);
 		break;
 	}
@@ -1168,9 +1196,9 @@ void ShowRewards(int level) noexcept {
 	if (index < 0 || index >= 8) return;
 	void* player = At<PlayerByIndexFn>(0x9A480)(index);
 	if (!player) return;
-	int difficulty = 0, gold = 0, magic = 0;
+	int difficulty = 0, gold = 0, magic = 0, xp = 0;
 	AcquireSRWLockShared(&Lock);
-	if (const GameMods* g = Last) difficulty = g->difficulty, gold = g->gold, magic = g->magic;
+	if (const GameMods* g = Last) difficulty = g->difficulty, gold = g->gold, magic = g->magic, xp = g->xp;
 	ReleaseSRWLockShared(&Lock);
 	if (!difficulty) return;
 	const bool on = difficulty == 2 || (level > 0 && At<InZoneListFn>(InZoneListRva)(level));
@@ -1178,6 +1206,7 @@ void ShowRewards(int level) noexcept {
 	const std::int32_t total0 = GetStat(player, StatGoldFind), totalMagic0 = GetStat(player, StatMagicFind);
 	if (gold0 != (on ? gold : 0)) SetStat(player, StatGoldFind, on ? gold : 0);
 	if (magic0 != (on ? magic : 0)) SetStat(player, StatMagicFind, on ? magic : 0);
+	if (GetBaseStat(player, StatExperience) != (on ? xp : 0)) SetStat(player, StatExperience, on ? xp : 0);
 	static int logs = 0; // a change after the first one means something reset it
 	if ((gold0 != (on ? gold : 0) || magic0 != (on ? magic : 0)) && logs < 30)
 		++logs, Log(false, "rewards on client player %p (index %d, level %d): gold find %d -> %d (bonus %d), magic find %d -> %d (bonus %d)", player, index,
