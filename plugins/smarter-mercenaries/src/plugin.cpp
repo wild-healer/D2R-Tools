@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.35";
+constexpr const char* PluginVersion = "0.0.36";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1009,6 +1009,7 @@ struct Vitals {
 	bool          safe;
 	DWORD         troubleAt; // last time it was low or losing life fast
 	DWORD         dodgeAt, breakAt;
+	DWORD         dangerUntil; // ranged: keeps positioning until then
 };
 std::array<Vitals, 24> VitalsTable {};
 
@@ -1534,7 +1535,14 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	// hit and run, unless something is in their face.
 	const int  dangerRange = Config.danger.load(std::memory_order_relaxed) - (Now.intent == Intent::Advance ? 3 : 0);
 	// Also whenever a monster is well inside its own range, whatever you do.
-	const bool danger      = (Now.intent != Intent::Retreat && nearOwner <= dangerRange) || nearMerc <= Config.danger.load() * 7 / 10;
+	const bool trigger     = (Now.intent != Intent::Retreat && nearOwner <= dangerRange) || nearMerc <= Config.danger.load() * 7 / 10;
+	// It stays in positioning for 2 seconds after the last reason for it:
+	// a moment out of it sent it to its formation spot next to you, and the
+	// next moment back out to a safe distance (in and out every time you moved).
+	Vitals&    vitals      = VitalsOf(merc);
+	if (trigger) vitals.dangerUntil = GetTickCount() + 2000;
+	if (Now.intent == Intent::Retreat && !trigger) vitals.dangerUntil = 0; // backing off: it comes with you
+	const bool danger      = trigger || static_cast<std::int32_t>(vitals.dangerUntil - GetTickCount()) > 0;
 	if (Now.intent == Intent::Retreat && closest && nearMerc <= 3 && !walking) {
 		DeleteEvent(game, merc, 2, 0);
 		if (Escape(game, merc, closest, 5, 1)) return Note(merc, role, closest, -16, "backs off with you, away from a monster in its face");
@@ -1542,9 +1550,13 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	Mv(merc, " ranged: %zu monsters, nearest to you %d, to it %d, danger %d, target %u%s", scan.count, nearOwner == INT_MAX ? -1 : nearOwner,
 	   nearMerc == INT_MAX ? -1 : nearMerc, danger, target ? Field<std::uint32_t>(target, UnitIdOffset) : 0, blocked ? " (all blocked)" : "");
 	if (danger) {
-		mercState.moving = false;
-		if (walking) return Mv(merc, " ranged: still moving");
+		// A run already going: to its formation spot (toward you, into the
+		// danger range) it is re-aimed or ended; its own reposition run goes on.
+		const bool toFormation = mercState.moving;
+		mercState.moving       = false;
+		if (walking && !toFormation) return Mv(merc, " ranged: still moving");
 		if (Reposition(game, merc, owner, scan, role)) return;
+		if (walking) return Halt(merc), Mv(merc, " ranged: stops its run to the formation, in a safe place already");
 		if (closest && nearMerc <= (Now.intent == Intent::Advance ? 3 : 4)) {
 			// Nowhere safe near you: the game's own step away from the monster.
 			DeleteEvent(game, merc, 2, 0);
@@ -1552,9 +1564,11 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 		}
 		if (role == Role::IronWolf && Buff(game, merc, role)) return;
 		if (target) return Mv(merc, " ranged: shoots"), Attack(game, merc, owner, target, role, scan, tick, params);
-		if (blocked && StepToOwner(game, merc, owner, role)) return;
-		if (KeepFormation(game, merc, owner, mercState, sx, sy, walking)) return;
-		return Mv(merc, " idle 3"), Idle(game, merc, 3);
+		// No formation spot here (it is next to you, inside the danger range):
+		// Reposition already keeps it within reach of you. Only when it got
+		// far behind does it run back to its spot.
+		if (Distance(merc, owner) > Config.danger.load() + 6 && KeepFormation(game, merc, owner, mercState, sx, sy, walking)) return;
+		return Mv(merc, " ranged: positioned, nothing to shoot"), Idle(game, merc, 3);
 	}
 	// Formation first; it shoots from its spot.
 	if (KeepFormation(game, merc, owner, mercState, sx, sy, walking)) return;
