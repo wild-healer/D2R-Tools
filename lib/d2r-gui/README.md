@@ -6,6 +6,8 @@ The in-game window parts shared by the D2RLoader plugins in this repo, taken
 out of Grail On! and I Hate TOMLs so a new plugin can have a window that looks
 and behaves like theirs without copying a thousand lines.
 
+What it can do, with an example: [SHOWCASE.md](SHOWCASE.md).
+
 ## How plugins use it
 
 D2R GUI is header-only. A plugin includes `d2r_gui.h` in its `.cpp`, and the
@@ -56,6 +58,8 @@ button and a long scrolling list. Console command `guidemo`.
 | `stash_art.h`, `stash_kit.h` | the stash and settings art at any size (ticks, arrows, boxes, tiles, table rows, chart) | Grail On! |
 | `item_grid.h` | the plugin's item grid drawn its way: half-cell tiles, peeking past the grid, no cannot-wear colour | Grail On! |
 | `panels.h` | `SinglePanel` (one panel, a new layout per show) and `ViewCache` (many panels that each keep a view) | Grail On! |
+| `icons.h` (opt-in) | 120 game-icons.net icons at any size and colour, as pictures or sprites ([preview](docs/icons.png), [credits](ICONS-CREDITS.txt)) | Grail On! |
+| `stash_window.h` (opt-in) | a window in the stash's look (frame, gold title, close button), as Charm Inventory's | Charm Inventory |
 
 ## Rules the library follows
 
@@ -66,9 +70,9 @@ button and a long scrolling list. Console command `guidemo`.
   screen, not by what they show) if they ever look them up.
 - Panels can only be registered while the plugin loads: `PanelPool::Register`
   belongs in `D2RLoaderLoadPlugin`.
-- Calls into the game (`ArchiveFile`, the UI states, the view shift, Low
-  Vision Mode) check the code bytes first and do nothing on a build they
-  don't match (D2R 3.3.94995 and 3.4.95041 match).
+- No D2R version check. Calls into the game (`ArchiveFile`, the UI states,
+  the view shift, Low Vision Mode) look at the code they call first and skip
+  only that part when it is not there.
 - Art falls back to the plugin's own drawing when the game's can't be read,
   so a window never needs a companion mod.
 

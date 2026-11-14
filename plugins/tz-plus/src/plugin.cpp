@@ -53,13 +53,14 @@
 #include <vector>
 
 #include <d2r_gui.h>
+#include <d2r_gui/stash_window.h>
 
 #include "i_hate_tomls_client.h"
 
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.16";
+constexpr const char* PluginVersion = "0.0.17";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1593,12 +1594,6 @@ Gui::ScrollBar    Bar("mods", BarLeft, 30, 30, PanelX, PanelY);
 std::atomic<bool> WindowOpen {};
 int               Scroll = 0;
 
-std::string WindowBackground() {
-	static std::string name;
-	if (name.empty() && Gui::RegisterSprite("background", { Gui::PlainBox(PanelWidth, PanelHeight, 120) })) name = Gui::SpriteName("background");
-	return name;
-}
-
 // This game, as lines (UI thread).
 std::vector<std::string> GameLines() {
 	std::vector<std::string> lines;
@@ -1618,11 +1613,9 @@ std::vector<std::string> GameLines() {
 }
 
 std::string BuildWindow(const std::string& panelName, const std::string& probe) {
-	std::string c = Gui::Image("Background", 0, 0, WindowBackground());
-	c += Gui::LeftPanelFrame(PanelWidth, PanelHeight, "TZ Plus", "close", 1075);
-	c += Gui::Probe(probe);
+	std::string c = Gui::Probe(probe);
 
-	int y = 170;
+	int y = Gui::StashWindow::InnerY + 12;
 	c += Gui::Text("GameTitle", Left, y, Right - Left, LineHeight, "This game", Gui::Style::Section);
 	y += LineHeight;
 	const auto lines = GameLines();
@@ -1669,7 +1662,7 @@ std::string BuildWindow(const std::string& panelName, const std::string& probe) 
 	}
 	c += Gui::Clip("List", 0, listTop, BarLeft - 6, listRoom, inside);
 	c += Bar.Layout(listTop, listRoom, total, Scroll);
-	return Gui::Panel(panelName, PanelX, PanelY, PanelWidth, PanelHeight, c, 10, R"(, "anchor": "$LeftPanelAnchor")");
+	return Gui::StashWindow::Layout(panelName, "TZ Plus", "close", c);
 }
 
 void CloseWindow() {
