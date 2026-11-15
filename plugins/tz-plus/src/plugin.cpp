@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.65";
+constexpr const char* PluginVersion = "0.0.66";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -3243,12 +3243,14 @@ std::uint64_t HookDs1Load(std::uint8_t mode, void* cache, const char* name, void
 		void*                data  = Field<void*>(room2, 0x40) ? Field<void*>(Field<void*>(room2, 0x40), 8) : nullptr;
 		const std::uint8_t*  row   = data ? Field<const std::uint8_t*>(data, 8) : nullptr;
 		const int            index = data ? Field<std::int32_t>(data, 4) : -1;
-		const bool           empty = !name || !name[0];
+		// A real file name ends in .ds1; past the row's last file the column holds "0" (0.0.65: Wild Border 7, 1 file, asked for file 3).
+		const std::size_t    len   = name ? std::strlen(name) : 0;
+		const bool           empty = len < 4 || _stricmp(name + len - 4, ".ds1") != 0;
 		if (Ds1Logs.fetch_add(1, std::memory_order_relaxed) < 200 || empty)
 			Log(empty, "zones: level %d room at %d,%d (%dx%d): preset %d file %d '%s'%s", id, Field<std::int32_t>(room2, 0x60), Field<std::int32_t>(room2, 0x64),
 			    Field<std::int32_t>(room2, 0x68), Field<std::int32_t>(room2, 0x6C), row ? Field<std::int32_t>(row, 0) : -1, index, name ? name : "(null)",
-			    empty ? (row && row[0x40] ? ", empty name: the first file is used" : ", empty name") : "");
-		if (empty && row && row[0x40]) name = reinterpret_cast<const char*>(row + 0x40);
+			    empty ? (row && row[0x40] ? ", not a file: the first file is used" : ", not a file") : "");
+		if (empty && row && row[0x40]) name = reinterpret_cast<const char*>(row + 0x40), SetField<std::int32_t>(data, 4, 0);
 	}
 	return At<Ds1LoadFn>(Ds1LoadRva)(mode, cache, name, room2);
 }
