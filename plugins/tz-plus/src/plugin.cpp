@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.48";
+constexpr const char* PluginVersion = "0.0.49";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -909,6 +909,9 @@ void WriteZoneStats(GameMods& g, bool floor) noexcept {
 	ReleaseSRWLockExclusive(&StatsLock);
 }
 
+int  LevelListHas(int mode, int level, int monster, std::string& list) noexcept; // 1 yes, 0 no, -1 unknown (zones section)
+std::atomic<int> VanillaSpawnLogs { 0 };
+
 void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	if (!game || !unit || !Config.enabled.load(std::memory_order_relaxed)) return;
 	static int entries = 0; // first calls logged, to see where it stops
@@ -1010,6 +1013,13 @@ void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 			if (total % 50 == 0) Log(false, "zone level %d: %d monsters generated so far", level, total);
 			NoteZoneMonster(level, type, room);
 		}
+	} else if (g->zoneId && level > 0 && VanillaSpawnLogs.load(std::memory_order_relaxed) < 40) {
+		// Diagnosis: monsters of vanilla levels after a zone portal opened, against the level's own lists.
+		std::string list;
+		const int   cls = static_cast<int>(Field<std::uint32_t>(unit, 4));
+		const int   has = LevelListHas(Field<std::uint8_t>(game, GameMode), level, cls, list);
+		VanillaSpawnLogs.fetch_add(1);
+		Log(false, "vanilla spawn: level %d monster class %d type 0x%X: %s the level's lists [%s]", level, cls, type, has > 0 ? "IN" : has == 0 ? "NOT in" : "?", list.c_str());
 	}
 	AcquireSRWLockExclusive(&g->modLock);
 	try {
@@ -2295,6 +2305,24 @@ std::string LevelName(const ZoneBank& b, int level) {
 	return name;
 }
 
+int LevelListHas(int mode, int level, int monster, std::string& list) noexcept {
+	if (mode < 1 || mode > 3 || !Banks[mode].levels || level <= 0 || level >= Banks[mode].count + ZoneSlots) return -1;
+	const std::uint8_t* row = Banks[mode].levels + level * LevelRow;
+	int                 has = 0;
+	try {
+		for (const std::uintptr_t at : { LvMon, LvNMon, LvUMon }) {
+			list += at == LvMon ? "mon:" : at == LvNMon ? " nmon:" : " umon:";
+			for (int i = 0; i < MonSlots; ++i) {
+				const auto m = Field<std::int16_t>(row, at + i * 2);
+				if (m < 0) break;
+				list += std::to_string(m) + ",";
+				if (m == monster) has = 1;
+			}
+		}
+	} catch (...) {}
+	return has;
+}
+
 // Level `id` (a TZ Plus zone) becomes a copy of `tmpl` with random monsters.
 // vis0/vis1: the levels the entry and exit rooms lead to (Warp -1: rooms without stairs; a portal arrives in the
 // entry room, D2R+0x3DA650). empty: no monsters, one room (the zone's "level 2").
@@ -2591,8 +2619,8 @@ const char* HookStringByKey(const KeyView* key) noexcept {
 				const int   slot  = n - 1, zone = slot / 3 + 1;
 				const char* verb  = kind == 0 ? "" : kind == 1 ? "To " : "Entering ";
 				if (!text[0]) {
-					if (slot % 3 == 2) std::snprintf(text, 48, "%sHarrogath", verb);
-					else std::snprintf(text, 48, slot % 3 == 1 ? "%sTerror Zone %d Dungeon" : "%sTerror Zone %d", verb, zone);
+					if (slot % 3 != 0) std::snprintf(text, 48, "%sHarrogath", verb);
+					else std::snprintf(text, 48, "%sTerror Zone %d", verb, zone);
 				}
 				return text;
 			}
@@ -2746,12 +2774,27 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	if (g->zonesUsed + 3 > ZoneSlots) return SetPortalResult("TZ Plus zones: all %d zones of this game are used, make a new game for more", ZoneSlots / 3);
 	const int     id    = base + g->zonesUsed;
 	std::uint64_t state = Field<std::uint64_t>(game, GameSeed) ^ (static_cast<std::uint64_t>(std::time(nullptr)) << 16) ^ static_cast<std::uint64_t>(id);
-	// A zone = an outdoor area (where the portal arrives) + its dungeon, one level; the dungeon's down stairs lead to Harrogath
-	// (through an empty stand-in level, the third slot).
-	const ZonePair pair = ZonePairs[Mix(state) % (sizeof(ZonePairs) / sizeof(ZonePairs[0]))];
-	const int      tmpl = pair.outdoor, dungeon = pair.dungeon;
-	if (tmpl >= Banks[mode].count || dungeon >= Banks[mode].count || !MazeOf(Banks[mode], dungeon))
-		return SetPortalResult("TZ Plus zones: the level tables have no %d / %d to copy", tmpl, dungeon);
+	// A zone = one dungeon level. Its stairs toward the outside and its down stairs both lead to Harrogath, each through an
+	// empty stand-in level (the other two slots). Outdoor zones (0.0.48) crashed while building: not used for now.
+	int tmpl = 0, outer = 0, deeper = 0;
+	for (int tries = 0; tries < 32 && !tmpl; ++tries) {
+		const int pick = ZoneTemplates[Mix(state) % (sizeof(ZoneTemplates) / sizeof(ZoneTemplates[0]))];
+		if (pick >= Banks[mode].count || !MazeOf(Banks[mode], pick) || Field<std::uint8_t>(Banks[mode].levels + pick * LevelRow, LvWaypoint) != 0xFF) continue;
+		// Deeper = stairs to a level of the same build type (the dungeon's next level), outer = the other one.
+		const std::uint8_t* d = Banks[mode].defs + pick * DefRow;
+		int o = 0, n = 0;
+		for (int i = 0; i < 8; ++i) {
+			const std::int32_t v = Field<std::int32_t>(d, DefVis + i * 4);
+			if (v <= 0 || v >= Banks[mode].count || Field<std::int32_t>(d, DefWarp + i * 4) < 0) continue;
+			const std::uint8_t* t = Banks[mode].defs + v * DefRow;
+			const bool same = Field<std::int32_t>(t, DefDrlg) == Field<std::int32_t>(d, DefDrlg) && Field<std::int32_t>(t, DefType) == Field<std::int32_t>(d, DefType);
+			if (same && !n) n = v;
+			else if (!same && !o) o = v;
+		}
+		if (o && n) tmpl = pick, outer = o, deeper = n;
+	}
+	if (!tmpl) return SetPortalResult("TZ Plus zones: no dungeon to copy was found in the level tables");
+	const int dungeon = tmpl;
 	{
 		const int layer = NextLayer.fetch_add(3);
 		for (int i = 0; i < 3; ++i) ZoneLayer[id + i - base] = layer + i;
@@ -2764,18 +2807,12 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 			if (std::find(ForcedPicks, ForcedPicks + ForcedCount, m) == ForcedPicks + ForcedCount) ForcedPicks[ForcedCount++] = m;
 		}
 	{
-		// The dungeon's template stairs: toward the outdoor area (its entry), and deeper (its down stairs).
-		std::int32_t deeper = 0;
-		const std::uint8_t* ddef = Banks[mode].defs + dungeon * DefRow;
-		for (int i = 0; i < 8; ++i)
-			if (const std::int32_t v = Field<std::int32_t>(ddef, DefVis + i * 4); v > 0 && v != tmpl && Field<std::int32_t>(ddef, DefWarp + i * 4) >= 0) deeper = v;
-		const ZoneLink outdoorLinks[] { { dungeon, id + 1 } };
-		const ZoneLink dungeonLinks[] { { tmpl, id }, { deeper, id + 2 } };
+		const ZoneLink links[] { { outer, id + 1 }, { deeper, id + 2 } };
 		for (int bank = 1; bank <= 3; ++bank) {
 			std::uint64_t copy = state, copy1 = state, copy2 = state;
-			SetupZone(Banks[bank], id, tmpl, copy, 0, 0, false, outdoorLinks, 1, 0);
-			SetupZone(Banks[bank], id + 1, dungeon, copy1, 0, 0, false, dungeonLinks, deeper ? 2 : 1, tmpl);
-			SetupZone(Banks[bank], id + 2, dungeon, copy2, id + 1, 0, true);
+			SetupZone(Banks[bank], id, tmpl, copy, 0, 0, false, links, 2, outer);
+			SetupZone(Banks[bank], id + 1, tmpl, copy1, id, 0, true);
+			SetupZone(Banks[bank], id + 2, tmpl, copy2, id, 0, true);
 		}
 	}
 	ForcedCount = 0;
@@ -2793,6 +2830,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	for (auto& c : g->zoneCount) c = 0;
 	AcquireSRWLockExclusive(&g->modLock);
 	g->zoneMons.clear(), g->zoneMet.clear(), g->zoneClasses.clear();
+	VanillaSpawnLogs = 0;
 	for (int i = 0; i < 4; ++i) g->zoneGen[i] = g->zoneSeen[i] = g->zoneKilled[i] = 0;
 	ReleaseSRWLockExclusive(&g->modLock);
 	Roll(*g);
@@ -2809,8 +2847,8 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	// a10 = 1: past the game's town check (only the cow level and Pandemonium from towns); the act must still match.
 	void* portal = nullptr;
 	g->safeLevel = 0;
-	ZoneTemplate[id - base] = tmpl, ZoneTemplate[id + 1 - base] = dungeon, ZoneTemplate[id + 2 - base] = 0; // the stand-in keeps its id: one entry room
-	ZoneStandIn[id - base] = false, ZoneStandIn[id + 1 - base] = false, ZoneStandIn[id + 2 - base] = true;
+	ZoneTemplate[id - base] = tmpl, ZoneTemplate[id + 1 - base] = 0, ZoneTemplate[id + 2 - base] = 0; // the stand-ins keep their ids: one entry room
+	ZoneStandIn[id - base] = false, ZoneStandIn[id + 1 - base] = true, ZoneStandIn[id + 2 - base] = true;
 	{
 		std::uint64_t layout = Field<std::uint64_t>(game, GameSeed) ^ GetTickCount64() ^ (static_cast<std::uint64_t>(id) << 40);
 		for (int i = 0; i < 3; ++i) ZoneSeed[id + i - base] = static_cast<std::uint32_t>(Mix(layout)) | 1;
@@ -2833,10 +2871,10 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		ZonePortals[PortalCursor++ % 64] = { Field<std::uint32_t>(portal, 8), id };
 		ReleaseSRWLockExclusive(&PortalLock);
 	}
-	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d) with its %s (level %d, our %d), monsters [%s], density %d/%d; new mods: %s",
-	                g->zonesUsed / 3, ZoneSlots / 3, id, LevelName(Banks[mode], tmpl).c_str(), tmpl, LevelName(Banks[mode], dungeon).c_str(), dungeon, id + 1,
-	                monsters.c_str(), Field<std::int32_t>(Banks[mode].levels + id * LevelRow, LvDen + 8),
-	                Field<std::int32_t>(Banks[mode].levels + (id + 1) * LevelRow, LvDen + 8), mods.c_str());
+	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d; its stairs to %d and %d lead to Harrogath), monsters [%s], density %d; new mods: %s",
+	                g->zonesUsed / 3, ZoneSlots / 3, id, LevelName(Banks[mode], tmpl).c_str(), tmpl, outer, deeper, monsters.c_str(),
+	                Field<std::int32_t>(Banks[mode].levels + id * LevelRow, LvDen + 8), mods.c_str());
+	(void)dungeon;
 }
 
 using RemoveUnitFn   = void (*)(void* game, void* unit) noexcept;
@@ -3151,7 +3189,7 @@ void TrackMeetings(std::uint8_t* game) noexcept {
 		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
 		void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
 		if (!room) continue;
-		if (const int lv = At<RoomLevelFn>(0x2EFC10)(room); lv != g->zoneId && lv != g->zoneId + 1) continue;
+		if (At<RoomLevelFn>(0x2EFC10)(room) != g->zoneId) continue;
 		At<GetCoordsFn>(0x34A040)(player, &players[count++]);
 	}
 	if (!count) return;
@@ -3216,8 +3254,7 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 	for (const std::uint64_t site : LabelCalls)
 		if (!PatchCall(site, LabelRva, reinterpret_cast<const void*>(&HookLabel)))
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
-	if (!PatchCall(OutdoorBuildCall, OutdoorBuildRva, reinterpret_cast<const void*>(&HookOutdoorBuild)))
-		Log(true, "zones: outdoor zones can't be built, could not patch D2R+0x%llX", static_cast<unsigned long long>(OutdoorBuildCall));
+	(void)&HookOutdoorBuild; // outdoor zones: not used for now (0.0.48 crashed building one)
 	{
 		bool cleared = true;
 		for (const std::uint64_t site : LayerClearCalls) cleared = PatchCall(site, LayerClearRva, reinterpret_cast<const void*>(&HookLayerClear)) && cleared;
