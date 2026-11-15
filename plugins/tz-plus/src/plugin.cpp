@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.64";
+constexpr const char* PluginVersion = "0.0.65";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -3229,6 +3229,30 @@ std::uint8_t HookBorderPlace(std::uint8_t mode, void* ctx, void* preset, void* f
 	return At<BorderPlaceFn>(BorderPlaceRva)(mode, ctx, preset, file);
 }
 
+// Preset room files (D2R+0x3DE0E0 (mode, room2) loads the room's DS1 through 0x3DCF10 (mode, &cache, name) at 0x3DE138; the
+// name is the preset row's File[index] (row +0x40, 60 bytes each), index at [room2+0x40]+8 -> +4). An empty or missing name gives
+// an invalid file handle (Preset.cpp:395) and a crash reading it (0.0.63/0.0.64 at D2R+0x3E15xx on the 16x16 areas). Logged in
+// zone levels; an empty name falls back to the row's first file.
+constexpr std::uint64_t Ds1LoadCall = 0x3DE138, Ds1LoadRva = 0x3DCF10;
+using Ds1LoadFn = std::uint64_t (*)(std::uint8_t mode, void* cache, const char* name, void* room2) noexcept;
+std::atomic<int> Ds1Logs { 0 };
+std::uint64_t HookDs1Load(std::uint8_t mode, void* cache, const char* name, void* room2) noexcept {
+	void* level = room2 ? Field<void*>(room2, 0x90) : nullptr;
+	const int id = level ? Field<std::int32_t>(level, 0x1F8) : -1;
+	if (IsZoneId(id) && room2) {
+		void*                data  = Field<void*>(room2, 0x40) ? Field<void*>(Field<void*>(room2, 0x40), 8) : nullptr;
+		const std::uint8_t*  row   = data ? Field<const std::uint8_t*>(data, 8) : nullptr;
+		const int            index = data ? Field<std::int32_t>(data, 4) : -1;
+		const bool           empty = !name || !name[0];
+		if (Ds1Logs.fetch_add(1, std::memory_order_relaxed) < 200 || empty)
+			Log(empty, "zones: level %d room at %d,%d (%dx%d): preset %d file %d '%s'%s", id, Field<std::int32_t>(room2, 0x60), Field<std::int32_t>(room2, 0x64),
+			    Field<std::int32_t>(room2, 0x68), Field<std::int32_t>(room2, 0x6C), row ? Field<std::int32_t>(row, 0) : -1, index, name ? name : "(null)",
+			    empty ? (row && row[0x40] ? ", empty name: the first file is used" : ", empty name") : "");
+		if (empty && row && row[0x40]) name = reinterpret_cast<const char*>(row + 0x40);
+	}
+	return At<Ds1LoadFn>(Ds1LoadRva)(mode, cache, name, room2);
+}
+
 // Where each of a zone's levels goes (tiles). The dungeon and the stand-in: their own slot's place. The outdoor area: its slot's
 // place, the template's size; the entry area to its west and the exit area to its east, touching it (the game links levels
 // whose boxes touch, D2R+0x326A10), SmallArea square, centred on its height.
@@ -3563,6 +3587,8 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 	for (const std::uint64_t site : LabelCalls)
 		if (!PatchCall(site, LabelRva, reinterpret_cast<const void*>(&HookLabel)))
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
+	if (!PatchCall(Ds1LoadCall, Ds1LoadRva, reinterpret_cast<const void*>(&HookDs1Load), { 0x4D, 0x89, 0xF1 })) // mov r9, r14 (room2)
+		Log(true, "zones: could not patch D2R+0x%llX (preset files)", static_cast<unsigned long long>(Ds1LoadCall));
 	if (!PatchCall(BorderPlaceCall, BorderPlaceRva, reinterpret_cast<const void*>(&HookBorderPlace)))
 		Log(true, "zones: could not patch D2R+0x%llX (border pieces)", static_cast<unsigned long long>(BorderPlaceCall));
 	if (!PatchCall(OutdoorBuildCall, OutdoorBuildRva, reinterpret_cast<const void*>(&HookOutdoorBuild)))
