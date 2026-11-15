@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.59";
+constexpr const char* PluginVersion = "0.0.60";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -527,7 +527,8 @@ constexpr int    ZoneSlots = 30; // ZoneParts levels a zone
 // A zone's levels: its outdoor area, its dungeon, the dungeon's down stairs stand-in (sends you back outdoors), and two small
 // outdoor areas joined to the outdoor one by the game's own passages: the entry (where the portal arrives) and the exit (chests).
 constexpr int    ZoneParts = 5, KindMain = 0, KindDungeon = 1, KindStandIn = 2, KindEntry = 3, KindExit = 4;
-constexpr int    SmallArea = 48; // tiles, the entry and exit areas' size (32 is too small for the game's border pass: 'secondary-border area is negative')
+constexpr int    SmallArea = 40; // tiles, the entry and exit areas' size (32 is too small for the loader's border pass: 'secondary-border area is negative')
+constexpr int    MainArea  = 64; // tiles, the outdoor area's size (Cold Plains: 80)
 using GetLevelFn  = void* (*)(std::uint8_t mode, void* drlg, int level) noexcept; // D2R+0x3267C0: the act's level (made if new)
 using BuildLevelFn = std::uint64_t (*)(std::uint8_t mode, void* level) noexcept;  // D2R+0x3271C0: builds a level's rooms
 std::atomic<std::uint32_t> ZoneSeed[ZoneSlots] {}; // each zone's layout seed, rolled when its portal opens (server and client build the same map)
@@ -3206,6 +3207,7 @@ void ZoneBox(std::uint8_t mode, int id, int& x, int& y, int& w, int& h) noexcept
 		const std::uint8_t* def = Banks[mode].defs + tmpl * DefRow;
 		for (int d = 0; d < 3; ++d) mw = std::max(mw, Field<std::int32_t>(def, DefSizeX + d * 4)), mh = std::max(mh, Field<std::int32_t>(def, DefSizeY + d * 4));
 		mw = std::min((mw + 7) & ~7, 200), mh = std::min((mh + 7) & ~7, 200);
+		mw = std::min(mw, MainArea), mh = std::min(mh, MainArea);
 	}
 	const int sy = my + ((mh - SmallArea) / 2 & ~7);
 	if (kind == KindEntry) x = mx - SmallArea, y = sy, w = h = SmallArea;
