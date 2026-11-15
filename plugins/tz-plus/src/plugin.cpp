@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.44";
+constexpr const char* PluginVersion = "0.0.45";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2652,7 +2652,12 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	for (int tries = 0; tries < 32 && !tmpl; ++tries) {
 		const int pick = ZoneTemplates[Mix(state) % (sizeof(ZoneTemplates) / sizeof(ZoneTemplates[0]))];
 		// No dungeon with a waypoint (its preset room would still make one, e.g. Jail Level 1).
-		if (pick < Banks[mode].count && MazeOf(Banks[mode], pick) && Field<std::uint8_t>(Banks[mode].levels + pick * LevelRow, LvWaypoint) == 0xFF) tmpl = pick;
+		// Only dungeons with two stairs rooms (entry and exit): one-level ones (Spider Cave, Crypt, Ancient Tunnels, Hell 1) are left out.
+		if (pick >= Banks[mode].count || !MazeOf(Banks[mode], pick) || Field<std::uint8_t>(Banks[mode].levels + pick * LevelRow, LvWaypoint) != 0xFF) continue;
+		int stairs = 0;
+		for (int i = 0; i < 8; ++i)
+			if (Field<std::int32_t>(Banks[mode].defs + pick * DefRow, DefWarp + i * 4) >= 0 && Field<std::int32_t>(Banks[mode].defs + pick * DefRow, DefVis + i * 4) > 0) ++stairs;
+		if (stairs >= 2) tmpl = pick;
 	}
 	if (!tmpl) return SetPortalResult("TZ Plus zones: no dungeon to copy was found in the level tables");
 	for (int bank = 1; bank <= 3; ++bank) {
@@ -2974,7 +2979,7 @@ void SpawnRoran(std::uint8_t* game) noexcept {
 }
 
 std::uint64_t HookFrameCall(void* game) noexcept {
-	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), OpenExitPortal(static_cast<std::uint8_t*>(game));
+	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
 	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
