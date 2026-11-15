@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.54";
+constexpr const char* PluginVersion = "0.0.55";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -318,6 +318,8 @@ struct GameMods {
 	int                 zoneId = 0, level2Id = 0;            // the open zone and its "level 2" (one empty room)
 	void*               exitPortal = nullptr;                // a single-level zone's portal to level 2 (its farthest room)
 	bool                single = false;
+	int                 exitX = 0, exitY = 0; // the zone's exit area (subtiles): the farthest room from the entry, 3 golden chests
+	bool                exitDone = false;
 	std::uint32_t       exitPortalId = 0;
 	bool                roranDone = false; // Roran Stronghammer is in Harrogath
 	int                 roranTries = 0;
@@ -1013,6 +1015,13 @@ void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 			g->zoneCount[kind].fetch_add(1, std::memory_order_relaxed);
 			if (total % 50 == 0) Log(false, "zone level %d: %d monsters generated so far", level, total);
 			NoteZoneMonster(level, type, room);
+			{ // checked against the entry and exit areas on the next frame (the entry is known only once the portal is made)
+				AcquireSRWLockExclusive(&SafeLock);
+				try {
+					SafeQueue.push_back({ game, unit, Field<std::uint32_t>(unit, 8) });
+				} catch (...) {}
+				ReleaseSRWLockExclusive(&SafeLock);
+			}
 		}
 	} else if (g->zoneId && level > 0 && VanillaSpawnLogs.load(std::memory_order_relaxed) < 40) {
 		// Diagnosis: monsters of vanilla levels after a zone portal opened, against the level's own lists.
@@ -2887,6 +2896,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		                       freeRoom ? "" : " (no free spot)");
 	g->zonesUsed += 3;
 	g->zoneId = id, g->level2Id = id + 2, g->exitPortal = nullptr, g->exitPortalId = 0, g->single = ZoneSingle[id - base].load();
+	g->exitX = g->exitY = 0, g->exitDone = false;
 	g->portal   = portal;
 	g->portalId = portal ? Field<std::uint32_t>(portal, 8) : 0;
 	ZonePortalOpen = portal != nullptr;
@@ -2941,25 +2951,29 @@ void MoveOutOfSafeArea(std::uint8_t* game) noexcept {
 		if (!room || At<RoomLevelFn>(0x2EFC10)(room) != g->safeLevel) continue;
 		Coord at {};
 		At<GetCoordsFn>(0x34A040)(m.unit, &at);
-		const int dx = at.x - g->safeX, dy = at.y - g->safeY;
+		// The entry area (the portal) or the exit area (the chests).
+		int cx = g->safeX, cy = g->safeY;
+		if (g->exitX && std::abs(at.x - g->exitX) <= SafeRadius && std::abs(at.y - g->exitY) <= SafeRadius) cx = g->exitX, cy = g->exitY;
+		const int dx = at.x - cx, dy = at.y - cy;
 		if (std::abs(dx) > SafeRadius || std::abs(dy) > SafeRadius) continue;
 		// Out along the line from the portal through the monster (straight out on x if it stands on the portal).
 		const double length = std::sqrt(static_cast<double>(dx * dx + dy * dy));
 		const double ux = length > 0.5 ? dx / length : 1.0, uy = length > 0.5 ? dy / length : 0.0;
 		bool moved = false;
 		for (int extra = 4; extra <= 24 && !moved; extra += 6) {
-			Coord spot { g->safeX + static_cast<int>(ux * (SafeRadius * 1.42 + extra)), g->safeY + static_cast<int>(uy * (SafeRadius * 1.42 + extra)) };
+			Coord spot { cx + static_cast<int>(ux * (SafeRadius * 1.42 + extra)), cy + static_cast<int>(uy * (SafeRadius * 1.42 + extra)) };
 			void* nearRoom = At<RoomAtFn>(0x38DFB0)(room, spot.x, spot.y);
 			if (!nearRoom) continue;
 			void* free = nullptr;
 			At<FindFreeSpotFn>(0x517F90)(game, nearRoom, &spot, 3, 0x400, &free, 4, 100);
-			if (!free || (std::abs(spot.x - g->safeX) <= SafeRadius && std::abs(spot.y - g->safeY) <= SafeRadius)) continue;
+			if (!free || (std::abs(spot.x - g->safeX) <= SafeRadius && std::abs(spot.y - g->safeY) <= SafeRadius) ||
+			    (g->exitX && std::abs(spot.x - g->exitX) <= SafeRadius && std::abs(spot.y - g->exitY) <= SafeRadius)) continue;
 			At<MoveUnitFn>(0x491CA0)(game, m.unit, free, spot.x, spot.y, 0, 0);
 			At<MoveDoneFn>(0x34F490)(m.unit, 1);
 			moved = true;
-			if (SafeLogs < 15) ++SafeLogs, Log(false, "zones: monster %u moved from %d,%d to %d,%d (out of the entry area)", m.id, at.x, at.y, spot.x, spot.y);
+			if (SafeLogs < 15) ++SafeLogs, Log(false, "zones: monster %u moved from %d,%d to %d,%d (out of the %s area)", m.id, at.x, at.y, spot.x, spot.y, cx == g->safeX && cy == g->safeY ? "entry" : "exit");
 		}
-		if (!moved && SafeLogs < 15) ++SafeLogs, Log(false, "zones: monster %u at %d,%d could not be moved out of the entry area", m.id, at.x, at.y);
+		if (!moved && SafeLogs < 15) ++SafeLogs, Log(false, "zones: monster %u at %d,%d could not be moved out of the entry or exit area", m.id, at.x, at.y);
 	}
 }
 
@@ -2967,6 +2981,52 @@ void MoveOutOfSafeArea(std::uint8_t* game) noexcept {
 // entry gets a red portal to level 2 once a player is in the zone. Rooms: level +0x10, next +0x48, flags +0x50, Room1 +0x58,
 // x, y, w, h +0x60 (tiles), level +0x90.
 int ExitLogs = 0;
+// A zone's exit area: its farthest room from the entry portal gets 3 golden chests (Objects 397, sparkly chest); monsters
+// made there are moved out like at the entry. Set up once, the first frame a player is in the zone.
+using SpawnUnitFn = void* (*)(int type, int cls, int x, int y, void* game, void* room, std::uint64_t flag, int mode, int a9, void* a10) noexcept;
+constexpr int GoldenChest = 397, ExitChests = 3;
+void ZoneExitArea(std::uint8_t* game) noexcept {
+	GameMods* g = ModsOf(game);
+	if (!g || !g->zoneId || g->exitDone || g->safeLevel != g->zoneId) return;
+	auto* client = Field<std::uint8_t*>(game, GameClients);
+	for (int guard = 0; client && guard < 64; ++guard, client = Field<std::uint8_t*>(client, ClientNext)) {
+		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
+		void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
+		if (!room || At<RoomLevelFn>(0x2EFC10)(room) != g->zoneId) continue;
+		g->exitDone = true;
+		auto* room2 = Field<std::uint8_t*>(room, 0x18);
+		auto* level = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
+		if (!level) return;
+		const long long fromX = g->safeX / 5, fromY = g->safeY / 5;
+		std::uint8_t*   farRoom = nullptr;
+		long long       best = -1;
+		int             rooms = 0;
+		for (auto* r = Field<std::uint8_t*>(level, 0x10); r && rooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++rooms) {
+			const long long dx = Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2 - fromX, dy = Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2 - fromY;
+			if (dx * dx + dy * dy > best) best = dx * dx + dy * dy, farRoom = r;
+		}
+		if (!farRoom) return Log(true, "zones: level %d has no room for its exit area", g->zoneId);
+		g->exitX = (Field<std::int32_t>(farRoom, 0x60) + Field<std::int32_t>(farRoom, 0x68) / 2) * 5;
+		g->exitY = (Field<std::int32_t>(farRoom, 0x64) + Field<std::int32_t>(farRoom, 0x6C) / 2) * 5;
+		if (!Field<void*>(farRoom, 0x58)) At<ActivateRoomFn>(0x3289A0)(Field<std::uint8_t>(game, GameMode), farRoom);
+		void* exitRoom = Field<void*>(farRoom, 0x58);
+		if (!exitRoom) return Log(true, "zones: the exit room of level %d could not be loaded", g->zoneId);
+		int made = 0;
+		for (int i = 0; i < ExitChests; ++i) {
+			Coord spot { g->exitX + (i - 1) * 7, g->exitY };
+			void* free = nullptr;
+			At<FindFreeSpotFn>(0x517F90)(game, exitRoom, &spot, 2, 0x400, &free, 4, 100);
+			void* chest = free ? At<SpawnUnitFn>(0x490410)(2, GoldenChest, spot.x, spot.y, game, free, 1, 0, 0, nullptr) : nullptr;
+			if (chest) ++made;
+			Log(false, "zones: exit area of level %d: golden chest %d at %d,%d %s", g->zoneId, i + 1, spot.x, spot.y, chest ? "made" : free ? "refused" : "(no free spot)");
+		}
+		Log(false, "zones: exit area of level %d at %d,%d (%lld tiles from the entry), %d of %d chests", g->zoneId, g->exitX, g->exitY,
+		    static_cast<long long>(std::sqrt(static_cast<double>(best))), made, ExitChests);
+		return;
+	}
+}
+
+
 void OpenExitPortal(std::uint8_t* game) noexcept {
 	GameMods* g = ModsOf(game);
 	if (!g || !g->zoneId || !g->single || g->exitPortal) return;
@@ -3339,7 +3399,8 @@ void TrackMeetings(std::uint8_t* game) noexcept {
 }
 
 std::uint64_t HookFrameCall(void* game) noexcept {
-	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), TrackMeetings(static_cast<std::uint8_t*>(game));
+	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), TrackMeetings(static_cast<std::uint8_t*>(game)),
+		          ZoneExitArea(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
 	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
