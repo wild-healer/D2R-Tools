@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.45";
+constexpr const char* PluginVersion = "0.0.46";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -323,6 +323,12 @@ struct GameMods {
 	std::uint32_t       portalId  = 0;
 	SRWLOCK             modLock = SRWLOCK_INIT;
 	std::unordered_map<void*, std::uint32_t> modded; // monsters given our mods (unit -> unit id): not mercs or summons
+	// The open zone's monsters, each counted once (under modLock): id -> kind (0 trash, 1 champion, 2 unique, 3 minion),
+	// generated = made by the game, met = came within MeetRadius of a player, killed = met and then died.
+	std::unordered_map<std::uint32_t, std::uint8_t> zoneMons;
+	std::unordered_map<std::uint32_t, std::uint8_t> zoneMet; // id -> kind | 0x80 once killed
+	int                 zoneGen[4] {}, zoneSeen[4] {}, zoneKilled[4] {};
+	std::uint64_t       meetTick = 0;
 };
 
 bool Modded(GameMods& g, void* unit) noexcept {
@@ -841,6 +847,8 @@ void NoteZoneMonster(int level, std::uint16_t type, void* room) noexcept {
 	ReleaseSRWLockExclusive(&StatsLock);
 }
 
+constexpr int MeetRadius = 30; // subtiles (2/3 yard each): about the screen around you
+
 void WriteZoneStats(GameMods& g, bool floor) noexcept {
 	AcquireSRWLockExclusive(&StatsLock);
 	try {
@@ -851,9 +859,16 @@ void WriteZoneStats(GameMods& g, bool floor) noexcept {
 				std::snprintf(item, sizeof(item), "%s0x%X x%d", types.empty() ? "" : ", ", t, n);
 				types += item;
 			}
-			const int total = g.zoneCount[0] + g.zoneCount[1] + g.zoneCount[2] + g.zoneCount[3];
-			Log(false, "zone level %d final: %d monsters: %d trash, %d champions, %d uniques, %d minions; type flags [%s]; %zu rooms with monsters", Stats.level, total,
-			    g.zoneCount[0].load(), g.zoneCount[1].load(), g.zoneCount[2].load(), g.zoneCount[3].load(), types.c_str(), Stats.rooms.size());
+			AcquireSRWLockShared(&g.modLock);
+			const auto line = [](const char* what, const int (&n)[4]) {
+				Log(false, "  %s: %d monsters: %d trash, %d champions, %d uniques, %d minions", what, n[0] + n[1] + n[2] + n[3], n[0], n[1], n[2], n[3]);
+			};
+			Log(false, "zone level %d final stats (each monster once; met = came within %d yards of you):", Stats.level, MeetRadius * 2 / 3);
+			line("generated", g.zoneGen);
+			line("met", g.zoneSeen);
+			line("killed", g.zoneKilled);
+			ReleaseSRWLockShared(&g.modLock);
+			Log(false, "zone level %d: type flags [%s]; %zu rooms with monsters", Stats.level, types.c_str(), Stats.rooms.size());
 			if (std::uint8_t* level = floor ? Stats.drlgLevel : nullptr) {
 				int rooms = 0;
 				long long tiles = 0;
@@ -960,13 +975,23 @@ void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	CapLevel(unit);
 	g->monsters.fetch_add(1, std::memory_order_relaxed);
 	if (const int zb = ZoneBase.load(); zb > 0 && level >= zb && level < zb + ZoneSlots) {
-		const int kind  = (type & 0x10) ? 3 : (type & 0x04) ? 1 : (type & 0x0A) ? 2 : 0; // minion, champion (spawned 0x4|0x8), unique/superunique, trash
-		const int total = 1 + g->zoneCount[0] + g->zoneCount[1] + g->zoneCount[2] + g->zoneCount[3];
-		g->zoneCount[kind].fetch_add(1, std::memory_order_relaxed);
-		if (total % 25 == 0)
-			Log(false, "zone level %d: %d monsters so far: %d trash, %d champions, %d uniques, %d minions", level, total, g->zoneCount[0].load(), g->zoneCount[1].load(),
-			    g->zoneCount[2].load(), g->zoneCount[3].load());
-		NoteZoneMonster(level, type, room);
+		const int kind = (type & 0x10) ? 3 : (type & 0x04) ? 1 : (type & 0x0A) ? 2 : 0; // minion, champion (spawned 0x4|0x8), unique/superunique, trash
+		AcquireSRWLockExclusive(&g->modLock);
+		bool fresh = false;
+		try {
+			fresh = g->zoneMons.emplace(Field<std::uint32_t>(unit, 8), static_cast<std::uint8_t>(kind)).second;
+		} catch (...) {}
+		int total = 0;
+		if (fresh) {
+			++g->zoneGen[kind];
+			total = g->zoneGen[0] + g->zoneGen[1] + g->zoneGen[2] + g->zoneGen[3];
+		}
+		ReleaseSRWLockExclusive(&g->modLock);
+		if (fresh) {
+			g->zoneCount[kind].fetch_add(1, std::memory_order_relaxed);
+			if (total % 50 == 0) Log(false, "zone level %d: %d monsters generated so far", level, total);
+			NoteZoneMonster(level, type, room);
+		}
 	}
 	AcquireSRWLockExclusive(&g->modLock);
 	try {
@@ -2182,7 +2207,11 @@ constexpr int            ZoneArea    = 2304; // map size of every zone: rooms x 
 constexpr int            SafeRadius  = 30;   // no monster spawns this close to the zone's entry portal
 constexpr std::uintptr_t DefQuest = 0, DefQuestEx = 4, DefLayer = 8, DefDrlg = 48, DefType = 52, DefDepend = 44, DefVis = 72, DefWarp = 104;
 constexpr int            MonSlots = 25, ZoneMonsters = 8;
-constexpr int            ZoneLayerBase = 160; // automap layers of our levels (vanilla uses 0-99)
+// Automap layers of our levels: past the game's 0-99 (the character's .map file has a 100-entry table, HookLayerSave/Load keep
+// ours out of it), a new number for each zone opened so an old zone's map never shows up again.
+std::atomic<int> NextLayer { 1000 };
+std::atomic<bool> LayersSafe { false }; // our layer numbers only once the .map file hooks are in
+std::atomic<int> ZoneLayer[30] {};
 // Generic dungeons (no level-specific generation code, no quest): cave, crypt, jail, catacombs, tombs, lair, sewers,
 // spider caves, swamp/flayer dungeons, Abaddon.
 constexpr int ZoneTemplates[] { 9, 11, 12, 18, 21, 29, 34, 55, 56, 58, 62, 65, 84, 86, 88, 125 };
@@ -2242,6 +2271,8 @@ std::string LevelName(const ZoneBank& b, int level) {
 // entry room, D2R+0x3DA650). empty: no monsters, one room (the zone's "level 2").
 void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state, int vis0 = 0, int vis1 = 0, bool empty = false) noexcept {
 	if (!b.levels || id < b.count || id >= b.count + ZoneSlots || tmpl <= 0 || tmpl >= b.count) return;
+	const int zoneBase = ZoneBase.load(), slot = zoneBase > 0 ? id - zoneBase : id - b.count; // the banks' level counts can differ
+	if (slot < 0 || slot >= ZoneSlots) return;
 	std::uint8_t* row = b.levels + id * LevelRow;
 	std::memcpy(row, b.levels + tmpl * LevelRow, LevelRow);
 	SetField<std::uint16_t>(row, LvId, static_cast<std::uint16_t>(id));
@@ -2250,7 +2281,7 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state, int vis0 = 0
 	SetField<std::uint8_t>(row, LvWaypoint, 0xFF);
 	for (const std::uintptr_t den : { LvDen, LvDen + 4, LvDen + 8 }) SetField<std::int32_t>(row, den, ZoneDensity);
 	// Our names: keys answered by HookStringByKey.
-	const int n = id - b.count + 1;
+	const int n = slot + 1;
 	char      key[40] {};
 	std::snprintf(key, sizeof(key), "TZPlusZone%d", n);
 	std::memcpy(row + LvName, key, 40);
@@ -2302,13 +2333,14 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state, int vis0 = 0
 	if (vis0 && index[0] >= 0) SetField<std::int32_t>(def, DefVis + index[0] * 4, vis0), SetField<std::int32_t>(def, DefWarp + index[0] * 4, warps[0]);
 	if (vis1 && index[1] >= 0) SetField<std::int32_t>(def, DefVis + index[1] * 4, vis1), SetField<std::int32_t>(def, DefWarp + index[1] * 4, warps[1]);
 	// Each level its own automap layer (the template's is shared with the real dungeon and with our other levels).
-	SetField<std::int32_t>(def, DefLayer, ZoneLayerBase + (id - b.count));
-	if (!empty && id - b.count < ZoneSlots) {
-		ZoneEntryBit[id - b.count] = index[0] >= 0 ? 0x10u << index[0] : 0;
-		ZoneSingle[id - b.count]   = index[1] < 0;
+	const int layer = !LayersSafe ? Field<std::int32_t>(b.defs + tmpl * DefRow, DefLayer) : ZoneLayer[slot].load() ? ZoneLayer[slot].load() : 900 + slot;
+	SetField<std::int32_t>(def, DefLayer, layer);
+	if (!empty) {
+		ZoneEntryBit[slot] = index[0] >= 0 ? 0x10u << index[0] : 0;
+		ZoneSingle[slot]   = index[1] < 0;
 	}
 	Log(false, "zones: level %d from template %d: vis %d (index %d, warp %d) / %d (index %d, warp %d), layer %d%s", id, tmpl, vis0, index[0], warps[0], vis1, index[1],
-	    warps[1], ZoneLayerBase + (id - b.count), !empty && index[1] < 0 ? ", one stairs room: level 2 by portal" : "");
+	    warps[1], layer, !empty && index[1] < 0 ? ", one stairs room: level 2 by portal" : "");
 	if (empty) {
 		for (const std::uintptr_t den : { LvDen, LvDen + 4, LvDen + 8 }) SetField<std::int32_t>(row, den, 0);
 		for (int i = 0; i < 6; ++i) SetField<std::uint8_t>(row, 48 + i, 0); // MonUMin/MonUMax
@@ -2599,6 +2631,7 @@ bool EmptyLevel(int level) noexcept {
 	return base > 0 && level >= base && level < base + ZoneSlots && ZoneTemplate[level - base].load() == 0;
 }
 
+std::atomic<int> EntryBlocked { 0 };
 void* HookSpawnCore(void* params) noexcept {
 	void* room = params ? Field<void*>(params, 8) : nullptr;
 	if (room && ZoneBase.load(std::memory_order_relaxed) > 0) {
@@ -2606,6 +2639,16 @@ void* HookSpawnCore(void* params) noexcept {
 		if (EmptyLevel(level)) {
 			if (EmptyBlocked.fetch_add(1) < 5) Log(false, "zones: no monster %d in level %d (empty)", Field<std::int32_t>(params, 0x18), level);
 			return nullptr;
+		}
+		// No monster in a zone's entry stairs room, where you arrive.
+		const int base = ZoneBase.load(std::memory_order_relaxed);
+		if (level >= base && level < base + ZoneSlots && ZoneTemplate[level - base].load()) {
+			const auto* room2 = Field<std::uint8_t*>(room, 0x18);
+			const std::uint32_t bit = ZoneEntryBit[level - base].load();
+			if (room2 && bit && (Field<std::uint32_t>(room2, 0x50) & bit)) {
+				if (EntryBlocked.fetch_add(1) < 5) Log(false, "zones: no monster %d in the entry stairs room of level %d", Field<std::int32_t>(params, 0x18), level);
+				return nullptr;
+			}
 		}
 	}
 	return SpawnCoreOrig(params);
@@ -2660,6 +2703,10 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		if (stairs >= 2) tmpl = pick;
 	}
 	if (!tmpl) return SetPortalResult("TZ Plus zones: no dungeon to copy was found in the level tables");
+	{
+		const int layer = NextLayer.fetch_add(3);
+		for (int i = 0; i < 3; ++i) ZoneLayer[id + i - base] = layer + i;
+	}
 	for (int bank = 1; bank <= 3; ++bank) {
 		std::uint64_t copy = state; // the same monsters in every bank
 		// Stairs only work toward a level that links back: the entry stairs lead to a stand-in level (id + 1) that HookWarp
@@ -2681,6 +2728,10 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	g->seed ^= Mix(state);
 	WriteZoneStats(*g, true);
 	for (auto& c : g->zoneCount) c = 0;
+	AcquireSRWLockExclusive(&g->modLock);
+	g->zoneMons.clear(), g->zoneMet.clear();
+	for (int i = 0; i < 4; ++i) g->zoneGen[i] = g->zoneSeen[i] = g->zoneKilled[i] = 0;
+	ReleaseSRWLockExclusive(&g->modLock);
 	Roll(*g);
 	const std::string mods = Describe(*g);
 	ReleaseSRWLockExclusive(&Lock);
@@ -2934,6 +2985,38 @@ std::uint64_t HookMazeBuild(std::uint8_t mode, void* level) noexcept {
 	return result;
 }
 
+// Automap layers (client, D2R+0xD1710 switches the current layer, D2R+0x2A2CF68): the old layer is saved to the character's .map
+// file (0xD6230) and cleared (0xD4D60 on its 4 lists), then the new one loaded from it (0xD5710). The file has a table of 100 layers;
+// ours (>= 100) stay in memory instead: not saved, not cleared, not loaded.
+constexpr std::uint64_t CurLayerRva = 0x2A2CF68, LayerSaveRva = 0xD6230, LayerLoadRva = 0xD5710, LayerClearRva = 0xD4D60;
+constexpr std::uint64_t LayerSaveCall = 0xD1869, LayerLoadCall = 0xD18C8, LayerClearCalls[4] { 0xD187E, 0xD188E, 0xD189E, 0xD18AE };
+using LayerTwoFn = void (*)(void* a, void* b) noexcept;
+using LayerOneFn = void (*)(void* list) noexcept;
+std::atomic<int> LayerLogs { 0 };
+
+int CurrentLayerNo() noexcept {
+	const auto* layer = *reinterpret_cast<const std::int32_t* const*>(Base + CurLayerRva);
+	return layer ? *layer : -1;
+}
+void HookLayerSave(void* a, void* b) noexcept {
+	if (const int no = CurrentLayerNo(); no >= 100) {
+		if (LayerLogs.fetch_add(1) < 20) Log(false, "automap: layer %d kept in memory (not saved to the .map file)", no);
+		return;
+	}
+	At<LayerTwoFn>(LayerSaveRva)(a, b);
+}
+void HookLayerClear(void* list) noexcept {
+	if (CurrentLayerNo() >= 100) return;
+	At<LayerOneFn>(LayerClearRva)(list);
+}
+void HookLayerLoad(void* a, void* b) noexcept {
+	if (const int no = CurrentLayerNo(); no >= 100) {
+		if (LayerLogs.fetch_add(1) < 20) Log(false, "automap: layer %d from memory (not loaded from the .map file)", no);
+		return;
+	}
+	At<LayerTwoFn>(LayerLoadRva)(a, b);
+}
+
 // Roran's name (the client's unit name, D2R+0x9A1B0 (unit)).
 constexpr std::uint64_t UnitNameRva = 0x9A1B0;
 constexpr std::array<std::uint8_t, 12> UnitNameBytes { 0x40, 0x53, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x40, 0x4C, 0x8B, 0xF1 };
@@ -2978,8 +3061,64 @@ void SpawnRoran(std::uint8_t* game) noexcept {
 	}
 }
 
+// Monsters of the open zone that come near a player (met) and die after that (killed), checked 5 times a second.
+const char* const KindNames[4] { "monster", "champion", "unique", "minion" };
+void TrackMeetings(std::uint8_t* game) noexcept {
+	GameMods* g = ModsOf(game);
+	if (!g || !g->zoneId || GetTickCount64() - g->meetTick < 200) return;
+	g->meetTick = GetTickCount64();
+	Coord players[8] {};
+	int   count  = 0;
+	auto* client = Field<std::uint8_t*>(game, GameClients);
+	for (int guard = 0; client && guard < 64 && count < 8; ++guard, client = Field<std::uint8_t*>(client, ClientNext)) {
+		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
+		void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
+		if (!room || At<RoomLevelFn>(0x2EFC10)(room) != g->zoneId) continue;
+		At<GetCoordsFn>(0x34A040)(player, &players[count++]);
+	}
+	if (!count) return;
+	std::vector<std::pair<std::uint32_t, std::uint8_t>> mons;
+	AcquireSRWLockShared(&g->modLock);
+	try {
+		mons.reserve(g->zoneMons.size());
+		for (const auto& [id, kind] : g->zoneMons) {
+			const auto met = g->zoneMet.find(id);
+			if (met == g->zoneMet.end()) mons.emplace_back(id, kind);
+			else if (!(met->second & 0x80)) mons.emplace_back(id, kind | 0x40); // met, alive so far
+		}
+	} catch (...) {}
+	ReleaseSRWLockShared(&g->modLock);
+	for (const auto& [id, flags] : mons) {
+		void* unit = At<FindUnitFn>(0x48FE80)(game, 1, id);
+		if (!unit) continue;
+		const int  kind = flags & 3;
+		const auto mode = Field<std::uint32_t>(unit, 0x0C);
+		const bool dead = mode == 0 || mode == 12;
+		if (flags & 0x40) {
+			if (!dead) continue;
+			AcquireSRWLockExclusive(&g->modLock);
+			g->zoneMet[id] |= 0x80, ++g->zoneKilled[kind];
+			ReleaseSRWLockExclusive(&g->modLock);
+			if (kind == 1 || kind == 2) Log(false, "zone level %d: killed %s %u (class %u)", g->zoneId, KindNames[kind], id, Field<std::uint32_t>(unit, 4));
+			continue;
+		}
+		if (dead) continue;
+		Coord at {};
+		At<GetCoordsFn>(0x34A040)(unit, &at);
+		bool close = false;
+		for (int i = 0; i < count && !close; ++i) close = std::abs(at.x - players[i].x) <= MeetRadius && std::abs(at.y - players[i].y) <= MeetRadius;
+		if (!close) continue;
+		AcquireSRWLockExclusive(&g->modLock);
+		try {
+			g->zoneMet[id] = static_cast<std::uint8_t>(kind), ++g->zoneSeen[kind];
+		} catch (...) {}
+		ReleaseSRWLockExclusive(&g->modLock);
+		if (kind == 1 || kind == 2) Log(false, "zone level %d: met %s %u (class %u) at %d,%d", g->zoneId, KindNames[kind], id, Field<std::uint32_t>(unit, 4), at.x, at.y);
+	}
+}
+
 std::uint64_t HookFrameCall(void* game) noexcept {
-	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game));
+	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), TrackMeetings(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
 	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
@@ -2999,6 +3138,15 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 	for (const std::uint64_t site : LabelCalls)
 		if (!PatchCall(site, LabelRva, reinterpret_cast<const void*>(&HookLabel)))
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
+	{
+		bool cleared = true;
+		for (const std::uint64_t site : LayerClearCalls) cleared = PatchCall(site, LayerClearRva, reinterpret_cast<const void*>(&HookLayerClear)) && cleared;
+		const bool saved  = PatchCall(LayerSaveCall, LayerSaveRva, reinterpret_cast<const void*>(&HookLayerSave));
+		const bool loaded = PatchCall(LayerLoadCall, LayerLoadRva, reinterpret_cast<const void*>(&HookLayerLoad));
+		LayersSafe        = saved && loaded;
+		if (!LayersSafe || !cleared)
+			Log(true, "zones: automap layer hooks failed (save %d, load %d, clear %d): zones share their dungeon's map", saved, loaded, cleared);
+	}
 	if (!PatchCall(PortalSpotCallRva, RoomHasRva, reinterpret_cast<const void*>(&HookPortalSpot), { 0x49, 0x89, 0xE9 })) // mov r9, rbp
 		Log(true, "zones: portal spot not logged, could not patch D2R+0x%llX", static_cast<unsigned long long>(PortalSpotCallRva));
 	{
