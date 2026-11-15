@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.63";
+constexpr const char* PluginVersion = "0.0.64";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -3363,7 +3363,9 @@ std::uint64_t HookTrace(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::
 	const bool on = OutdoorTrace.load(std::memory_order_relaxed) > 0;
 	// Act 1 step G runs for Cold Plains, Stony Field, Dark Wood and Black Marsh only: the levels with a waypoint. Not in our copies.
 	// Act 1 step H places the area's dungeon entrance (Vis with stairs): the entry and exit areas have none.
-	if (on && TraceSites[N].site == 0x3FAD74 && (BuildingKind == KindEntry || BuildingKind == KindExit)) {
+	// Step E (D2R+0x3FB910) places the act's features (cliffs/river at fixed cells from the far edges: grid width - 7, height - 6)
+	// and the cave entrance: on a 2x2-cell area they land outside the grid (OutWild.cpp:595 'fAdded', then a bad preset crashed).
+	if (on && (TraceSites[N].site == 0x3FAD74 || TraceSites[N].site == 0x3FACBD) && (BuildingKind == KindEntry || BuildingKind == KindExit)) {
 		Log(false, "outdoor trace %d (%s): skipped (small area)", N, TraceSites[N].name);
 		return 1;
 	}
