@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.43";
+constexpr const char* PluginVersion = "0.0.44";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -315,7 +315,8 @@ struct GameMods {
 	void*               portal    = nullptr; // the open zone portal in Harrogath (checked by its id before use)
 	int                 safeLevel = 0, safeX = 0, safeY = 0; // the zone's entry portal spot (log only)
 	int                 zoneId = 0, level2Id = 0;            // the open zone and its "level 2" (one empty room)
-	void*               exitPortal = nullptr;                // the zone's exit-room portal to level 2
+	void*               exitPortal = nullptr;                // a single-level zone's portal to level 2 (its farthest room)
+	bool                single = false;
 	std::uint32_t       exitPortalId = 0;
 	bool                roranDone = false; // Roran Stronghammer is in Harrogath
 	int                 roranTries = 0;
@@ -515,6 +516,8 @@ std::atomic<int> ZoneBase { 0 }; // the first one's level id (the game's level c
 constexpr int    ZoneSlots = 30; // 3 levels a zone: the zone, its town link (entry stairs), its level 2
 std::atomic<std::uint32_t> ZoneSeed[ZoneSlots] {}; // each zone's layout seed, rolled when its portal opens (server and client build the same map)
 std::atomic<int> ZoneTemplate[ZoneSlots] {}; // the template of each zone (0 = none, level 2s too): its stairs rooms (HookMazeBuild)
+std::atomic<std::uint32_t> ZoneEntryBit[ZoneSlots] {}; // Room2 +0x50 flag of each zone's entry stairs room (0x10 << the template's Vis index)
+std::atomic<bool> ZoneSingle[ZoneSlots] {}; // the template has one stairs room only: level 2 is reached by a portal in the farthest room
 // Monsters made too close to a zone's entry portal, moved away on the next game frame (HookFrameCall).
 struct SafeMove {
 	std::uint8_t* game;
@@ -957,7 +960,7 @@ void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	CapLevel(unit);
 	g->monsters.fetch_add(1, std::memory_order_relaxed);
 	if (const int zb = ZoneBase.load(); zb > 0 && level >= zb && level < zb + ZoneSlots) {
-		const int kind  = (type & 0x10) ? 3 : (type & 0x0A) ? 2 : (type & 0x04) ? 1 : 0; // minion, unique/superunique, champion, trash
+		const int kind  = (type & 0x10) ? 3 : (type & 0x04) ? 1 : (type & 0x0A) ? 2 : 0; // minion, champion (spawned 0x4|0x8), unique/superunique, trash
 		const int total = 1 + g->zoneCount[0] + g->zoneCount[1] + g->zoneCount[2] + g->zoneCount[3];
 		g->zoneCount[kind].fetch_add(1, std::memory_order_relaxed);
 		if (total % 25 == 0)
@@ -2177,8 +2180,9 @@ constexpr std::uintptr_t MonStatsVec = 0xF58; // MonStats {rows, count}: row 0x1
 constexpr std::size_t    MonStatsRow = 0x1FC;
 constexpr int            ZoneArea    = 2304; // map size of every zone: rooms x room width x room height (Pit, Crypt, Cave in Hell)
 constexpr int            SafeRadius  = 30;   // no monster spawns this close to the zone's entry portal
-constexpr std::uintptr_t DefQuest = 0, DefQuestEx = 4, DefDrlg = 48, DefType = 52, DefDepend = 44, DefVis = 72, DefWarp = 104;
+constexpr std::uintptr_t DefQuest = 0, DefQuestEx = 4, DefLayer = 8, DefDrlg = 48, DefType = 52, DefDepend = 44, DefVis = 72, DefWarp = 104;
 constexpr int            MonSlots = 25, ZoneMonsters = 8;
+constexpr int            ZoneLayerBase = 160; // automap layers of our levels (vanilla uses 0-99)
 // Generic dungeons (no level-specific generation code, no quest): cave, crypt, jail, catacombs, tombs, lair, sewers,
 // spider caves, swamp/flayer dungeons, Abaddon.
 constexpr int ZoneTemplates[] { 9, 11, 12, 18, 21, 29, 34, 55, 56, 58, 62, 65, 84, 86, 88, 125 };
@@ -2287,17 +2291,24 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state, int vis0 = 0
 	SetField<std::int32_t>(def, DefQuest, 0);
 	SetField<std::int32_t>(def, DefQuestEx, 0);
 	SetField<std::int32_t>(def, DefDepend, 0);
-	// Keep the template's stair tiles (its first two warps) so the maze builds real entry and exit rooms.
+	// Keep the template's stair tiles at their own Vis index (the maze code places each stairs room by index: Stony Tomb's exit
+	// is Vis 4, Room2 flag 0x100) so the maze builds real entry and exit rooms. Our empty levels (built under their own id) use index 0.
+	int          index[2] { -1, -1 };
 	std::int32_t warps[2] { -1, -1 };
 	for (int i = 0, k = 0; i < 8 && k < 2; ++i)
-		if (const std::int32_t w = Field<std::int32_t>(def, DefWarp + i * 4); w >= 0 && Field<std::int32_t>(def, DefVis + i * 4) > 0) warps[k++] = w;
-	if (warps[1] < 0) warps[1] = warps[0];
+		if (const std::int32_t w = Field<std::int32_t>(def, DefWarp + i * 4); w >= 0 && Field<std::int32_t>(def, DefVis + i * 4) > 0) index[k] = i, warps[k++] = w;
+	if (empty && index[0] >= 0) index[0] = 0, index[1] = -1;
 	for (int i = 0; i < 8; ++i) SetField<std::int32_t>(def, DefVis + i * 4, 0), SetField<std::int32_t>(def, DefWarp + i * 4, -1);
-	SetField<std::int32_t>(def, DefVis, vis0);
-	SetField<std::int32_t>(def, DefWarp, vis0 ? warps[0] : -1);
-	SetField<std::int32_t>(def, DefVis + 4, vis1);
-	SetField<std::int32_t>(def, DefWarp + 4, vis1 ? warps[1] : -1);
-	Log(false, "zones: level %d from template %d: vis %d/%d, warps %d/%d", id, tmpl, vis0, vis1, vis0 ? warps[0] : -1, vis1 ? warps[1] : -1);
+	if (vis0 && index[0] >= 0) SetField<std::int32_t>(def, DefVis + index[0] * 4, vis0), SetField<std::int32_t>(def, DefWarp + index[0] * 4, warps[0]);
+	if (vis1 && index[1] >= 0) SetField<std::int32_t>(def, DefVis + index[1] * 4, vis1), SetField<std::int32_t>(def, DefWarp + index[1] * 4, warps[1]);
+	// Each level its own automap layer (the template's is shared with the real dungeon and with our other levels).
+	SetField<std::int32_t>(def, DefLayer, ZoneLayerBase + (id - b.count));
+	if (!empty && id - b.count < ZoneSlots) {
+		ZoneEntryBit[id - b.count] = index[0] >= 0 ? 0x10u << index[0] : 0;
+		ZoneSingle[id - b.count]   = index[1] < 0;
+	}
+	Log(false, "zones: level %d from template %d: vis %d (index %d, warp %d) / %d (index %d, warp %d), layer %d%s", id, tmpl, vis0, index[0], warps[0], vis1, index[1],
+	    warps[1], ZoneLayerBase + (id - b.count), !empty && index[1] < 0 ? ", one stairs room: level 2 by portal" : "");
 	if (empty) {
 		for (const std::uintptr_t den : { LvDen, LvDen + 4, LvDen + 8 }) SetField<std::int32_t>(row, den, 0);
 		for (int i = 0; i < 6; ++i) SetField<std::uint8_t>(row, 48 + i, 0); // MonUMin/MonUMax
@@ -2488,8 +2499,14 @@ const char* HookStringByKey(const KeyView* key) noexcept {
 			if (k.substr(0, prefix.size()) != prefix) continue;
 			const int n = std::atoi(std::string(k.substr(prefix.size())).c_str());
 			if (n >= 1 && n <= ZoneSlots) {
-				char* text = ZoneTexts[kind][n - 1];
-				if (!text[0]) std::snprintf(text, 48, kind == 0 ? "Terror Zone %d" : kind == 1 ? "To Terror Zone %d" : "Entering Terror Zone %d", n);
+				// 3 levels a zone: the zone, its stand-in (the entry stairs lead to Harrogath), its level 2.
+				char*       text  = ZoneTexts[kind][n - 1];
+				const int   slot  = n - 1, zone = slot / 3 + 1;
+				const char* verb  = kind == 0 ? "" : kind == 1 ? "To " : "Entering ";
+				if (!text[0]) {
+					if (slot % 3 == 1) std::snprintf(text, 48, "%sHarrogath", verb);
+					else std::snprintf(text, 48, slot % 3 == 2 ? "%sTerror Zone %d Level 2" : "%sTerror Zone %d", verb, zone);
+				}
 				return text;
 			}
 		}
@@ -2542,12 +2559,13 @@ constexpr std::uint64_t PortalSpotCallRva = 0x435FDF, RoomHasRva = 0x2F0680;
 using ActivateRoomFn = void (*)(std::uint8_t mode, void* room2) noexcept; // D2R+0x3289A0: loads a Room2's Room1
 std::uint64_t HookPortalSpot(void* room, std::int32_t x, std::int32_t y, std::uint8_t* frame) noexcept {
 	if (Creating && CreatingGame && room && frame && At<RoomLevelFn>(0x2EFC10)(room) == CreatingId) {
-		const int fromX = x, fromY = y;
+		const int fromX = x, fromY = y, slot = CreatingId - ZoneBase.load();
+		const std::uint32_t entryBit = slot >= 0 && slot < ZoneSlots ? ZoneEntryBit[slot].load() : 0x10u;
 		auto*     room2 = Field<std::uint8_t*>(room, 0x18);
 		auto*     level = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
 		int       guard = 0;
 		for (auto* r = level ? Field<std::uint8_t*>(level, 0x10) : nullptr; r && guard < 4096; r = Field<std::uint8_t*>(r, 0x48), ++guard) {
-			if (!(Field<std::uint32_t>(r, 0x50) & 0x10)) continue;
+			if (!(Field<std::uint32_t>(r, 0x50) & entryBit)) continue;
 			if (!Field<void*>(r, 0x58)) At<ActivateRoomFn>(0x3289A0)(Field<std::uint8_t>(CreatingGame, GameMode), r);
 			void* entry = Field<void*>(r, 0x58);
 			if (!entry) break;
@@ -2633,7 +2651,8 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	int           tmpl  = 0;
 	for (int tries = 0; tries < 32 && !tmpl; ++tries) {
 		const int pick = ZoneTemplates[Mix(state) % (sizeof(ZoneTemplates) / sizeof(ZoneTemplates[0]))];
-		if (pick < Banks[mode].count && MazeOf(Banks[mode], pick)) tmpl = pick;
+		// No dungeon with a waypoint (its preset room would still make one, e.g. Jail Level 1).
+		if (pick < Banks[mode].count && MazeOf(Banks[mode], pick) && Field<std::uint8_t>(Banks[mode].levels + pick * LevelRow, LvWaypoint) == 0xFF) tmpl = pick;
 	}
 	if (!tmpl) return SetPortalResult("TZ Plus zones: no dungeon to copy was found in the level tables");
 	for (int bank = 1; bank <= 3; ++bank) {
@@ -2685,7 +2704,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		return SetPortalResult("TZ Plus zones: the game refused the portal to level %d (%s) at %d,%d%s", id, LevelName(Banks[mode], tmpl).c_str(), spot.x, spot.y,
 		                       freeRoom ? "" : " (no free spot)");
 	g->zonesUsed += 3;
-	g->zoneId = id, g->level2Id = id + 2, g->exitPortal = nullptr, g->exitPortalId = 0;
+	g->zoneId = id, g->level2Id = id + 2, g->exitPortal = nullptr, g->exitPortalId = 0, g->single = ZoneSingle[id - base].load();
 	g->portal   = portal;
 	g->portalId = portal ? Field<std::uint32_t>(portal, 8) : 0;
 	ZonePortalOpen = portal != nullptr;
@@ -2759,12 +2778,15 @@ void MoveOutOfSafeArea(std::uint8_t* game) noexcept {
 	}
 }
 
-// The zone's exit room (Room2 flags +0x50 bit 0x20: the room toward Vis[1]) gets a portal to level 2 once the room is
-// loaded (Room2 +0x58 = its Room1). Level: Room2 +0x90; rooms: level +0x10, next +0x48; coords: Room2 +0x60 (x, y, w, h in tiles).
+// A zone copied from a one-stairs dungeon (Spider Cave, Crypt, Ancient Tunnels...) has no exit stairs: its farthest room from the
+// entry gets a red portal to level 2 once a player is in the zone. Rooms: level +0x10, next +0x48, flags +0x50, Room1 +0x58,
+// x, y, w, h +0x60 (tiles), level +0x90.
 int ExitLogs = 0;
 void OpenExitPortal(std::uint8_t* game) noexcept {
 	GameMods* g = ModsOf(game);
-	if (!g || !g->zoneId || g->exitPortal) return;
+	if (!g || !g->zoneId || !g->single || g->exitPortal) return;
+	const int slot = g->zoneId - ZoneBase.load();
+	if (slot < 0 || slot >= ZoneSlots) return;
 	auto* client = Field<std::uint8_t*>(game, GameClients);
 	for (int guard = 0; client && guard < 64; ++guard, client = Field<std::uint8_t*>(client, ClientNext)) {
 		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
@@ -2773,34 +2795,50 @@ void OpenExitPortal(std::uint8_t* game) noexcept {
 		auto* room2 = Field<std::uint8_t*>(room, 0x18);
 		auto* level = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
 		if (!level) return;
-		int guardRooms = 0;
-		for (auto* r = Field<std::uint8_t*>(level, 0x10); r && guardRooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++guardRooms) {
-			if (!(Field<std::uint32_t>(r, 0x50) & 0xFF0)) continue; // a stair room
-			const int rx = Field<std::int32_t>(r, 0x60), ry = Field<std::int32_t>(r, 0x64);
-			if (g->safeLevel == g->zoneId && g->safeX / 5 >= rx && g->safeX / 5 < rx + Field<std::int32_t>(r, 0x68) && g->safeY / 5 >= ry &&
-			    g->safeY / 5 < ry + Field<std::int32_t>(r, 0x6C))
-				continue; // the entry portal's room
-			void* exitRoom = Field<void*>(r, 0x58);
-			if (!exitRoom) return; // not loaded yet
-			Coord spot { (Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2) * 5, (Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2) * 5 };
-			void* freeRoom = nullptr;
-			At<FindFreeSpotFn>(0x517F90)(game, exitRoom, &spot, 3, 0x400, &freeRoom, 4, 100);
-			void*     portal  = nullptr;
-			const int created = freeRoom ? At<CreatePortalFn>(0x432CE0)(game, player, freeRoom, spot.x, spot.y, g->level2Id, &portal, 60, 0, 1) : 0;
-			if (created && portal) {
-				g->exitPortal = portal, g->exitPortalId = Field<std::uint32_t>(portal, 8);
-				AcquireSRWLockExclusive(&PortalLock);
-				ZonePortals[PortalCursor++ % 64] = { g->exitPortalId, g->level2Id };
-				ReleaseSRWLockExclusive(&PortalLock);
-				Log(false, "zones: exit portal of level %d at %d,%d, leads to level 2 (level %d)", g->zoneId, spot.x, spot.y, g->level2Id);
-			} else if (ExitLogs < 5) {
-				++ExitLogs, Log(true, "zones: the game refused the exit portal of level %d at %d,%d%s", g->zoneId, spot.x, spot.y, freeRoom ? "" : " (no free spot)");
-				g->exitPortal = reinterpret_cast<void*>(1); // don't retry every frame
+		const std::uint32_t entryBit = ZoneEntryBit[slot].load();
+		// From the entry stairs room, else from the zone portal's spot.
+		long long fromX = g->safeX / 5, fromY = g->safeY / 5;
+		int       guardRooms = 0;
+		for (auto* r = Field<std::uint8_t*>(level, 0x10); r && guardRooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++guardRooms)
+			if (entryBit && (Field<std::uint32_t>(r, 0x50) & entryBit)) {
+				fromX = Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2, fromY = Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2;
+				break;
 			}
+		std::uint8_t* farRoom = nullptr;
+		long long     best = -1;
+		guardRooms         = 0;
+		for (auto* r = Field<std::uint8_t*>(level, 0x10); r && guardRooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++guardRooms) {
+			const long long dx = Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2 - fromX, dy = Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2 - fromY;
+			if (dx * dx + dy * dy > best) best = dx * dx + dy * dy, farRoom = r;
+		}
+		if (!farRoom) {
+			if (ExitLogs < 5) ++ExitLogs, Log(true, "zones: level %d has no rooms for its exit portal", g->zoneId);
+			g->exitPortal = reinterpret_cast<void*>(1);
 			return;
 		}
-		if (ExitLogs < 5) ++ExitLogs, Log(true, "zones: level %d has no exit room (%d rooms)", g->zoneId, guardRooms);
-		g->exitPortal = reinterpret_cast<void*>(1);
+		if (!Field<void*>(farRoom, 0x58)) At<ActivateRoomFn>(0x3289A0)(Field<std::uint8_t>(game, GameMode), farRoom);
+		void* exitRoom = Field<void*>(farRoom, 0x58);
+		if (!exitRoom) {
+			if (ExitLogs < 5) ++ExitLogs, Log(true, "zones: the farthest room of level %d could not be loaded", g->zoneId);
+			g->exitPortal = reinterpret_cast<void*>(1);
+			return;
+		}
+		Coord spot { (Field<std::int32_t>(farRoom, 0x60) + Field<std::int32_t>(farRoom, 0x68) / 2) * 5, (Field<std::int32_t>(farRoom, 0x64) + Field<std::int32_t>(farRoom, 0x6C) / 2) * 5 };
+		void* freeRoom = nullptr;
+		At<FindFreeSpotFn>(0x517F90)(game, exitRoom, &spot, 3, 0x400, &freeRoom, 4, 100);
+		void*     portal  = nullptr;
+		const int created = freeRoom ? At<CreatePortalFn>(0x432CE0)(game, player, freeRoom, spot.x, spot.y, g->level2Id, &portal, 60, 0, 1) : 0;
+		if (created && portal) {
+			g->exitPortal = portal, g->exitPortalId = Field<std::uint32_t>(portal, 8);
+			AcquireSRWLockExclusive(&PortalLock);
+			ZonePortals[PortalCursor++ % 64] = { g->exitPortalId, g->level2Id };
+			ReleaseSRWLockExclusive(&PortalLock);
+			Log(false, "zones: level %d has one stairs room: exit portal at %d,%d (%lld tiles from the entry), leads to level 2 (level %d)", g->zoneId, spot.x,
+			    spot.y, static_cast<long long>(std::sqrt(static_cast<double>(best))), g->level2Id);
+		} else {
+			if (ExitLogs < 5) ++ExitLogs, Log(true, "zones: the game refused the exit portal of level %d at %d,%d%s", g->zoneId, spot.x, spot.y, freeRoom ? "" : " (no free spot)");
+			g->exitPortal = reinterpret_cast<void*>(1); // don't retry every frame
+		}
 		return;
 	}
 }
@@ -2869,7 +2907,9 @@ std::uint64_t HookMazeBuild(std::uint8_t mode, void* level) noexcept {
 	if (base <= 0 || id < base || id >= base + ZoneSlots) return MazeBuildOrig(mode, level);
 	const int slot = id - base, tmpl = ZoneTemplate[slot].load();
 	if (const std::uint32_t seed = ZoneSeed[slot].load()) At<SeedFn>(SeedInitRva)(static_cast<std::uint8_t*>(level) + 0x1E4, seed);
-	SetField<std::int32_t>(level, 0x24, 5000 + slot * 220); // tiles; the level box keeps its size
+	// Tiles, past act 5's own levels (y up to ~3060); subtiles (x5) must stay under 32768: x 3300-5480, y 3200-3890.
+	SetField<std::int32_t>(level, 0x24, 3300 + (slot % 10) * 220); // the level box keeps its size (200x200)
+	SetField<std::int32_t>(level, 0x28, 3200 + (slot / 10) * 230);
 	if (!tmpl) {
 		const std::uint64_t result = MazeBuildOrig(mode, level);
 		Log(false, "zones: level %d built at %d,%d", id, Field<std::int32_t>(level, 0x24), Field<std::int32_t>(level, 0x28));
@@ -2934,7 +2974,7 @@ void SpawnRoran(std::uint8_t* game) noexcept {
 }
 
 std::uint64_t HookFrameCall(void* game) noexcept {
-	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game));
+	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), OpenExitPortal(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
 	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
