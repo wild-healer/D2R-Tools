@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.66";
+constexpr const char* PluginVersion = "0.0.67";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -3272,9 +3272,11 @@ void ZoneBox(std::uint8_t mode, int id, int& x, int& y, int& w, int& h) noexcept
 		for (int d = 0; d < 3; ++d) mw = std::max(mw, Field<std::int32_t>(def, DefSizeX + d * 4)), mh = std::max(mh, Field<std::int32_t>(def, DefSizeY + d * 4));
 		mw = std::min((mw + 7) & ~7, 200), mh = std::min((mh + 7) & ~7, 200);
 	}
-	const int sy = my + ((mh - SmallArea) / 2 & ~7);
-	if (kind == KindEntry) x = mx - SmallArea, y = sy, w = h = SmallArea;
-	else if (kind == KindExit) x = mx + mw, y = sy, w = h = SmallArea;
+	// One block taller than wide: a 2x2-block area is 4 corner pieces and has no edge piece to open for the passage (0.0.66 pen),
+	// a 3rd block along the side facing the outdoor area gives it one.
+	const int sh = SmallArea + 8, sy = my + ((mh - sh) / 2 & ~7);
+	if (kind == KindEntry) x = mx - SmallArea, y = sy, w = SmallArea, h = sh;
+	else if (kind == KindExit) x = mx + mw, y = sy, w = SmallArea, h = sh;
 	else x = mx, y = my, w = mw, h = mh;
 }
 
