@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.53";
+constexpr const char* PluginVersion = "0.0.54";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2237,6 +2237,7 @@ constexpr int            ZoneDensity = 3000; // fallback density (a template wit
 // game gives them more spawn tries for the same monsters per room) x DensityScale %, then scaled by the picks' group sizes.
 constexpr int            DensityScale = 125;
 constexpr int            DungeonDensity = 150; // a zone's dungeon vs its outdoor area
+constexpr int            OutdoorElites = 150, DungeonElites = 200; // elite packs vs the template level's own (%)
 constexpr int            GroupRef = 25;      // x10: the average group (with minions) ZoneDensity is tuned for; zones of bigger groups get fewer of them
 constexpr std::uintptr_t MonStatsVec = 0xF58; // MonStats {rows, count}: row 0x1FC, minion1 word +0x5A, PartyMin/Max +0x62/+0x63, MinGrp/MaxGrp +0x65/+0x66
 constexpr std::size_t    MonStatsRow = 0x1FC;
@@ -2824,6 +2825,13 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 			SetupZone(Banks[bank], id, tmpl, copy, 0, 0, false, outdoorLinks, 1, 0);
 			SetupZone(Banks[bank], id + 1, dungeon, copy1, 0, 0, false, dungeonLinks, deeper ? 2 : 1, tmpl);
 			SetupZone(Banks[bank], id + 2, dungeon, copy2, id + 1, 0, true);
+			// Elite packs (Levels MonUMin/MonUMax, a byte per difficulty at +48/+51): x1.5 outdoors, x2 in the dungeon.
+			for (const auto [lvl, pct] : { std::pair { id, OutdoorElites }, std::pair { id + 1, DungeonElites } })
+				if (Banks[bank].levels && lvl < Banks[bank].count + ZoneSlots)
+					for (int i = 0; i < 6; ++i) {
+						std::uint8_t* row = Banks[bank].levels + lvl * LevelRow;
+						SetField<std::uint8_t>(row, 48 + i, static_cast<std::uint8_t>(std::min(60, (Field<std::uint8_t>(row, 48 + i) * pct + 50) / 100)));
+					}
 			// The dungeon: DungeonDensity % of the outdoor area's density.
 			if (Banks[bank].levels && id + 1 < Banks[bank].count + ZoneSlots)
 				for (int i = 0; i < 3; ++i)
@@ -2887,10 +2895,11 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		ZonePortals[PortalCursor++ % 64] = { Field<std::uint32_t>(portal, 8), id };
 		ReleaseSRWLockExclusive(&PortalLock);
 	}
-	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d) with its %s (level %d, our %d), monsters [%s], density %d/%d; new mods: %s",
+	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d) with its %s (level %d, our %d), monsters [%s], density %d/%d, Hell elite packs %d-%d/%d-%d; new mods: %s",
 	                g->zonesUsed / 3, ZoneSlots / 3, id, LevelName(Banks[mode], tmpl).c_str(), tmpl, LevelName(Banks[mode], dungeon).c_str(), dungeon, id + 1,
 	                monsters.c_str(), Field<std::int32_t>(Banks[mode].levels + id * LevelRow, LvDen + 8),
-	                Field<std::int32_t>(Banks[mode].levels + (id + 1) * LevelRow, LvDen + 8), mods.c_str());
+	                Field<std::int32_t>(Banks[mode].levels + (id + 1) * LevelRow, LvDen + 8), Field<std::uint8_t>(Banks[mode].levels + id * LevelRow, 50), Field<std::uint8_t>(Banks[mode].levels + id * LevelRow, 53),
+	                Field<std::uint8_t>(Banks[mode].levels + (id + 1) * LevelRow, 50), Field<std::uint8_t>(Banks[mode].levels + (id + 1) * LevelRow, 53), mods.c_str());
 }
 
 using RemoveUnitFn   = void (*)(void* game, void* unit) noexcept;
