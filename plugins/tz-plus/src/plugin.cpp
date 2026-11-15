@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.56";
+constexpr const char* PluginVersion = "0.0.57";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2632,8 +2632,7 @@ const char* HookStringByKey(const KeyView* key) noexcept {
 				const int   slot  = n - 1, zone = slot / 3 + 1;
 				const char* verb  = kind == 0 ? "" : kind == 1 ? "To " : "Entering ";
 				if (!text[0]) {
-					if (slot % 3 == 2) std::snprintf(text, 48, "%sHarrogath", verb);
-					else std::snprintf(text, 48, slot % 3 == 1 ? "%sTerror Zone %d Dungeon" : "%sTerror Zone %d", verb, zone);
+					std::snprintf(text, 48, slot % 3 == 1 ? "%sTerror Zone %d Dungeon" : "%sTerror Zone %d", verb, zone); // the third: back outdoors
 				}
 				return text;
 			}
@@ -2781,6 +2780,13 @@ void SendStandInsToTown(std::uint8_t* game) noexcept {
 		static std::uint64_t last = 0; // one warp at a time: the move may finish on a later frame
 		if (GetTickCount64() - last < 1500) continue;
 		last = GetTickCount64();
+		// The dungeon's down stairs (the zone's third level): back to the outdoor area, at the dungeon's entrance (WarpUnit's 4th
+		// argument is the level to arrive next to: the game looks for the room of the outdoor area that leads to the dungeon).
+		if (const GameMods* g = ModsOf(game); g && g->zoneId && level == g->zoneId + 2) {
+			Log(false, "zones: player took the dungeon's down stairs (level %d): sent back to level %d, at the entrance of level %d", level, g->zoneId, g->zoneId + 1);
+			At<WarpUnitFn>(0x488180)(game, player, g->zoneId, g->zoneId + 1);
+			continue;
+		}
 		Log(false, "zones: player took the down stairs to level %d: sent to Harrogath", level);
 		At<WarpUnitFn>(0x488180)(game, player, Harrogath, 0xD);
 	}
@@ -2827,8 +2833,9 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		for (int i = 0; i < 8; ++i)
 			if (const std::int32_t v = Field<std::int32_t>(ddef, DefVis + i * 4); v > 0 && v != tmpl && Field<std::int32_t>(ddef, DefWarp + i * 4) >= 0) deeper = v;
 		const ZoneLink outdoorLinks[] { { dungeon, id + 1 } };
-		// Both of the dungeon's stairs lead back to the outdoor area (you arrive at its entrance).
-		const ZoneLink dungeonLinks[] { { tmpl, id }, { deeper, id } };
+		// The dungeon's down stairs lead to an empty stand-in level (a stairs tile must lead to a level that links back, else the
+		// client crashes reaching it, 0.0.55); a player arriving there is sent back to the outdoor area (SendStandInsToTown).
+		const ZoneLink dungeonLinks[] { { tmpl, id }, { deeper, id + 2 } };
 		for (int bank = 1; bank <= 3; ++bank) {
 			std::uint64_t copy = state, copy1 = state, copy2 = state;
 			SetupZone(Banks[bank], id, tmpl, copy, 0, 0, false, outdoorLinks, 1, 0);
