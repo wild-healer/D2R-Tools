@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.55";
+constexpr const char* PluginVersion = "0.0.56";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2958,9 +2958,12 @@ void MoveOutOfSafeArea(std::uint8_t* game) noexcept {
 		if (std::abs(dx) > SafeRadius || std::abs(dy) > SafeRadius) continue;
 		// Out along the line from the portal through the monster (straight out on x if it stands on the portal).
 		const double length = std::sqrt(static_cast<double>(dx * dx + dy * dy));
-		const double ux = length > 0.5 ? dx / length : 1.0, uy = length > 0.5 ? dy / length : 0.0;
+		// Each monster its own direction (a little turned by its id) so the moved ones don't end up in one heap.
+		const double base = length > 0.5 ? std::atan2(static_cast<double>(dy), static_cast<double>(dx)) : 0.0;
+		const double angle = base + ((static_cast<int>(m.id % 7) - 3) * 0.35);
+		const double ux = std::cos(angle), uy = std::sin(angle);
 		bool moved = false;
-		for (int extra = 4; extra <= 24 && !moved; extra += 6) {
+		for (int extra = 4 + static_cast<int>(m.id % 5) * 3; extra <= 40 && !moved; extra += 6) {
 			Coord spot { cx + static_cast<int>(ux * (SafeRadius * 1.42 + extra)), cy + static_cast<int>(uy * (SafeRadius * 1.42 + extra)) };
 			void* nearRoom = At<RoomAtFn>(0x38DFB0)(room, spot.x, spot.y);
 			if (!nearRoom) continue;
@@ -3001,10 +3004,15 @@ void ZoneExitArea(std::uint8_t* game) noexcept {
 		std::uint8_t*   farRoom = nullptr;
 		long long       best = -1;
 		int             rooms = 0;
-		for (auto* r = Field<std::uint8_t*>(level, 0x10); r && rooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++rooms) {
-			const long long dx = Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2 - fromX, dy = Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2 - fromY;
-			if (dx * dx + dy * dy > best) best = dx * dx + dy * dy, farRoom = r;
-		}
+		// Rooms on the level's edge are left out: their far side is the map border (0.0.55 put the chests behind it).
+		const int bx = Field<std::int32_t>(level, 0x24), by = Field<std::int32_t>(level, 0x28), bw = Field<std::int32_t>(level, 0x2C), bh = Field<std::int32_t>(level, 0x30);
+		for (int pass = 0; pass < 2 && !farRoom; ++pass)
+			for (auto* r = Field<std::uint8_t*>(level, 0x10); r && rooms < 8192; r = Field<std::uint8_t*>(r, 0x48), ++rooms) {
+				const int rx = Field<std::int32_t>(r, 0x60), ry = Field<std::int32_t>(r, 0x64), rw = Field<std::int32_t>(r, 0x68), rh = Field<std::int32_t>(r, 0x6C);
+				if (pass == 0 && bw > 0 && bh > 0 && (rx <= bx || ry <= by || rx + rw >= bx + bw || ry + rh >= by + bh)) continue;
+				const long long dx = rx + rw / 2 - fromX, dy = ry + rh / 2 - fromY;
+				if (dx * dx + dy * dy > best) best = dx * dx + dy * dy, farRoom = r;
+			}
 		if (!farRoom) return Log(true, "zones: level %d has no room for its exit area", g->zoneId);
 		g->exitX = (Field<std::int32_t>(farRoom, 0x60) + Field<std::int32_t>(farRoom, 0x68) / 2) * 5;
 		g->exitY = (Field<std::int32_t>(farRoom, 0x64) + Field<std::int32_t>(farRoom, 0x6C) / 2) * 5;
@@ -3013,15 +3021,17 @@ void ZoneExitArea(std::uint8_t* game) noexcept {
 		if (!exitRoom) return Log(true, "zones: the exit room of level %d could not be loaded", g->zoneId);
 		int made = 0;
 		for (int i = 0; i < ExitChests; ++i) {
-			Coord spot { g->exitX + (i - 1) * 7, g->exitY };
+			Coord spot { g->exitX + (i - 1) * 6, g->exitY + (i - 1) * 6 };
 			void* free = nullptr;
 			At<FindFreeSpotFn>(0x517F90)(game, exitRoom, &spot, 2, 0x400, &free, 4, 100);
 			void* chest = free ? At<SpawnUnitFn>(0x490410)(2, GoldenChest, spot.x, spot.y, game, free, 1, 0, 0, nullptr) : nullptr;
 			if (chest) ++made;
-			Log(false, "zones: exit area of level %d: golden chest %d at %d,%d %s", g->zoneId, i + 1, spot.x, spot.y, chest ? "made" : free ? "refused" : "(no free spot)");
+			Log(false, "zones: exit area of level %d: golden chest %d at %d,%d %s (unit id %u, class %u, mode %u)", g->zoneId, i + 1, spot.x, spot.y,
+			    chest ? "made" : free ? "refused" : "(no free spot)", chest ? Field<std::uint32_t>(chest, 8) : 0, chest ? Field<std::uint32_t>(chest, 4) : 0,
+			    chest ? Field<std::uint32_t>(chest, 0x0C) : 0);
 		}
-		Log(false, "zones: exit area of level %d at %d,%d (%lld tiles from the entry), %d of %d chests", g->zoneId, g->exitX, g->exitY,
-		    static_cast<long long>(std::sqrt(static_cast<double>(best))), made, ExitChests);
+		Log(false, "zones: exit area of level %d at %d,%d (%lld tiles from the entry; level box %d,%d %dx%d), %d of %d chests", g->zoneId, g->exitX, g->exitY,
+		    static_cast<long long>(std::sqrt(static_cast<double>(best))), bx, by, bw, bh, made, ExitChests);
 		return;
 	}
 }
