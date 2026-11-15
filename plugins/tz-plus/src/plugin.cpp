@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.67";
+constexpr const char* PluginVersion = "0.0.68";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -527,7 +527,9 @@ constexpr int    ZoneSlots = 30; // ZoneParts levels a zone
 // A zone's levels: its outdoor area, its dungeon, the dungeon's down stairs stand-in (sends you back outdoors), and two small
 // outdoor areas joined to the outdoor one by the game's own passages: the entry (where the portal arrives) and the exit (chests).
 constexpr int    ZoneParts = 5, KindMain = 0, KindDungeon = 1, KindStandIn = 2, KindEntry = 3, KindExit = 4;
-constexpr int    SmallArea = 16; // tiles, the entry and exit areas' size (levels come in 8-tile cells; border pieces that don't fit are skipped, HookBorderPlace)
+constexpr int    SmallArea = 24; // tiles, the entry and exit areas' size (levels come in 8-tile cells; border pieces that don't fit are skipped, HookBorderPlace)
+thread_local int  BuildingKind = -1;   // the kind of zone level being built (outdoor build steps skipped for the small areas)
+thread_local bool OwnObject    = false; // our own objects (golden chests), let through the small areas' object block
 using GetLevelFn  = void* (*)(std::uint8_t mode, void* drlg, int level) noexcept; // D2R+0x3267C0: the act's level (made if new)
 using BuildLevelFn = std::uint64_t (*)(std::uint8_t mode, void* level) noexcept;  // D2R+0x3271C0: builds a level's rooms
 std::atomic<std::uint32_t> ZoneSeed[ZoneSlots] {}; // each zone's layout seed, rolled when its portal opens (server and client build the same map)
@@ -1474,6 +1476,31 @@ bool PatchCall(std::uint64_t siteRva, std::uint64_t targetRva, const void* hook,
 	std::memcpy(expected + 1, &from32, 4);
 	std::memcpy(call + 1, &to32, 4);
 	return Context->PatchBytes(siteRva, expected, 5, call, 5);
+}
+
+// Same as PatchCall for a tail "jmp target" (the hook returns straight to the caller's caller).
+bool PatchJump(std::uint64_t siteRva, std::uint64_t targetRva, const void* hook) noexcept {
+	const std::uintptr_t site = Base + siteRva;
+	if (!StubPage) StubPage = static_cast<std::uint8_t*>(AllocNear(site, 4096));
+	if (!StubPage || StubUsed + 32 > 4096) return false;
+	std::uint8_t* stub = StubPage + StubUsed;
+	StubUsed += 32;
+	const auto         target = reinterpret_cast<std::uint64_t>(hook);
+	const std::uint8_t jump[6] { 0xFF, 0x25, 0, 0, 0, 0 };
+	DWORD old = 0;
+	if (!VirtualProtect(StubPage, 4096, PAGE_READWRITE, &old)) return false;
+	std::memcpy(stub, jump, 6);
+	std::memcpy(stub + 6, &target, 8);
+	if (!VirtualProtect(StubPage, 4096, PAGE_EXECUTE_READ, &old)) return false;
+	FlushInstructionCache(GetCurrentProcess(), StubPage, 4096);
+	const auto from = static_cast<std::int64_t>(targetRva) - static_cast<std::int64_t>(siteRva + 5);
+	const auto to   = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(stub)) - static_cast<std::int64_t>(site + 5);
+	if (to < INT32_MIN || to > INT32_MAX) return false;
+	std::uint8_t expected[5] { 0xE9 }, jmp[5] { 0xE9 };
+	const auto   from32 = static_cast<std::int32_t>(from), to32 = static_cast<std::int32_t>(to);
+	std::memcpy(expected + 1, &from32, 4);
+	std::memcpy(jmp + 1, &to32, 4);
+	return Context->PatchBytes(siteRva, expected, 5, jmp, 5);
 }
 
 bool Locate() noexcept {
@@ -3059,10 +3086,12 @@ void ZoneExitArea(std::uint8_t* game) noexcept {
 		if (!exitRoom) return Log(true, "zones: the exit area's middle room (level %d) could not be loaded", g->zoneId + KindExit);
 		int made = 0;
 		for (int i = 0; i < ExitChests; ++i) {
-			Coord spot { g->exitX + (i - 1) * 6, g->exitY + (i - 1) * 6 };
+			Coord spot { g->exitX + 12, g->exitY + (i - 1) * 8 }; // a row across the area, toward the back (east), facing the passage (west)
 			void* free = nullptr;
 			At<FindFreeSpotFn>(0x517F90)(game, exitRoom, &spot, 2, 0x400, &free, 4, 100);
+			OwnObject   = true;
 			void* chest = free ? At<SpawnUnitFn>(0x490410)(2, GoldenChest, spot.x, spot.y, game, free, 1, 0, 0, nullptr) : nullptr;
+			OwnObject   = false;
 			if (chest) ++made;
 			Log(false, "zones: exit area (level %d): golden chest %d at %d,%d %s (unit id %u)", g->zoneId + KindExit, i + 1, spot.x, spot.y,
 			    chest ? "made" : free ? "refused" : "(no free spot)", chest ? Field<std::uint32_t>(chest, 8) : 0);
@@ -3255,6 +3284,36 @@ std::uint64_t HookDs1Load(std::uint8_t mode, void* cache, const char* name, void
 	return At<Ds1LoadFn>(Ds1LoadRva)(mode, cache, name, room2);
 }
 
+// Act 1 fill pieces (D2R+0x3FB1A0 (mode, level), the act 1 builder's last step, a tail jump at 0x3FAD8A): trees, ruins, camps,
+// cottages... in the free blocks. None in the entry and exit areas (plain ground).
+constexpr std::uint64_t FillJump = 0x3FAD8A, FillRva = 0x3FB1A0;
+using FillFn = std::uint64_t (*)(std::uint8_t mode, void* level) noexcept;
+std::uint64_t HookFill(std::uint8_t mode, void* level) noexcept {
+	if (BuildingKind == KindEntry || BuildingKind == KindExit) {
+		Log(false, "zones: no fill pieces in level %d (small area)", level ? Field<std::int32_t>(level, 0x1F8) : -1);
+		return 0;
+	}
+	return At<FillFn>(FillRva)(mode, level);
+}
+
+// Objects (D2R+0x490410 SpawnUnit, type 2): none in the entry and exit areas (barrels, caches, chests from the tiles) except
+// portals and our golden chests.
+constexpr std::uint64_t SpawnUnitRva = 0x490410;
+constexpr std::array<std::uint8_t, 19> SpawnUnitBytes { 0x40, 0x55, 0x53, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x70, 0xFC, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0x90, 0x04, 0x00, 0x00 };
+using SpawnUnitHookFn = void* (*)(int type, int cls, int x, int y, void* game, void* room, std::uint64_t flag, std::uint64_t mode, std::uint64_t a9, void* a10) noexcept;
+SpawnUnitHookFn  SpawnUnitOrig {};
+std::atomic<int> ObjectBlocked { 0 };
+void* HookSpawnUnit(int type, int cls, int x, int y, void* game, void* room, std::uint64_t flag, std::uint64_t mode, std::uint64_t a9, void* a10) noexcept {
+	if (type == 2 && room && !OwnObject && cls != 59 && cls != 60 && ZoneBase.load(std::memory_order_relaxed) > 0) {
+		const int level = At<RoomLevelFn>(0x2EFC10)(room), base = ZoneBase.load(std::memory_order_relaxed);
+		if (level >= base && level < base + ZoneSlots && ((level - base) % ZoneParts == KindEntry || (level - base) % ZoneParts == KindExit)) {
+			if (ObjectBlocked.fetch_add(1, std::memory_order_relaxed) < 20) Log(false, "zones: no object %d in level %d (small area)", cls, level);
+			return nullptr;
+		}
+	}
+	return SpawnUnitOrig(type, cls, x, y, game, room, flag, mode, a9, a10);
+}
+
 // Where each of a zone's levels goes (tiles). The dungeon and the stand-in: their own slot's place. The outdoor area: its slot's
 // place, the template's size; the entry area to its west and the exit area to its east, touching it (the game links levels
 // whose boxes touch, D2R+0x326A10), SmallArea square, centred on its height.
@@ -3274,13 +3333,12 @@ void ZoneBox(std::uint8_t mode, int id, int& x, int& y, int& w, int& h) noexcept
 	}
 	// One block taller than wide: a 2x2-block area is 4 corner pieces and has no edge piece to open for the passage (0.0.66 pen),
 	// a 3rd block along the side facing the outdoor area gives it one.
-	const int sh = SmallArea + 8, sy = my + ((mh - sh) / 2 & ~7);
+	const int sh = SmallArea, sy = my + ((mh - sh) / 2 & ~7);
 	if (kind == KindEntry) x = mx - SmallArea, y = sy, w = SmallArea, h = sh;
 	else if (kind == KindExit) x = mx + mw, y = sy, w = SmallArea, h = sh;
 	else x = mx, y = my, w = mw, h = mh;
 }
 
-thread_local int BuildingKind = -1; // the kind of zone level being built (outdoor build steps skipped for the small areas)
 using LinkLevelsFn = void (*)(std::uint8_t mode, void* drlg, int first, int last) noexcept; // D2R+0x3F1B40
 
 void LinkNeighbours(std::uint8_t mode, void* level, int id) noexcept {
@@ -3591,6 +3649,8 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 	for (const std::uint64_t site : LabelCalls)
 		if (!PatchCall(site, LabelRva, reinterpret_cast<const void*>(&HookLabel)))
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
+	if (!PatchJump(FillJump, FillRva, reinterpret_cast<const void*>(&HookFill)))
+		Log(true, "zones: could not patch D2R+0x%llX (fill pieces)", static_cast<unsigned long long>(FillJump));
 	if (!PatchCall(Ds1LoadCall, Ds1LoadRva, reinterpret_cast<const void*>(&HookDs1Load), { 0x4D, 0x89, 0xF1 })) // mov r9, r14 (room2)
 		Log(true, "zones: could not patch D2R+0x%llX (preset files)", static_cast<unsigned long long>(Ds1LoadCall));
 	if (!PatchCall(BorderPlaceCall, BorderPlaceRva, reinterpret_cast<const void*>(&HookBorderPlace)))
@@ -3624,6 +3684,10 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 		if (!context->InstallInlineHook(UnitNameRva, UnitNameBytes.data(), static_cast<std::uint32_t>(UnitNameBytes.size()), reinterpret_cast<void*>(&HookUnitName), &original) || !original)
 			Log(true, "zones: Roran keeps the Townguard's name, could not hook D2R+0x%llX", static_cast<unsigned long long>(UnitNameRva));
 		else UnitNameOrig = reinterpret_cast<UnitNameFn>(original);
+		original = nullptr;
+		if (!context->InstallInlineHook(SpawnUnitRva, SpawnUnitBytes.data(), static_cast<std::uint32_t>(SpawnUnitBytes.size()), reinterpret_cast<void*>(&HookSpawnUnit), &original) || !original)
+			Log(true, "zones: objects not blocked in small areas, could not hook D2R+0x%llX", static_cast<unsigned long long>(SpawnUnitRva));
+		else SpawnUnitOrig = reinterpret_cast<SpawnUnitHookFn>(original);
 		original = nullptr;
 		if (!context->InstallInlineHook(SpawnCoreRva, SpawnCoreBytes.data(), static_cast<std::uint32_t>(SpawnCoreBytes.size()), reinterpret_cast<void*>(&HookSpawnCore), &original) || !original)
 			Log(true, "zones: level 2 gets monsters, could not hook D2R+0x%llX", static_cast<unsigned long long>(SpawnCoreRva));
