@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.42";
+constexpr const char* PluginVersion = "0.0.43";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2568,26 +2568,49 @@ std::uint64_t HookPortalSpot(void* room, std::int32_t x, std::int32_t y, std::ui
 	return At<RoomHasFn>(RoomHasRva)(room, x, y);
 }
 
-// Monster spawns (D2R+0x492CF0 (game, room, x, y, ...)): none in a zone's level 2 or its town stand-in (levels without a template).
-constexpr std::uint64_t SpawnAtRva = 0x492CF0;
-constexpr std::array<std::uint8_t, 17> SpawnAtBytes { 0x4C, 0x8B, 0xDC, 0x48, 0x83, 0xEC, 0x68, 0x8B, 0x84, 0x24, 0x90, 0x00, 0x00, 0x00, 0x45, 0x33, 0xD2 };
-std::uint64_t           SpawnAtOrig {};
-std::atomic<int>        EmptyBlocked { 0 };
+// Monster spawns (the game's spawn core D2R+0x493CC0 (params: +0 game, +8 room, +0x18 monster)): none in a zone's level 2 or its
+// town stand-in (our levels without a template), whatever spawns them (room population, presets, groups).
+constexpr std::uint64_t SpawnCoreRva = 0x493CC0;
+constexpr std::array<std::uint8_t, 15> SpawnCoreBytes { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7C, 0x24, 0x20 };
+using SpawnCoreFn = void* (*)(void* params) noexcept;
+SpawnCoreFn      SpawnCoreOrig {};
+std::atomic<int> EmptyBlocked { 0 };
 
-std::uint64_t HookSpawnAt(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d, std::uint64_t e, std::uint64_t f, std::uint64_t g7,
-                          std::uint64_t h, std::uint64_t i, std::uint64_t j, std::uint64_t k, std::uint64_t l, std::uint64_t m, std::uint64_t n) noexcept {
-	using Fn       = std::uint64_t (*)(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t,
-                                 std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t) noexcept;
+bool EmptyLevel(int level) noexcept {
 	const int base = ZoneBase.load(std::memory_order_relaxed);
-	void*     room = reinterpret_cast<void*>(b);
-	if (base > 0 && room) {
+	return base > 0 && level >= base && level < base + ZoneSlots && ZoneTemplate[level - base].load() == 0;
+}
+
+void* HookSpawnCore(void* params) noexcept {
+	void* room = params ? Field<void*>(params, 8) : nullptr;
+	if (room && ZoneBase.load(std::memory_order_relaxed) > 0) {
 		const int level = At<RoomLevelFn>(0x2EFC10)(room);
-		if (level >= base && level < base + ZoneSlots && ZoneTemplate[level - base].load() == 0) {
-			if (EmptyBlocked.fetch_add(1) < 5) Log(false, "zones: no monster in level %d (an empty level 2)", level);
-			return 0;
+		if (EmptyLevel(level)) {
+			if (EmptyBlocked.fetch_add(1) < 5) Log(false, "zones: no monster %d in level %d (empty)", Field<std::int32_t>(params, 0x18), level);
+			return nullptr;
 		}
 	}
-	return reinterpret_cast<Fn>(SpawnAtOrig)(a, b, c, d, e, f, g7, h, i, j, k, l, m, n);
+	return SpawnCoreOrig(params);
+}
+
+// A player arriving in a zone's town stand-in (behind the entry stairs) is sent on to Harrogath's waypoint (D2R+0x488180, reason 0xD).
+using WarpUnitFn = std::uint64_t (*)(void* game, void* unit, int level, int reason) noexcept;
+void SendStandInsToTown(std::uint8_t* game) noexcept {
+	const int base = ZoneBase.load(std::memory_order_relaxed);
+	if (base <= 0) return;
+	auto* client = Field<std::uint8_t*>(game, GameClients);
+	for (int guard = 0; client && guard < 64; ++guard, client = Field<std::uint8_t*>(client, ClientNext)) {
+		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
+		void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
+		if (!room) continue;
+		const int level = At<RoomLevelFn>(0x2EFC10)(room);
+		if (level <= base || level >= base + ZoneSlots || !ZoneTemplate[level - 1 - base].load()) continue;
+		static std::uint64_t last = 0; // one warp at a time: the move may finish on a later frame
+		if (GetTickCount64() - last < 1500) continue;
+		last = GetTickCount64();
+		Log(false, "zones: player took the entry stairs of level %d: sent to Harrogath", level - 1);
+		At<WarpUnitFn>(0x488180)(game, player, Harrogath, 0xD);
+	}
 }
 
 void OpenZonePortal(std::uint8_t* game) noexcept {
@@ -2837,15 +2860,32 @@ constexpr std::array<std::uint8_t, 16> MazeBuildBytes { 0x40, 0x55, 0x53, 0x56, 
 using MazeBuildFn = std::uint64_t (*)(std::uint8_t mode, void* level) noexcept;
 MazeBuildFn      MazeBuildOrig {};
 
+// Every build of one of our levels (the server's and the client's, and the client's again when you come back) starts from the
+// zone's seed, so they all make the same map; each level gets its own place on the act's map (else their automaps overlap).
+// While a zone is built under its template's id, the template's links (LevelDefs Vis) are ours, so its stairs lead to our levels.
 std::uint64_t HookMazeBuild(std::uint8_t mode, void* level) noexcept {
 	const int base = ZoneBase.load(std::memory_order_relaxed);
 	const int id   = level ? Field<std::int32_t>(level, 0x1F8) : 0;
-	const int tmpl = base > 0 && id >= base && id < base + ZoneSlots ? ZoneTemplate[id - base].load() : 0;
-	if (!tmpl) return MazeBuildOrig(mode, level);
+	if (base <= 0 || id < base || id >= base + ZoneSlots) return MazeBuildOrig(mode, level);
+	const int slot = id - base, tmpl = ZoneTemplate[slot].load();
+	if (const std::uint32_t seed = ZoneSeed[slot].load()) At<SeedFn>(SeedInitRva)(static_cast<std::uint8_t*>(level) + 0x1E4, seed);
+	SetField<std::int32_t>(level, 0x24, 5000 + slot * 220); // tiles; the level box keeps its size
+	if (!tmpl) {
+		const std::uint64_t result = MazeBuildOrig(mode, level);
+		Log(false, "zones: level %d built at %d,%d", id, Field<std::int32_t>(level, 0x24), Field<std::int32_t>(level, 0x28));
+		return result;
+	}
+	std::uint8_t* defs = mode <= 3 ? Banks[mode].defs : nullptr;
+	std::int32_t  saved[16] {};
+	if (defs) {
+		std::memcpy(saved, defs + tmpl * DefRow + DefVis, sizeof(saved)); // Vis[8] then Warp[8]
+		std::memcpy(defs + tmpl * DefRow + DefVis, defs + id * DefRow + DefVis, sizeof(saved));
+	}
 	SetField<std::int32_t>(level, 0x1F8, tmpl);
 	const std::uint64_t result = MazeBuildOrig(mode, level);
 	SetField<std::int32_t>(level, 0x1F8, id);
-	Log(false, "zones: level %d built as level %d (its stairs rooms)", id, tmpl);
+	if (defs) std::memcpy(defs + tmpl * DefRow + DefVis, saved, sizeof(saved));
+	Log(false, "zones: level %d built as level %d (its stairs rooms) at %d,%d", id, tmpl, Field<std::int32_t>(level, 0x24), Field<std::int32_t>(level, 0x28));
 	return result;
 }
 
@@ -2894,7 +2934,7 @@ void SpawnRoran(std::uint8_t* game) noexcept {
 }
 
 std::uint64_t HookFrameCall(void* game) noexcept {
-	if (game) SpawnRoran(static_cast<std::uint8_t*>(game));
+	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
 	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
@@ -2926,9 +2966,9 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 			Log(true, "zones: Roran keeps the Townguard's name, could not hook D2R+0x%llX", static_cast<unsigned long long>(UnitNameRva));
 		else UnitNameOrig = reinterpret_cast<UnitNameFn>(original);
 		original = nullptr;
-		if (!context->InstallInlineHook(SpawnAtRva, SpawnAtBytes.data(), static_cast<std::uint32_t>(SpawnAtBytes.size()), reinterpret_cast<void*>(&HookSpawnAt), &original) || !original)
-			Log(true, "zones: level 2 gets monsters, could not hook D2R+0x%llX", static_cast<unsigned long long>(SpawnAtRva));
-		else SpawnAtOrig = reinterpret_cast<std::uint64_t>(original);
+		if (!context->InstallInlineHook(SpawnCoreRva, SpawnCoreBytes.data(), static_cast<std::uint32_t>(SpawnCoreBytes.size()), reinterpret_cast<void*>(&HookSpawnCore), &original) || !original)
+			Log(true, "zones: level 2 gets monsters, could not hook D2R+0x%llX", static_cast<unsigned long long>(SpawnCoreRva));
+		else SpawnCoreOrig = reinterpret_cast<SpawnCoreFn>(original);
 		original = nullptr;
 		if (!context->InstallInlineHook(MazeBuildRva, MazeBuildBytes.data(), static_cast<std::uint32_t>(MazeBuildBytes.size()), reinterpret_cast<void*>(&HookMazeBuild), &original) || !original)
 			Log(true, "zones: no exit stairs, could not hook D2R+0x%llX", static_cast<unsigned long long>(MazeBuildRva));
