@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.51";
+constexpr const char* PluginVersion = "0.0.52";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -3149,6 +3149,25 @@ void InstallTraces(std::integer_sequence<int, N...>) noexcept {
 	Log(false, "zones: outdoor trace on (%d of %d steps)", done, static_cast<int>(sizeof...(N)));
 }
 
+// Client tile pass around the player (D2R+0x21D090 (self, tile, flag, x, ...)): reads the tile's graphics (+0x20) with no null
+// check. In outdoor zones some tiles have none (0.0.51 crashed there a few seconds in): those are skipped.
+constexpr std::uint64_t TilePassRva = 0x21D090, TilePassCalls[2] { 0x21CD9F, 0x21CFCE };
+using TilePassFn = std::uint64_t (*)(void* self, void* tile, std::uint64_t a3, std::uint64_t a4, std::uint64_t a5, std::uint64_t a6, std::uint64_t a7) noexcept;
+std::atomic<int> TileSkipLogs { 0 };
+std::uint64_t HookTilePass(void* self, void* tile, std::uint64_t a3, std::uint64_t a4, std::uint64_t a5, std::uint64_t a6, std::uint64_t a7) noexcept {
+	if (tile && !(Field<std::uint32_t>(tile, 0x18) & 0x408) && !Field<void*>(tile, 0x20)) {
+		if (TileSkipLogs.fetch_add(1, std::memory_order_relaxed) < 20) {
+			char raw[200] {};
+			int  at = 0;
+			for (int i = 0; i < 0x48 / 4 && at < 190; ++i) at += std::snprintf(raw + at, sizeof(raw) - at, "%08X ", Field<std::uint32_t>(tile, i * 4));
+			Log(false, "zones: tile without graphics skipped at %d,%d (args %d %d %d), tile %p: %s", static_cast<int>(a4), static_cast<int>(a5),
+			    static_cast<int>(a3), static_cast<int>(a6), static_cast<int>(a7), tile, raw);
+		}
+		return 0;
+	}
+	return At<TilePassFn>(TilePassRva)(self, tile, a3, a4, a5, a6, a7);
+}
+
 // Automap layers (client, D2R+0xD1710 switches the current layer, D2R+0x2A2CF68): the old layer is saved to the character's .map
 // file (0xD6230) and cleared (0xD4D60 on its 4 lists), then the new one loaded from it (0xD5710). The file has a table of 100 layers;
 // ours (>= 100) stay in memory instead: not saved, not cleared, not loaded.
@@ -3305,6 +3324,9 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
 	if (!PatchCall(OutdoorBuildCall, OutdoorBuildRva, reinterpret_cast<const void*>(&HookOutdoorBuild)))
 		Log(true, "zones: outdoor zones can't be built, could not patch D2R+0x%llX", static_cast<unsigned long long>(OutdoorBuildCall));
+	for (const std::uint64_t site : TilePassCalls)
+		if (!PatchCall(site, TilePassRva, reinterpret_cast<const void*>(&HookTilePass)))
+			Log(true, "zones: could not patch D2R+0x%llX (tile pass)", static_cast<unsigned long long>(site));
 	InstallTraces(std::make_integer_sequence<int, static_cast<int>(sizeof(TraceSites) / sizeof(TraceSites[0]))>());
 	{
 		bool cleared = true;
