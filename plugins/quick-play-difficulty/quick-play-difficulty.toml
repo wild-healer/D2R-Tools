@@ -1,0 +1,15 @@
+# Quick Play Difficulty
+#
+# On the character select screen, a left click on Play starts the game at the
+# highest difficulty the selected character has unlocked, without the
+# difficulty selector. A right click on Play opens the selector.
+# Every setting can also be changed in game with I Hate TOMLs, and applies at once.
+
+[quick-play-difficulty]
+enabled = true
+
+# Right click on Play opens the difficulty selector.
+right_click_selector = true
+
+# Write the game's UI messages to logs/quick-play-difficulty-ui.log (for bug reports).
+log_ui = false
