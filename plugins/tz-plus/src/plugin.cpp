@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.60";
+constexpr const char* PluginVersion = "0.0.61";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -527,8 +527,7 @@ constexpr int    ZoneSlots = 30; // ZoneParts levels a zone
 // A zone's levels: its outdoor area, its dungeon, the dungeon's down stairs stand-in (sends you back outdoors), and two small
 // outdoor areas joined to the outdoor one by the game's own passages: the entry (where the portal arrives) and the exit (chests).
 constexpr int    ZoneParts = 5, KindMain = 0, KindDungeon = 1, KindStandIn = 2, KindEntry = 3, KindExit = 4;
-constexpr int    SmallArea = 40; // tiles, the entry and exit areas' size (32 is too small for the loader's border pass: 'secondary-border area is negative')
-constexpr int    MainArea  = 64; // tiles, the outdoor area's size (Cold Plains: 80)
+constexpr int    SmallArea = 32; // tiles, the entry and exit areas' size (border pieces that don't fit are skipped, HookBorderPlace)
 using GetLevelFn  = void* (*)(std::uint8_t mode, void* drlg, int level) noexcept; // D2R+0x3267C0: the act's level (made if new)
 using BuildLevelFn = std::uint64_t (*)(std::uint8_t mode, void* level) noexcept;  // D2R+0x3271C0: builds a level's rooms
 std::atomic<std::uint32_t> ZoneSeed[ZoneSlots] {}; // each zone's layout seed, rolled when its portal opens (server and client build the same map)
@@ -3191,6 +3190,38 @@ constexpr std::uint64_t OutdoorBuildCall = 0x32720E, OutdoorBuildRva = 0x3E2B5CE
 std::uint64_t OutdoorBuild(std::uint8_t mode, void* level) noexcept { return At<MazeBuildFn>(OutdoorBuildRva)(mode, level); }
 std::atomic<int> OutdoorTrace { 0 };
 
+// Border piece placement (D2R+0x3F4F53 calls slot D2R+0x3E2B5EC (mode, ctx, preset, file), which jumps into the loader's
+// secondary-border pass). On a small level the pass counts a negative area for a piece and stops the game ("the
+// secondary-border area is negative"); same formula here: such a piece is skipped (not placed) instead.
+constexpr std::uint64_t BorderPlaceCall = 0x3F4F53, BorderPlaceRva = 0x3E2B5EC;
+using BorderPlaceFn = std::uint8_t (*)(std::uint8_t mode, void* ctx, void* preset, void* file) noexcept;
+std::atomic<int> BorderLogs { 0 };
+bool IsZoneId(int id) noexcept { const int b = ZoneBase.load(std::memory_order_relaxed); return b > 0 && id >= b && id < b + ZoneSlots; }
+std::uint8_t HookBorderPlace(std::uint8_t mode, void* ctx, void* preset, void* file) noexcept {
+	void* level = ctx ? Field<void*>(ctx, 0) : nullptr;
+	void* grid  = ctx ? Field<void*>(ctx, 8) : nullptr;
+	if (level && grid && preset && file) {
+		const std::int64_t count = Field<std::int32_t>(preset, 0x4C), fw = Field<std::int32_t>(file, 8), fh = Field<std::int32_t>(file, 0xC);
+		const std::int64_t gw = Field<std::int32_t>(grid, 8), gh = Field<std::int32_t>(grid, 0xC);
+		const int          side = Field<std::int32_t>(ctx, 0x28);
+		std::int64_t       adj  = 1;
+		if (side == 1) {
+			const auto* outdoor = Field<std::uint8_t*>(level, 0x18);
+			adj = outdoor && (outdoor[0] & 0xC) ? -1 : 1;
+		}
+		const std::int64_t across = gw - fw * count + adj, down = gh - fh * count;
+		const bool skip = count > 0 && fw > 0 && fh > 0 && across < 0 && down < -1;
+		if (skip || (IsZoneId(Field<std::int32_t>(level, 0x1F8)) && BorderLogs.load(std::memory_order_relaxed) < 40)) {
+			if (BorderLogs.fetch_add(1, std::memory_order_relaxed) < 40)
+				Log(false, "zones: border piece level %d side %d grid %lldx%lld piece %lldx%lld x%lld -> %lld,%lld%s", Field<std::int32_t>(level, 0x1F8), side,
+				    static_cast<long long>(gw), static_cast<long long>(gh), static_cast<long long>(fw), static_cast<long long>(fh), static_cast<long long>(count),
+				    static_cast<long long>(across), static_cast<long long>(down), skip ? " (does not fit, skipped)" : "");
+		}
+		if (skip) return 0;
+	}
+	return At<BorderPlaceFn>(BorderPlaceRva)(mode, ctx, preset, file);
+}
+
 // Where each of a zone's levels goes (tiles). The dungeon and the stand-in: their own slot's place. The outdoor area: its slot's
 // place, the template's size; the entry area to its west and the exit area to its east, touching it (the game links levels
 // whose boxes touch, D2R+0x326A10), SmallArea square, centred on its height.
@@ -3207,7 +3238,6 @@ void ZoneBox(std::uint8_t mode, int id, int& x, int& y, int& w, int& h) noexcept
 		const std::uint8_t* def = Banks[mode].defs + tmpl * DefRow;
 		for (int d = 0; d < 3; ++d) mw = std::max(mw, Field<std::int32_t>(def, DefSizeX + d * 4)), mh = std::max(mh, Field<std::int32_t>(def, DefSizeY + d * 4));
 		mw = std::min((mw + 7) & ~7, 200), mh = std::min((mh + 7) & ~7, 200);
-		mw = std::min(mw, MainArea), mh = std::min(mh, MainArea);
 	}
 	const int sy = my + ((mh - SmallArea) / 2 & ~7);
 	if (kind == KindEntry) x = mx - SmallArea, y = sy, w = h = SmallArea;
@@ -3524,6 +3554,8 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 	for (const std::uint64_t site : LabelCalls)
 		if (!PatchCall(site, LabelRva, reinterpret_cast<const void*>(&HookLabel)))
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
+	if (!PatchCall(BorderPlaceCall, BorderPlaceRva, reinterpret_cast<const void*>(&HookBorderPlace)))
+		Log(true, "zones: could not patch D2R+0x%llX (border pieces)", static_cast<unsigned long long>(BorderPlaceCall));
 	if (!PatchCall(OutdoorBuildCall, OutdoorBuildRva, reinterpret_cast<const void*>(&HookOutdoorBuild)))
 		Log(true, "zones: outdoor zones can't be built, could not patch D2R+0x%llX", static_cast<unsigned long long>(OutdoorBuildCall));
 	for (const std::uint64_t site : PresetSpawnCalls)
