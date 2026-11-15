@@ -61,7 +61,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.46";
+constexpr const char* PluginVersion = "0.0.47";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1049,7 +1049,7 @@ void AddMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	ApplyMods(game, unit, room);
 }
 
-std::uint64_t SpawnOrig[8] {};
+std::uint64_t SpawnOrig[9] {};
 static int    GroupLogs = 0;
 
 template <int I>
@@ -1063,7 +1063,11 @@ std::uint64_t HookSpawn(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::
 	if (slot && --slot->depth == 0 && !slot->pending.empty()) {
 		std::vector<Pending> units;
 		units.swap(slot->pending);
-		if (GroupLogs < 10) ++GroupLogs, Log(false, "group spawn %d: %zu monster(s), mods added now", I, units.size());
+		static int PackLogs = 0;
+		if (I == 8 ? PackLogs++ < 20 : GroupLogs < 10) {
+			if (I != 8) ++GroupLogs;
+			Log(false, I == 8 ? "champion pack: %zu more champion(s) with the leader" : "group spawn %d: %zu monster(s), mods added now", I == 8 ? units.size() : static_cast<std::size_t>(I), units.size());
+		}
 		for (const Pending& p : units)
 			if (Field<std::uint32_t>(p.unit, 0) == 1) ApplyMods(p.game, p.unit, nullptr); // still a monster
 	}
@@ -2199,7 +2203,10 @@ constexpr std::uintptr_t LevelsVec = 0x1460, DefsVec = 0x14A0, MazeVec = 0x18C0;
 constexpr std::size_t    LevelRow = 0x18C, DefRow = 0x9C, MazeRow = 0x1C;
 constexpr std::uintptr_t LvId = 4, LvPal = 12, LvAct = 13, LvQuest = 56, LvNumMon = 58, LvMonCount = 59, LvMon = 62, LvNMon = 112, LvUMon = 162,
                          LvWaypoint = 236, LvName = 253, LvWarpName = 293, LvEntryName = 333, LvDen = 36;
-constexpr int            ZoneDensity = 3000; // monster density of a zone whose monsters come in groups of GroupRef (vanilla: Pit 600, Crypt 1056, Stony Tomb 2200, Cow Level 800)
+constexpr int            ZoneDensity = 3000; // fallback density (a template without its own)
+// A zone's density is its dungeon's own (Levels MonDen: Pit 600, Tower Cellar 1024, Stony Tomb 2200: tombs have more walls, so the
+// game gives them more spawn tries for the same monsters per room) x DensityScale %, then scaled by the picks' group sizes.
+constexpr int            DensityScale = 125;
 constexpr int            GroupRef = 25;      // x10: the average group (with minions) ZoneDensity is tuned for; zones of bigger groups get fewer of them
 constexpr std::uintptr_t MonStatsVec = 0xF58; // MonStats {rows, count}: row 0x1FC, minion1 word +0x5A, PartyMin/Max +0x62/+0x63, MinGrp/MaxGrp +0x65/+0x66
 constexpr std::size_t    MonStatsRow = 0x1FC;
@@ -2279,7 +2286,12 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state, int vis0 = 0
 	SetField<std::uint8_t>(row, LvAct, 4);
 	SetField<std::uint8_t>(row, LvQuest, 0);
 	SetField<std::uint8_t>(row, LvWaypoint, 0xFF);
-	for (const std::uintptr_t den : { LvDen, LvDen + 4, LvDen + 8 }) SetField<std::int32_t>(row, den, ZoneDensity);
+	std::int32_t baseDen[3] {};
+	for (int i = 0; i < 3; ++i) {
+		const std::int32_t own = Field<std::int32_t>(row, LvDen + i * 4);
+		baseDen[i] = (own > 0 ? own : ZoneDensity) * DensityScale / 100;
+		SetField<std::int32_t>(row, LvDen + i * 4, baseDen[i]);
+	}
 	// Our names: keys answered by HookStringByKey.
 	const int n = slot + 1;
 	char      key[40] {};
@@ -2313,8 +2325,8 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state, int vis0 = 0
 			sum += group, ++counted;
 		}
 		if (counted) {
-			const int density = std::clamp(ZoneDensity * GroupRef * counted / sum, ZoneDensity / 4, ZoneDensity * 2);
-			for (const std::uintptr_t den : { LvDen, LvDen + 4, LvDen + 8 }) SetField<std::int32_t>(row, den, density);
+			for (int i = 0; i < 3; ++i)
+				SetField<std::int32_t>(row, LvDen + i * 4, std::clamp(baseDen[i] * GroupRef * counted / sum, baseDen[i] / 2, baseDen[i] * 2));
 		}
 	}
 	std::uint8_t* def = b.defs + id * DefRow;
@@ -3316,9 +3328,12 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 			{ 0x4996B0, { 0x40, 0x55, 0x57, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x4D, 0x8B, 0xF8, 0x48, 0x8B, 0xEA, 0x48 }, reinterpret_cast<void*>(&HookSpawn<5>) },
 			{ 0x498810, { 0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0x6C }, reinterpret_cast<void*>(&HookSpawn<6>) },
 			{ 0x49AF30, { 0x4C, 0x8B, 0xDC, 0x49, 0x89, 0x5B, 0x08, 0x49, 0x89, 0x6B, 0x10, 0x56, 0x57, 0x41, 0x54, 0x41 }, reinterpret_cast<void*>(&HookSpawn<7>) },
+			// A champion's pack (D2R+0x50B1B0 (game, leader, room, monster)): 1-3 more made as normal monsters (0x492BF0), then
+			// turned into champions (0x49AB40): their mods and count wait until they are.
+			{ 0x50B1B0, { 0x48, 0x89, 0x6C, 0x24, 0x18, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48, 0x8B }, reinterpret_cast<void*>(&HookSpawn<8>) },
 		};
 		int failed = 0;
-		for (int i = 0; i < 8; ++i) {
+		for (int i = 0; i < 9; ++i) {
 			void* original = nullptr;
 			if (!context->InstallInlineHook(spawns[i].rva, spawns[i].bytes.data(), static_cast<std::uint32_t>(spawns[i].bytes.size()), spawns[i].hook, &original) ||
 			    !original)
