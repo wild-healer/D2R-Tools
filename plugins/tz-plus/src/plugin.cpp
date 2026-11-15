@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.69";
+constexpr const char* PluginVersion = "0.0.70";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2882,6 +2882,33 @@ void SendStandInsToTown(std::uint8_t* game) noexcept {
 	}
 }
 
+// The game's monster regions (game +0x1D0: one per level id, built once at game creation by D2R+0x508750 from the level rows):
+// the room population picks from the region (+0x10 count, +0x11 rarity sum, +0x14 entries of 0x34: word monster, byte rarity),
+// not from the row. Our rows change when a zone opens, after the regions were built, so the zone got the previous picks
+// (0.0.69 log). Rebuilt here from the new row like the game does: 0x509940 (mode, row, region, seed, hell lists) appends the
+// entries, 0x4195E0 (mode, seed, entry, 3) sets each one up.
+using RegionFillFn  = void (*)(std::uint8_t mode, const void* row, void* region, void* seed, int nightmareLists) noexcept;
+using RegionEntryFn = void (*)(std::uint8_t mode, void* seed, void* entry, int flags) noexcept;
+void RebuildRegion(std::uint8_t* game, std::uint8_t mode, int id, std::uint64_t& state) noexcept {
+	auto** regions = Field<std::uint8_t**>(game, 0x1D0);
+	if (!regions || mode > 3 || !Banks[mode].levels) return;
+	std::uint8_t* region = regions[id];
+	if (!region) return Log(true, "zones: level %d has no monster region", id);
+	std::string before;
+	for (int i = 0; i < region[0x10] && i < 13; ++i) before += (before.empty() ? "" : ",") + std::to_string(Field<std::int16_t>(region, 0x14 + i * 0x34));
+	std::uint32_t seed[2] {};
+	At<void (*)(void*, std::uint32_t) noexcept>(0x367110)(seed, static_cast<std::uint32_t>(Mix(state)) | 1);
+	region[0x10] = 0, region[0x11] = 0;
+	const std::uint8_t* row = Banks[mode].levels + id * LevelRow;
+	At<RegionFillFn>(0x509940)(mode, row, region, seed, Field<std::uint8_t>(game, GameDifficulty) > 0 ? 1 : 0);
+	std::string after;
+	for (int i = 0; i < region[0x10] && i < 13; ++i) {
+		At<RegionEntryFn>(0x4195E0)(mode, seed, region + 0x14 + i * 0x34, 3);
+		after += (after.empty() ? "" : ",") + std::to_string(Field<std::int16_t>(region, 0x14 + i * 0x34));
+	}
+	Log(false, "zones: level %d monster region rebuilt: [%s] -> [%s] (row picks %d of %d)", id, before.c_str(), after.c_str(), row[0x3A], row[LvMonCount + 1]);
+}
+
 void OpenZonePortal(std::uint8_t* game) noexcept {
 	const int base = ZoneBase.load();
 	if (base <= 0) return SetPortalResult("TZ Plus zones: not available (the level tables could not be extended, see the log)");
@@ -3003,6 +3030,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		std::uint64_t layout = Field<std::uint64_t>(game, GameSeed) ^ GetTickCount64() ^ (static_cast<std::uint64_t>(id) << 40);
 		for (int i = 0; i < ZoneParts; ++i) ZoneSeed[id + i - base] = static_cast<std::uint32_t>(Mix(layout)) | 1;
 	}
+	for (const int level : { id, id + KindDungeon }) RebuildRegion(game, mode, level, state);
 	Creating     = g;
 	CreatingId   = id + KindEntry; // the portal arrives in the entry area
 	CreatingGame = game;
