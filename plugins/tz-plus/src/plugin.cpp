@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.57";
+constexpr const char* PluginVersion = "0.0.58";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -523,7 +523,13 @@ constexpr ActLevels Acts[5] { { Act1, 38 }, { Act2, 34 }, { Act3, 27 }, { Act4, 
 
 // TZ Plus zones (see "TZ Plus zones" below): hidden act 5 levels added after the game's own, always terrorized.
 std::atomic<int> ZoneBase { 0 }; // the first one's level id (the game's level count), 0 = none
-constexpr int    ZoneSlots = 30; // 3 levels a zone: the zone, its town link (entry stairs), its level 2
+constexpr int    ZoneSlots = 30; // ZoneParts levels a zone
+// A zone's levels: its outdoor area, its dungeon, the dungeon's down stairs stand-in (sends you back outdoors), and two small
+// outdoor areas joined to the outdoor one by the game's own passages: the entry (where the portal arrives) and the exit (chests).
+constexpr int    ZoneParts = 5, KindMain = 0, KindDungeon = 1, KindStandIn = 2, KindEntry = 3, KindExit = 4;
+constexpr int    SmallArea = 32; // tiles, the entry and exit areas' size
+using GetLevelFn  = void* (*)(std::uint8_t mode, void* drlg, int level) noexcept; // D2R+0x3267C0: the act's level (made if new)
+using BuildLevelFn = std::uint64_t (*)(std::uint8_t mode, void* level) noexcept;  // D2R+0x3271C0: builds a level's rooms
 std::atomic<std::uint32_t> ZoneSeed[ZoneSlots] {}; // each zone's layout seed, rolled when its portal opens (server and client build the same map)
 std::atomic<int> ZoneTemplate[ZoneSlots] {}; // the template of each zone (0 = none, level 2s too): its stairs rooms (HookMazeBuild)
 std::atomic<std::uint32_t> ZoneEntryBit[ZoneSlots] {}; // Room2 +0x50 flag of each zone's entry stairs room (0x10 << the template's Vis index)
@@ -2629,10 +2635,10 @@ const char* HookStringByKey(const KeyView* key) noexcept {
 			if (n >= 1 && n <= ZoneSlots) {
 				// 3 levels a zone: the zone, its stand-in (the entry stairs lead to Harrogath), its level 2.
 				char*       text  = ZoneTexts[kind][n - 1];
-				const int   slot  = n - 1, zone = slot / 3 + 1;
+				const int   slot  = n - 1, zone = slot / ZoneParts + 1;
 				const char* verb  = kind == 0 ? "" : kind == 1 ? "To " : "Entering ";
 				if (!text[0]) {
-					std::snprintf(text, 48, slot % 3 == 1 ? "%sTerror Zone %d Dungeon" : "%sTerror Zone %d", verb, zone); // the third: back outdoors
+					std::snprintf(text, 48, slot % ZoneParts == KindDungeon ? "%sTerror Zone %d Dungeon" : "%sTerror Zone %d", verb, zone);
 				}
 				return text;
 			}
@@ -2782,7 +2788,7 @@ void SendStandInsToTown(std::uint8_t* game) noexcept {
 		last = GetTickCount64();
 		// The dungeon's down stairs (the zone's third level): back to the outdoor area, at the dungeon's entrance (WarpUnit's 4th
 		// argument is the level to arrive next to: the game looks for the room of the outdoor area that leads to the dungeon).
-		if (const GameMods* g = ModsOf(game); g && g->zoneId && level == g->zoneId + 2) {
+		if (const GameMods* g = ModsOf(game); g && g->zoneId && level == g->zoneId + KindStandIn) {
 			Log(false, "zones: player took the dungeon's down stairs (level %d): sent back to level %d, at the entrance of level %d", level, g->zoneId, g->zoneId + 1);
 			At<WarpUnitFn>(0x488180)(game, player, g->zoneId, g->zoneId + 1);
 			continue;
@@ -2806,7 +2812,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	void* room = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
 	if (!room || At<RoomLevelFn>(0x2EFC10)(room) != Harrogath) return SetPortalResult("TZ Plus zones: stand in Harrogath to open a zone portal");
 	if (g->portal) return SetPortalResult("TZ Plus zones: a zone portal is already open in this game, close it first");
-	if (g->zonesUsed + 3 > ZoneSlots) return SetPortalResult("TZ Plus zones: all %d zones of this game are used, make a new game for more", ZoneSlots / 3);
+	if (g->zonesUsed + ZoneParts > ZoneSlots) return SetPortalResult("TZ Plus zones: all %d zones of this game are used, make a new game for more", ZoneSlots / ZoneParts);
 	const int     id    = base + g->zonesUsed;
 	std::uint64_t state = Field<std::uint64_t>(game, GameSeed) ^ (static_cast<std::uint64_t>(std::time(nullptr)) << 16) ^ static_cast<std::uint64_t>(id);
 	// A zone = an outdoor area (where the portal arrives) + its dungeon, one level; the dungeon's down stairs lead to Harrogath
@@ -2816,8 +2822,8 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	if (tmpl >= Banks[mode].count || dungeon >= Banks[mode].count || !MazeOf(Banks[mode], dungeon))
 		return SetPortalResult("TZ Plus zones: the level tables have no %d / %d to copy", tmpl, dungeon);
 	{
-		const int layer = NextLayer.fetch_add(3);
-		for (int i = 0; i < 3; ++i) ZoneLayer[id + i - base] = layer + i;
+		const int layer = NextLayer.fetch_add(ZoneParts);
+		for (int i = 0; i < ZoneParts; ++i) ZoneLayer[id + i - base] = layer + i;
 	}
 	// The zone's monsters, once for all banks.
 	ForcedCount = 0;
@@ -2841,6 +2847,21 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 			SetupZone(Banks[bank], id, tmpl, copy, 0, 0, false, outdoorLinks, 1, 0);
 			SetupZone(Banks[bank], id + 1, dungeon, copy1, 0, 0, false, dungeonLinks, deeper ? 2 : 1, tmpl);
 			SetupZone(Banks[bank], id + 2, dungeon, copy2, id + 1, 0, true);
+			// The entry and exit areas: empty copies of the outdoor area; the outdoor area and they list each other as neighbours
+			// (LevelDefs Vis with Warp -1, like the act's own outdoor areas), which the game turns into passages (BuildZoneLevel).
+			std::uint64_t copy3 = state, copy4 = state;
+			SetupZone(Banks[bank], id + KindEntry, tmpl, copy3, 0, 0, true);
+			SetupZone(Banks[bank], id + KindExit, tmpl, copy4, 0, 0, true);
+			if (std::uint8_t* defs = Banks[bank].defs; defs && id + KindExit < Banks[bank].count + ZoneSlots) {
+				auto neighbour = [&](int level, int index, int other) {
+					SetField<std::int32_t>(defs + level * DefRow, DefVis + index * 4, other);
+					SetField<std::int32_t>(defs + level * DefRow, DefWarp + index * 4, -1);
+				};
+				for (const int small : { id + KindEntry, id + KindExit })
+					for (int i = 0; i < 8; ++i) neighbour(small, i, 0);
+				neighbour(id, 0, id + KindEntry), neighbour(id, 1, id + KindExit);
+				neighbour(id + KindEntry, 0, id), neighbour(id + KindExit, 0, id);
+			}
 			// Elite packs (Levels MonUMin/MonUMax, a byte per difficulty at +48/+51): x1.5 outdoors, x2 in the dungeon.
 			for (const auto [lvl, pct] : { std::pair { id, OutdoorElites }, std::pair { id + 1, DungeonElites } })
 				if (Banks[bank].levels && lvl < Banks[bank].count + ZoneSlots)
@@ -2888,20 +2909,23 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	void* portal = nullptr;
 	g->safeLevel = 0;
 	ZoneTemplate[id - base] = tmpl, ZoneTemplate[id + 1 - base] = dungeon, ZoneTemplate[id + 2 - base] = 0; // the stand-in keeps its id: one entry room
+	ZoneTemplate[id + KindEntry - base] = tmpl, ZoneTemplate[id + KindExit - base] = tmpl;
+	ZoneEntryBit[id + KindEntry - base] = 0, ZoneEntryBit[id + KindExit - base] = 0;
 	ZoneStandIn[id - base] = false, ZoneStandIn[id + 1 - base] = false, ZoneStandIn[id + 2 - base] = true;
+	ZoneStandIn[id + KindEntry - base] = false, ZoneStandIn[id + KindExit - base] = false;
 	{
 		std::uint64_t layout = Field<std::uint64_t>(game, GameSeed) ^ GetTickCount64() ^ (static_cast<std::uint64_t>(id) << 40);
-		for (int i = 0; i < 3; ++i) ZoneSeed[id + i - base] = static_cast<std::uint32_t>(Mix(layout)) | 1;
+		for (int i = 0; i < ZoneParts; ++i) ZoneSeed[id + i - base] = static_cast<std::uint32_t>(Mix(layout)) | 1;
 	}
 	Creating     = g;
-	CreatingId   = id;
+	CreatingId   = id + KindEntry; // the portal arrives in the entry area
 	CreatingGame = game;
-	const int created = freeRoom ? At<CreatePortalFn>(0x432CE0)(game, player, freeRoom, spot.x, spot.y, id, &portal, 60, 0, 1) : 0;
+	const int created = freeRoom ? At<CreatePortalFn>(0x432CE0)(game, player, freeRoom, spot.x, spot.y, id + KindEntry, &portal, 60, 0, 1) : 0;
 	Creating = nullptr, CreatingGame = nullptr;
 	if (!created)
 		return SetPortalResult("TZ Plus zones: the game refused the portal to level %d (%s) at %d,%d%s", id, LevelName(Banks[mode], tmpl).c_str(), spot.x, spot.y,
 		                       freeRoom ? "" : " (no free spot)");
-	g->zonesUsed += 3;
+	g->zonesUsed += ZoneParts;
 	g->zoneId = id, g->level2Id = id + 2, g->exitPortal = nullptr, g->exitPortalId = 0, g->single = ZoneSingle[id - base].load();
 	g->exitX = g->exitY = 0, g->exitDone = false;
 	g->portal   = portal;
@@ -2909,11 +2933,11 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	ZonePortalOpen = portal != nullptr;
 	if (portal) {
 		AcquireSRWLockExclusive(&PortalLock);
-		ZonePortals[PortalCursor++ % 64] = { Field<std::uint32_t>(portal, 8), id };
+		ZonePortals[PortalCursor++ % 64] = { Field<std::uint32_t>(portal, 8), id + KindEntry };
 		ReleaseSRWLockExclusive(&PortalLock);
 	}
 	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d) with its %s (level %d, our %d), monsters [%s], density %d/%d, Hell elite packs %d-%d/%d-%d; new mods: %s",
-	                g->zonesUsed / 3, ZoneSlots / 3, id, LevelName(Banks[mode], tmpl).c_str(), tmpl, LevelName(Banks[mode], dungeon).c_str(), dungeon, id + 1,
+	                g->zonesUsed / ZoneParts, ZoneSlots / ZoneParts, id, LevelName(Banks[mode], tmpl).c_str(), tmpl, LevelName(Banks[mode], dungeon).c_str(), dungeon, id + 1,
 	                monsters.c_str(), Field<std::int32_t>(Banks[mode].levels + id * LevelRow, LvDen + 8),
 	                Field<std::int32_t>(Banks[mode].levels + (id + 1) * LevelRow, LvDen + 8), Field<std::uint8_t>(Banks[mode].levels + id * LevelRow, 50), Field<std::uint8_t>(Banks[mode].levels + id * LevelRow, 53),
 	                Field<std::uint8_t>(Banks[mode].levels + (id + 1) * LevelRow, 50), Field<std::uint8_t>(Banks[mode].levels + (id + 1) * LevelRow, 53), mods.c_str());
@@ -2991,41 +3015,41 @@ void MoveOutOfSafeArea(std::uint8_t* game) noexcept {
 // entry gets a red portal to level 2 once a player is in the zone. Rooms: level +0x10, next +0x48, flags +0x50, Room1 +0x58,
 // x, y, w, h +0x60 (tiles), level +0x90.
 int ExitLogs = 0;
-// A zone's exit area: its farthest room from the entry portal gets 3 golden chests (Objects 397, sparkly chest); monsters
-// made there are moved out like at the entry. Set up once, the first frame a player is in the zone.
+// A zone's exit area (its own small level, east of the outdoor area): 3 golden chests (Objects 397, sparkly chest) in its middle.
+// Set up once, the first frame a player is in one of the zone's levels.
 using SpawnUnitFn = void* (*)(int type, int cls, int x, int y, void* game, void* room, std::uint64_t flag, int mode, int a9, void* a10) noexcept;
 constexpr int GoldenChest = 397, ExitChests = 3;
 void ZoneExitArea(std::uint8_t* game) noexcept {
 	GameMods* g = ModsOf(game);
-	if (!g || !g->zoneId || g->exitDone || g->safeLevel != g->zoneId) return;
+	if (!g || !g->zoneId || g->exitDone) return;
 	auto* client = Field<std::uint8_t*>(game, GameClients);
 	for (int guard = 0; client && guard < 64; ++guard, client = Field<std::uint8_t*>(client, ClientNext)) {
 		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
 		void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
-		if (!room || At<RoomLevelFn>(0x2EFC10)(room) != g->zoneId) continue;
+		const int at = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
+		if (at < g->zoneId || at >= g->zoneId + ZoneParts) continue;
 		g->exitDone = true;
 		auto* room2 = Field<std::uint8_t*>(room, 0x18);
-		auto* level = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
-		if (!level) return;
-		const long long fromX = g->safeX / 5, fromY = g->safeY / 5;
-		std::uint8_t*   farRoom = nullptr;
+		auto* here  = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
+		void* drlg  = here ? Field<void*>(here, 0x1C8) : nullptr;
+		const auto mode = Field<std::uint8_t>(game, GameMode);
+		auto* level = drlg ? static_cast<std::uint8_t*>(At<GetLevelFn>(0x3267C0)(mode, drlg, g->zoneId + KindExit)) : nullptr;
+		if (!level) return Log(true, "zones: the exit area (level %d) could not be found", g->zoneId + KindExit);
+		if (!Field<void*>(level, 0x10)) At<BuildLevelFn>(0x3271C0)(mode, level); // not built yet: build it (as the game does, D2R+0x3DA6C3)
+		// Its middle room.
+		const long long cx = Field<std::int32_t>(level, 0x24) + Field<std::int32_t>(level, 0x2C) / 2, cy = Field<std::int32_t>(level, 0x28) + Field<std::int32_t>(level, 0x30) / 2;
+		std::uint8_t*   mid = nullptr;
 		long long       best = -1;
 		int             rooms = 0;
-		// Rooms on the level's edge are left out: their far side is the map border (0.0.55 put the chests behind it).
-		const int bx = Field<std::int32_t>(level, 0x24), by = Field<std::int32_t>(level, 0x28), bw = Field<std::int32_t>(level, 0x2C), bh = Field<std::int32_t>(level, 0x30);
-		for (int pass = 0; pass < 2 && !farRoom; ++pass)
-			for (auto* r = Field<std::uint8_t*>(level, 0x10); r && rooms < 8192; r = Field<std::uint8_t*>(r, 0x48), ++rooms) {
-				const int rx = Field<std::int32_t>(r, 0x60), ry = Field<std::int32_t>(r, 0x64), rw = Field<std::int32_t>(r, 0x68), rh = Field<std::int32_t>(r, 0x6C);
-				if (pass == 0 && bw > 0 && bh > 0 && (rx <= bx || ry <= by || rx + rw >= bx + bw || ry + rh >= by + bh)) continue;
-				const long long dx = rx + rw / 2 - fromX, dy = ry + rh / 2 - fromY;
-				if (dx * dx + dy * dy > best) best = dx * dx + dy * dy, farRoom = r;
-			}
-		if (!farRoom) return Log(true, "zones: level %d has no room for its exit area", g->zoneId);
-		g->exitX = (Field<std::int32_t>(farRoom, 0x60) + Field<std::int32_t>(farRoom, 0x68) / 2) * 5;
-		g->exitY = (Field<std::int32_t>(farRoom, 0x64) + Field<std::int32_t>(farRoom, 0x6C) / 2) * 5;
-		if (!Field<void*>(farRoom, 0x58)) At<ActivateRoomFn>(0x3289A0)(Field<std::uint8_t>(game, GameMode), farRoom);
-		void* exitRoom = Field<void*>(farRoom, 0x58);
-		if (!exitRoom) return Log(true, "zones: the exit room of level %d could not be loaded", g->zoneId);
+		for (auto* r = Field<std::uint8_t*>(level, 0x10); r && rooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++rooms) {
+			const long long dx = Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2 - cx, dy = Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2 - cy;
+			if (best < 0 || dx * dx + dy * dy < best) best = dx * dx + dy * dy, mid = r;
+		}
+		if (!mid) return Log(true, "zones: the exit area (level %d) has no rooms", g->zoneId + KindExit);
+		g->exitX = static_cast<int>(cx) * 5, g->exitY = static_cast<int>(cy) * 5;
+		if (!Field<void*>(mid, 0x58)) At<ActivateRoomFn>(0x3289A0)(mode, mid);
+		void* exitRoom = Field<void*>(mid, 0x58);
+		if (!exitRoom) return Log(true, "zones: the exit area's middle room (level %d) could not be loaded", g->zoneId + KindExit);
 		int made = 0;
 		for (int i = 0; i < ExitChests; ++i) {
 			Coord spot { g->exitX + (i - 1) * 6, g->exitY + (i - 1) * 6 };
@@ -3033,12 +3057,10 @@ void ZoneExitArea(std::uint8_t* game) noexcept {
 			At<FindFreeSpotFn>(0x517F90)(game, exitRoom, &spot, 2, 0x400, &free, 4, 100);
 			void* chest = free ? At<SpawnUnitFn>(0x490410)(2, GoldenChest, spot.x, spot.y, game, free, 1, 0, 0, nullptr) : nullptr;
 			if (chest) ++made;
-			Log(false, "zones: exit area of level %d: golden chest %d at %d,%d %s (unit id %u, class %u, mode %u)", g->zoneId, i + 1, spot.x, spot.y,
-			    chest ? "made" : free ? "refused" : "(no free spot)", chest ? Field<std::uint32_t>(chest, 8) : 0, chest ? Field<std::uint32_t>(chest, 4) : 0,
-			    chest ? Field<std::uint32_t>(chest, 0x0C) : 0);
+			Log(false, "zones: exit area (level %d): golden chest %d at %d,%d %s (unit id %u)", g->zoneId + KindExit, i + 1, spot.x, spot.y,
+			    chest ? "made" : free ? "refused" : "(no free spot)", chest ? Field<std::uint32_t>(chest, 8) : 0);
 		}
-		Log(false, "zones: exit area of level %d at %d,%d (%lld tiles from the entry; level box %d,%d %dx%d), %d of %d chests", g->zoneId, g->exitX, g->exitY,
-		    static_cast<long long>(std::sqrt(static_cast<double>(best))), bx, by, bw, bh, made, ExitChests);
+		Log(false, "zones: exit area (level %d, %d rooms) at %d,%d: %d of %d chests", g->zoneId + KindExit, rooms, g->exitX, g->exitY, made, ExitChests);
 		return;
 	}
 }
@@ -3121,11 +3143,15 @@ std::uint64_t HookWarp(void* game, void* unit, int level, int reason) noexcept {
 		// The entry stairs: toward a zone's stand-in level (the level after a zone, which has a template).
 		const bool toTown = level >= base && level < base + ZoneSlots && ZoneStandIn[level - base].load();
 		if (toTown || (from >= base && from < base + ZoneSlots) || Field<std::uint32_t>(unit, 0) == 0) {
-			if (toTown) level = Harrogath;
+			// A dungeon's down stairs: back to the zone's outdoor area, next to the dungeon's entrance (the 4th argument is the level
+			// to arrive next to); other stand-ins: Harrogath's waypoint.
+			const bool back = toTown && (level - base) % ZoneParts == KindStandIn;
+			const int  main = level - KindStandIn;
 			if (WarpLogs.fetch_add(1) < 40)
 				Log(false, "warp: unit type %u from level %d to level %d (reason 0x%X)%s", Field<std::uint32_t>(unit, 0), from, level, reason,
-				    toTown ? ", the entry stairs: sent to Harrogath's waypoint" : "");
-			if (toTown) reason = 0xD;
+				    back ? ", the dungeon's down stairs: back to the outdoor area" : toTown ? ", the entry stairs: sent to Harrogath's waypoint" : "");
+			if (back) level = main, reason = main + KindDungeon;
+			else if (toTown) level = Harrogath, reason = 0xD;
 		}
 	}
 	return WarpOrig(game, unit, level, reason);
@@ -3164,6 +3190,61 @@ constexpr std::uint64_t OutdoorBuildCall = 0x32720E, OutdoorBuildRva = 0x3E2B5CE
 std::uint64_t OutdoorBuild(std::uint8_t mode, void* level) noexcept { return At<MazeBuildFn>(OutdoorBuildRva)(mode, level); }
 std::atomic<int> OutdoorTrace { 0 };
 
+// Where each of a zone's levels goes (tiles). The dungeon and the stand-in: their own slot's place. The outdoor area: its slot's
+// place, the template's size; the entry area to its west and the exit area to its east, touching it (the game links levels
+// whose boxes touch, D2R+0x326A10), SmallArea square, centred on its height.
+void ZoneBox(std::uint8_t mode, int id, int& x, int& y, int& w, int& h) noexcept {
+	const int base = ZoneBase.load(std::memory_order_relaxed), slot = id - base, kind = slot % ZoneParts, first = slot - kind;
+	w = h = 0;
+	if (kind == KindDungeon || kind == KindStandIn) {
+		x = 3300 + (slot % 10) * 220, y = 3200 + (slot / 10) * 230;
+		return;
+	}
+	const int mx = 3300 + (first % 10) * 220, my = 3200 + (first / 10) * 230;
+	int mw = 80, mh = 80;
+	if (const int tmpl = ZoneTemplate[first].load(); mode <= 3 && Banks[mode].defs && tmpl > 0) {
+		const std::uint8_t* def = Banks[mode].defs + tmpl * DefRow;
+		for (int d = 0; d < 3; ++d) mw = std::max(mw, Field<std::int32_t>(def, DefSizeX + d * 4)), mh = std::max(mh, Field<std::int32_t>(def, DefSizeY + d * 4));
+		mw = std::min((mw + 7) & ~7, 200), mh = std::min((mh + 7) & ~7, 200);
+	}
+	const int sy = my + ((mh - SmallArea) / 2 & ~7);
+	if (kind == KindEntry) x = mx - SmallArea, y = sy, w = h = SmallArea;
+	else if (kind == KindExit) x = mx + mw, y = sy, w = h = SmallArea;
+	else x = mx, y = my, w = mw, h = mh;
+}
+
+thread_local int BuildingKind = -1; // the kind of zone level being built (outdoor build steps skipped for the small areas)
+using LinkLevelsFn = void (*)(std::uint8_t mode, void* drlg, int first, int last) noexcept; // D2R+0x3F1B40
+
+void LinkNeighbours(std::uint8_t mode, void* level, int id) noexcept {
+	auto* outdoor = Field<std::uint8_t*>(level, 0x18);
+	void* drlg    = Field<void*>(level, 0x1C8);
+	if (!outdoor || !drlg) return;
+	if (Field<void*>(outdoor, 0x338)) return; // linked already (an earlier build of this level)
+	const int base = ZoneBase.load(std::memory_order_relaxed), kind = (id - base) % ZoneParts, first = id - kind;
+	int       others[2] { 0, 0 };
+	if (kind == KindMain) others[0] = first + KindEntry, others[1] = first + KindExit;
+	else others[0] = first;
+	for (const int other : others) {
+		if (!other) continue;
+		void* n = At<GetLevelFn>(0x3267C0)(mode, drlg, other);
+		if (!n) continue;
+		int x = 0, y = 0, w = 0, h = 0;
+		ZoneBox(mode, other, x, y, w, h);
+		SetField<std::int32_t>(n, 0x24, x), SetField<std::int32_t>(n, 0x28, y);
+		if (w > 0) SetField<std::int32_t>(n, 0x2C, w), SetField<std::int32_t>(n, 0x30, h);
+	}
+	At<LinkLevelsFn>(0x3F1B40)(mode, drlg, id, id);
+	std::string text;
+	int         count = 0;
+	for (auto* o = Field<std::uint8_t*>(outdoor, 0x338); o && count < 16; o = Field<std::uint8_t*>(o, 0x20), ++count) {
+		const auto* other = Field<std::uint8_t*>(o, 0);
+		text += (text.empty() ? "" : ", ") + std::string("level ") + std::to_string(other ? Field<std::int32_t>(other, 0x1F8) : 0) + " side " +
+		        std::to_string(Field<std::int32_t>(o, 8));
+	}
+	Log(false, "zones: level %d (mode %d) passages: %d [%s]", id, mode, count, text.c_str());
+}
+
 // Every build of one of our levels (the server's and the client's, and the client's again when you come back) starts from the
 // zone's seed, so they all make the same map; each level gets its own place on the act's map (else their automaps overlap).
 // While a zone is built under its template's id, the template's links (LevelDefs Vis) are ours, so its stairs lead to our levels.
@@ -3174,8 +3255,12 @@ std::uint64_t BuildZoneLevel(std::uint8_t mode, void* level, MazeBuildFn build, 
 	const int slot = id - base, tmpl = ZoneTemplate[slot].load();
 	if (const std::uint32_t seed = ZoneSeed[slot].load()) At<SeedFn>(SeedInitRva)(static_cast<std::uint8_t*>(level) + 0x1E4, seed);
 	// Tiles, past act 5's own levels (y up to ~3060); subtiles (x5) must stay under 32768: x 3300-5480, y 3200-3890.
-	SetField<std::int32_t>(level, 0x24, 3300 + (slot % 10) * 220); // the level box keeps its size
-	SetField<std::int32_t>(level, 0x28, 3200 + (slot / 10) * 230);
+	{
+		int x = 0, y = 0, w = 0, h = 0;
+		ZoneBox(mode, id, x, y, w, h);
+		SetField<std::int32_t>(level, 0x24, x), SetField<std::int32_t>(level, 0x28, y);
+		if (w > 0) SetField<std::int32_t>(level, 0x2C, w), SetField<std::int32_t>(level, 0x30, h); // outdoor levels: not sized by the game
+	}
 	if (!tmpl) {
 		const std::uint64_t result = build(mode, level);
 		Log(false, "zones: level %d built (%s) at %d,%d", id, what, Field<std::int32_t>(level, 0x24), Field<std::int32_t>(level, 0x28));
@@ -3187,18 +3272,12 @@ std::uint64_t BuildZoneLevel(std::uint8_t mode, void* level, MazeBuildFn build, 
 		std::memcpy(saved, defs + tmpl * DefRow + DefVis, sizeof(saved)); // Vis[8] then Warp[8]
 		std::memcpy(defs + tmpl * DefRow + DefVis, defs + id * DefRow + DefVis, sizeof(saved));
 	}
+	const bool outdoor = build == &OutdoorBuild; // linked under our own id (its Vis), built under the template's
+	// The game's passages to the neighbouring areas: its list of them (outdoor data +0x338, made by D2R+0x3F1B40 from the level's
+	// Vis with Warp -1 when the act is laid out, which never happens for ours), made here with the neighbours placed next to us.
+	if (outdoor) LinkNeighbours(mode, level, id);
+	BuildingKind = slot % ZoneParts;
 	SetField<std::int32_t>(level, 0x1F8, tmpl);
-	const bool outdoor = build == &OutdoorBuild;
-	// Outdoor levels get their size from the act's layout pass (LevelDefs SizeX/SizeY), which never runs for ours: box 0x0.
-	if (outdoor && defs && (Field<std::int32_t>(level, 0x2C) <= 0 || Field<std::int32_t>(level, 0x30) <= 0)) {
-		const std::uint8_t* def = defs + tmpl * DefRow;
-		std::int32_t        w = 0, h = 0;
-		for (int d = 0; d < 3; ++d) w = std::max(w, Field<std::int32_t>(def, DefSizeX + d * 4)), h = std::max(h, Field<std::int32_t>(def, DefSizeY + d * 4));
-		if (w <= 0 || w > 400) w = 80;
-		if (h <= 0 || h > 400) h = 80;
-		SetField<std::int32_t>(level, 0x2C, (w + 7) & ~7);
-		SetField<std::int32_t>(level, 0x30, (h + 7) & ~7);
-	}
 	if (outdoor) {
 		Log(false, "zones: level %d (outdoor, as level %d, mode %d) building at %d,%d, box %dx%d, type %d, outdoor data %p", id, tmpl, mode,
 		    Field<std::int32_t>(level, 0x24), Field<std::int32_t>(level, 0x28), Field<std::int32_t>(level, 0x2C), Field<std::int32_t>(level, 0x30),
@@ -3207,6 +3286,7 @@ std::uint64_t BuildZoneLevel(std::uint8_t mode, void* level, MazeBuildFn build, 
 	}
 	const std::uint64_t result = build(mode, level);
 	if (outdoor) OutdoorTrace.fetch_sub(1);
+	BuildingKind = -1;
 	SetField<std::int32_t>(level, 0x1F8, id);
 	if (defs) std::memcpy(defs + tmpl * DefRow + DefVis, saved, sizeof(saved));
 	int rooms = 0, stairs = 0;
@@ -3243,6 +3323,11 @@ template <int N>
 std::uint64_t HookTrace(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d) noexcept {
 	const bool on = OutdoorTrace.load(std::memory_order_relaxed) > 0;
 	// Act 1 step G runs for Cold Plains, Stony Field, Dark Wood and Black Marsh only: the levels with a waypoint. Not in our copies.
+	// Act 1 step H places the area's dungeon entrance (Vis with stairs): the entry and exit areas have none.
+	if (on && TraceSites[N].site == 0x3FAD74 && (BuildingKind == KindEntry || BuildingKind == KindExit)) {
+		Log(false, "outdoor trace %d (%s): skipped (small area)", N, TraceSites[N].name);
+		return 1;
+	}
 	if (on && TraceSites[N].site == 0x3FAD59) {
 		Log(false, "outdoor trace %d (%s): skipped (the waypoint tile)", N, TraceSites[N].name);
 		return 1;
