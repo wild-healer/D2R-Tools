@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.50";
+constexpr const char* PluginVersion = "0.0.51";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2241,6 +2241,7 @@ constexpr std::uintptr_t MonStatsVec = 0xF58; // MonStats {rows, count}: row 0x1
 constexpr std::size_t    MonStatsRow = 0x1FC;
 constexpr int            ZoneArea    = 2304; // map size of every zone: rooms x room width x room height (Pit, Crypt, Cave in Hell)
 constexpr int            SafeRadius  = 30;   // no monster spawns this close to the zone's entry portal
+constexpr std::uintptr_t DefSizeX = 12, DefSizeY = 24;
 constexpr std::uintptr_t DefQuest = 0, DefQuestEx = 4, DefLayer = 8, DefDrlg = 48, DefType = 52, DefDepend = 44, DefVis = 72, DefWarp = 104;
 constexpr int            MonSlots = 25, ZoneMonsters = 8;
 // Automap layers of our levels: past the game's 0-99 (the character's .map file has a 100-entry table, HookLayerSave/Load keep
@@ -3079,6 +3080,16 @@ std::uint64_t BuildZoneLevel(std::uint8_t mode, void* level, MazeBuildFn build, 
 	}
 	SetField<std::int32_t>(level, 0x1F8, tmpl);
 	const bool outdoor = build == &OutdoorBuild;
+	// Outdoor levels get their size from the act's layout pass (LevelDefs SizeX/SizeY), which never runs for ours: box 0x0.
+	if (outdoor && defs && (Field<std::int32_t>(level, 0x2C) <= 0 || Field<std::int32_t>(level, 0x30) <= 0)) {
+		const std::uint8_t* def = defs + tmpl * DefRow;
+		std::int32_t        w = 0, h = 0;
+		for (int d = 0; d < 3; ++d) w = std::max(w, Field<std::int32_t>(def, DefSizeX + d * 4)), h = std::max(h, Field<std::int32_t>(def, DefSizeY + d * 4));
+		if (w <= 0 || w > 400) w = 80;
+		if (h <= 0 || h > 400) h = 80;
+		SetField<std::int32_t>(level, 0x2C, (w + 7) & ~7);
+		SetField<std::int32_t>(level, 0x30, (h + 7) & ~7);
+	}
 	if (outdoor) {
 		Log(false, "zones: level %d (outdoor, as level %d, mode %d) building at %d,%d, box %dx%d, type %d, outdoor data %p", id, tmpl, mode,
 		    Field<std::int32_t>(level, 0x24), Field<std::int32_t>(level, 0x28), Field<std::int32_t>(level, 0x2C), Field<std::int32_t>(level, 0x30),
