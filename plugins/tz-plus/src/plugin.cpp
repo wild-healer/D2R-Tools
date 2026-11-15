@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.62";
+constexpr const char* PluginVersion = "0.0.63";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -527,7 +527,7 @@ constexpr int    ZoneSlots = 30; // ZoneParts levels a zone
 // A zone's levels: its outdoor area, its dungeon, the dungeon's down stairs stand-in (sends you back outdoors), and two small
 // outdoor areas joined to the outdoor one by the game's own passages: the entry (where the portal arrives) and the exit (chests).
 constexpr int    ZoneParts = 5, KindMain = 0, KindDungeon = 1, KindStandIn = 2, KindEntry = 3, KindExit = 4;
-constexpr int    SmallArea = 24; // tiles, the entry and exit areas' size (levels come in 8-tile cells; 16 would be all border; pieces that don't fit are skipped, HookBorderPlace)
+constexpr int    SmallArea = 16; // tiles, the entry and exit areas' size (levels come in 8-tile cells; border pieces that don't fit are skipped, HookBorderPlace)
 using GetLevelFn  = void* (*)(std::uint8_t mode, void* drlg, int level) noexcept; // D2R+0x3267C0: the act's level (made if new)
 using BuildLevelFn = std::uint64_t (*)(std::uint8_t mode, void* level) noexcept;  // D2R+0x3271C0: builds a level's rooms
 std::atomic<std::uint32_t> ZoneSeed[ZoneSlots] {}; // each zone's layout seed, rolled when its portal opens (server and client build the same map)
