@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.61";
+constexpr const char* PluginVersion = "0.0.62";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -527,7 +527,7 @@ constexpr int    ZoneSlots = 30; // ZoneParts levels a zone
 // A zone's levels: its outdoor area, its dungeon, the dungeon's down stairs stand-in (sends you back outdoors), and two small
 // outdoor areas joined to the outdoor one by the game's own passages: the entry (where the portal arrives) and the exit (chests).
 constexpr int    ZoneParts = 5, KindMain = 0, KindDungeon = 1, KindStandIn = 2, KindEntry = 3, KindExit = 4;
-constexpr int    SmallArea = 32; // tiles, the entry and exit areas' size (border pieces that don't fit are skipped, HookBorderPlace)
+constexpr int    SmallArea = 24; // tiles, the entry and exit areas' size (levels come in 8-tile cells; 16 would be all border; pieces that don't fit are skipped, HookBorderPlace)
 using GetLevelFn  = void* (*)(std::uint8_t mode, void* drlg, int level) noexcept; // D2R+0x3267C0: the act's level (made if new)
 using BuildLevelFn = std::uint64_t (*)(std::uint8_t mode, void* level) noexcept;  // D2R+0x3271C0: builds a level's rooms
 std::atomic<std::uint32_t> ZoneSeed[ZoneSlots] {}; // each zone's layout seed, rolled when its portal opens (server and client build the same map)
@@ -2741,8 +2741,13 @@ void* HookSpawnCore(void* params) noexcept {
 			if (EmptyBlocked.fetch_add(1) < 5) Log(false, "zones: no monster %d in level %d (empty)", Field<std::int32_t>(params, 0x18), level);
 			return nullptr;
 		}
-		// No monster in a zone's entry stairs room, where you arrive.
 		const int base = ZoneBase.load(std::memory_order_relaxed);
+		// No monster in the entry and exit areas.
+		if (level >= base && level < base + ZoneSlots && ((level - base) % ZoneParts == KindEntry || (level - base) % ZoneParts == KindExit)) {
+			if (EntryBlocked.fetch_add(1) < 5) Log(false, "zones: no monster %d in level %d (entry or exit area)", Field<std::int32_t>(params, 0x18), level);
+			return nullptr;
+		}
+		// No monster in a zone's entry stairs room, where you arrive.
 		if (level >= base && level < base + ZoneSlots && ZoneTemplate[level - base].load()) {
 			const auto* room2 = Field<std::uint8_t*>(room, 0x18);
 			const std::uint32_t bit = ZoneEntryBit[level - base].load();
@@ -2824,6 +2829,8 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	{
 		const int layer = NextLayer.fetch_add(ZoneParts);
 		for (int i = 0; i < ZoneParts; ++i) ZoneLayer[id + i - base] = layer + i;
+		// The entry and exit areas share the outdoor area's automap layer (walking between them keeps the map, like the act's areas).
+		ZoneLayer[id + KindEntry - base] = layer, ZoneLayer[id + KindExit - base] = layer;
 	}
 	// The zone's monsters, once for all banks.
 	ForcedCount = 0;
