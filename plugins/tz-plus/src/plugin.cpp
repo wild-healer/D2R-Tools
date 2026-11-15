@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.68";
+constexpr const char* PluginVersion = "0.0.69";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2759,6 +2759,57 @@ bool EmptyLevel(int level) noexcept {
 	return base > 0 && level >= base && level < base + ZoneSlots && ZoneTemplate[level - base].load() == 0;
 }
 
+// Monster type diagnosis (0.0.69): the zone's picks didn't spawn (0.0.68: picks 96,630,662... but 46,17,134... spawned). For the
+// first spawns in each zone level: the monster asked for, the level row's lists in every bank and in the game's current table
+// (datatables +0x1460), and the call stack (D2R RVAs) that asked for it.
+std::atomic<int> SpawnDiagLogs { 0 };
+void LogZoneSpawn(void* params, void* room) noexcept {
+	const int level = At<RoomLevelFn>(0x2EFC10)(room), base = ZoneBase.load(std::memory_order_relaxed);
+	if (level < base || level >= base + ZoneSlots) return;
+	const int kind = (level - base) % ZoneParts;
+	if (kind != KindMain && kind != KindDungeon) return;
+	static std::atomic<int> perLevel[ZoneSlots] {};
+	if (perLevel[level - base].fetch_add(1, std::memory_order_relaxed) >= 12 || SpawnDiagLogs.fetch_add(1, std::memory_order_relaxed) >= 120) return;
+	const int mon = Field<std::int32_t>(params, 0x18);
+	void* frames[12] {};
+	const USHORT n = RtlCaptureStackBackTrace(1, 12, frames, nullptr);
+	std::string stack;
+	for (USHORT i = 0; i < n; ++i) {
+		const auto a = reinterpret_cast<std::uintptr_t>(frames[i]);
+		char buf[32];
+		if (a >= Base && a < Base + 0x4000000) std::snprintf(buf, sizeof(buf), " D2R+%llX", static_cast<unsigned long long>(a - Base));
+		else std::snprintf(buf, sizeof(buf), " %llX", static_cast<unsigned long long>(a));
+		stack += buf;
+	}
+	Log(false, "spawn diag: level %d (kind %d) monster %d, params +0x10 %d +0x1C %d +0x20 %d; stack%s", level, kind, mon, Field<std::int32_t>(params, 0x10),
+	    Field<std::int32_t>(params, 0x1C), Field<std::int32_t>(params, 0x20), stack.c_str());
+	if (perLevel[level - base].load() != 1) return;
+	for (int m = 0; m < 4; ++m) {
+		const ZoneBank& b = Banks[m];
+		if (!b.levels || !b.tables) continue;
+		auto list = [&](const std::uint8_t* row, std::uintptr_t off) {
+			std::string t;
+			for (int i = 0; i < MonSlots; ++i) {
+				const auto v = Field<std::int16_t>(row, off + i * 2);
+				if (v < 0) break;
+				t += (t.empty() ? "" : ",") + std::to_string(v);
+			}
+			return t;
+		};
+		const std::uint8_t* ours = b.levels + level * LevelRow;
+		const auto*         live = Field<std::uint8_t*>(b.tables, LevelsVec);
+		const auto          liveCount = Field<std::uint64_t>(b.tables, LevelsVec + 8);
+		Log(false, "spawn diag: bank %d tables %p levels ours %p live %p (count %llu): row %d id %d mon [%s] nmon [%s] umon [%s] count %d/%d/%d",
+		    m, b.tables, b.levels, live, static_cast<unsigned long long>(liveCount), level, Field<std::uint16_t>(ours, LvId), list(ours, LvMon).c_str(),
+		    list(ours, LvNMon).c_str(), list(ours, LvUMon).c_str(), Field<std::uint8_t>(ours, LvMonCount), Field<std::uint8_t>(ours, LvMonCount + 1),
+		    Field<std::uint8_t>(ours, LvMonCount + 2));
+		if (live && live != b.levels && static_cast<std::uint64_t>(level) < liveCount) {
+			const std::uint8_t* row = live + level * LevelRow;
+			Log(false, "spawn diag: bank %d LIVE row %d id %d nmon [%s] umon [%s]", m, level, Field<std::uint16_t>(row, LvId), list(row, LvNMon).c_str(), list(row, LvUMon).c_str());
+		}
+	}
+}
+
 std::atomic<int> EntryBlocked { 0 };
 void* HookSpawnCore(void* params) noexcept {
 	void* room = params ? Field<void*>(params, 8) : nullptr;
@@ -2784,6 +2835,7 @@ void* HookSpawnCore(void* params) noexcept {
 			}
 		}
 	}
+	if (room && ZoneBase.load(std::memory_order_relaxed) > 0) LogZoneSpawn(params, room);
 	return SpawnCoreOrig(params);
 }
 
