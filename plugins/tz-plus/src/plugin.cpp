@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.52";
+constexpr const char* PluginVersion = "0.0.53";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2236,6 +2236,7 @@ constexpr int            ZoneDensity = 3000; // fallback density (a template wit
 // A zone's density is its dungeon's own (Levels MonDen: Pit 600, Tower Cellar 1024, Stony Tomb 2200: tombs have more walls, so the
 // game gives them more spawn tries for the same monsters per room) x DensityScale %, then scaled by the picks' group sizes.
 constexpr int            DensityScale = 125;
+constexpr int            DungeonDensity = 150; // a zone's dungeon vs its outdoor area
 constexpr int            GroupRef = 25;      // x10: the average group (with minions) ZoneDensity is tuned for; zones of bigger groups get fewer of them
 constexpr std::uintptr_t MonStatsVec = 0xF58; // MonStats {rows, count}: row 0x1FC, minion1 word +0x5A, PartyMin/Max +0x62/+0x63, MinGrp/MaxGrp +0x65/+0x66
 constexpr std::size_t    MonStatsRow = 0x1FC;
@@ -2739,6 +2740,22 @@ void* HookSpawnCore(void* params) noexcept {
 	return SpawnCoreOrig(params);
 }
 
+// Preset monsters (D2R+0x50A050 (game, room, preset, x, y, ...): the map's own monsters, camps, superuniques): none in our zones.
+constexpr std::uint64_t PresetSpawnRva = 0x50A050, PresetSpawnCalls[6] { 0x452AEA, 0x45CFE5, 0x48DECD, 0x51835F, 0x54905B, 0x5950DA };
+using PresetSpawnFn = void* (*)(void* game, void* room, std::uint64_t preset, std::uint64_t x, std::uint64_t y, std::uint64_t a6, std::uint64_t a7) noexcept;
+std::atomic<int> PresetBlocked { 0 };
+void* HookPresetSpawn(void* game, void* room, std::uint64_t preset, std::uint64_t x, std::uint64_t y, std::uint64_t a6, std::uint64_t a7) noexcept {
+	if (room && ZoneBase.load(std::memory_order_relaxed) > 0) {
+		const int level = At<RoomLevelFn>(0x2EFC10)(room), base = ZoneBase.load(std::memory_order_relaxed);
+		if (level >= base && level < base + ZoneSlots) {
+			if (PresetBlocked.fetch_add(1, std::memory_order_relaxed) < 30)
+				Log(false, "zones: no preset monster %d in level %d (at %d,%d)", static_cast<int>(preset), level, static_cast<int>(x), static_cast<int>(y));
+			return nullptr;
+		}
+	}
+	return At<PresetSpawnFn>(PresetSpawnRva)(game, room, preset, x, y, a6, a7);
+}
+
 // A player arriving in a zone's town stand-in (behind the entry stairs) is sent on to Harrogath's waypoint (D2R+0x488180, reason 0xD).
 using WarpUnitFn = std::uint64_t (*)(void* game, void* unit, int level, int reason) noexcept;
 void SendStandInsToTown(std::uint8_t* game) noexcept {
@@ -2800,12 +2817,18 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		for (int i = 0; i < 8; ++i)
 			if (const std::int32_t v = Field<std::int32_t>(ddef, DefVis + i * 4); v > 0 && v != tmpl && Field<std::int32_t>(ddef, DefWarp + i * 4) >= 0) deeper = v;
 		const ZoneLink outdoorLinks[] { { dungeon, id + 1 } };
-		const ZoneLink dungeonLinks[] { { tmpl, id }, { deeper, id + 2 } };
+		// Both of the dungeon's stairs lead back to the outdoor area (you arrive at its entrance).
+		const ZoneLink dungeonLinks[] { { tmpl, id }, { deeper, id } };
 		for (int bank = 1; bank <= 3; ++bank) {
 			std::uint64_t copy = state, copy1 = state, copy2 = state;
 			SetupZone(Banks[bank], id, tmpl, copy, 0, 0, false, outdoorLinks, 1, 0);
 			SetupZone(Banks[bank], id + 1, dungeon, copy1, 0, 0, false, dungeonLinks, deeper ? 2 : 1, tmpl);
 			SetupZone(Banks[bank], id + 2, dungeon, copy2, id + 1, 0, true);
+			// The dungeon: DungeonDensity % of the outdoor area's density.
+			if (Banks[bank].levels && id + 1 < Banks[bank].count + ZoneSlots)
+				for (int i = 0; i < 3; ++i)
+					SetField<std::int32_t>(Banks[bank].levels + (id + 1) * LevelRow, LvDen + i * 4,
+					                       Field<std::int32_t>(Banks[bank].levels + id * LevelRow, LvDen + i * 4) * DungeonDensity / 100);
 		}
 	}
 	ForcedCount = 0;
@@ -3133,6 +3156,11 @@ using Trace4Fn = std::uint64_t (*)(std::uint64_t a, std::uint64_t b, std::uint64
 template <int N>
 std::uint64_t HookTrace(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d) noexcept {
 	const bool on = OutdoorTrace.load(std::memory_order_relaxed) > 0;
+	// Act 1 step G runs for Cold Plains, Stony Field, Dark Wood and Black Marsh only: the levels with a waypoint. Not in our copies.
+	if (on && TraceSites[N].site == 0x3FAD59) {
+		Log(false, "outdoor trace %d (%s): skipped (the waypoint tile)", N, TraceSites[N].name);
+		return 1;
+	}
 	if (on) Log(false, "outdoor trace %d (%s): start, args %llX %llX %llX %llX", N, TraceSites[N].name, static_cast<unsigned long long>(a),
 	            static_cast<unsigned long long>(b), static_cast<unsigned long long>(c), static_cast<unsigned long long>(d));
 	const std::uint64_t result = At<Trace4Fn>(TraceSites[N].target)(a, b, c, d);
@@ -3324,6 +3352,9 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
 	if (!PatchCall(OutdoorBuildCall, OutdoorBuildRva, reinterpret_cast<const void*>(&HookOutdoorBuild)))
 		Log(true, "zones: outdoor zones can't be built, could not patch D2R+0x%llX", static_cast<unsigned long long>(OutdoorBuildCall));
+	for (const std::uint64_t site : PresetSpawnCalls)
+		if (!PatchCall(site, PresetSpawnRva, reinterpret_cast<const void*>(&HookPresetSpawn)))
+			Log(true, "zones: could not patch D2R+0x%llX (preset monsters)", static_cast<unsigned long long>(site));
 	for (const std::uint64_t site : TilePassCalls)
 		if (!PatchCall(site, TilePassRva, reinterpret_cast<const void*>(&HookTilePass)))
 			Log(true, "zones: could not patch D2R+0x%llX (tile pass)", static_cast<unsigned long long>(site));
