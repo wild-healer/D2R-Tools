@@ -12,11 +12,11 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "I Hate TOMLs D2RLoader plugin"
-      VALUE "FileVersion", "1.1.1-dev-3"
+      VALUE "FileVersion", "1.1.1-dev-4"
       VALUE "InternalName", "i-hate-tomls"
       VALUE "OriginalFilename", "aaa-i-hate-tomls.dll"
       VALUE "ProductName", "I Hate TOMLs"
-      VALUE "ProductVersion", "1.1.1-dev-3"
+      VALUE "ProductVersion", "1.1.1-dev-4"
     END
   END
   BLOCK "VarFileInfo"
