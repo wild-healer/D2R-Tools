@@ -9,40 +9,66 @@ It is header-only. Include `d2r_gui.h`, and the library compiles into your
 plugin's DLL. No extra DLL, no companion D2RMM mod, nothing shared between
 plugins at run time.
 
-Version 0.0.1, not released yet.
+Version 0.0.1, not released yet. The D2R GUI Demo plugin shows all of it.
 
 ---
 
-## A window in a few lines
+## A window is a description
+
+The plugin says what is in its window, and binds each part to its own data.
+The library does the rest.
 
 ```cpp
 #include <d2r_gui.h>
-namespace Gui = D2RGui;
+#include <d2r_gui/icons.h>
+#include <d2r_gui/app.h>
+namespace App = D2RGui::App;
 
-Gui::PanelPool Window;
+bool ShowOdd = true; int Mode = 0, Count = 10; std::string Name;
 
-std::string Layout(const std::string& panel, const std::string& probe) {
-	std::string c = Gui::LeftPanelFrame(1162, 1507, "My Plugin", "close", 1075);
-	c += Gui::Probe(probe);
-	c += Gui::TypedBox("Search", "search", 80, 160, 1000, 60, Search, "Search", "Type to filter");
-	c += Gui::Text("OddLabel", 80, 260, 500, 60, "Show odd rows", Gui::Style::Label);
-	c += Gui::Check("Odd", 1020, 267, ShowOdd, "odd", "Shows or hides the odd rows");
-	c += Gui::Stepper("Number", 600, 340, 400, 60, std::to_string(Number), "number-", "number+");
-	c += Gui::DropDown::Box("Choice", 600, 420, 420, 60, Choices[Choice], "drop");
-	return Gui::Panel(panel, 236, -651, 1162, 1507, c, 10, Gui::LeftAnchor);
-}
-
-void OnCommand(const std::string& command) { /* "odd", "number+", "drop", "close"... */ }
+App::Window window {
+    .title = "My Plugin",
+    .menus = {
+        { .tab = {"scroll-unfurled", "Rules"}, .items = { App::Text("How it works...") } },
+        { .tab = {"cog", "Settings"}, .pages = {
+            { .tab = {"eyeball", "Display"}, .items = {
+                App::Section("Display"),
+                App::Check("Show odd rows", &ShowOdd).Tip("Shows or hides them"),
+                App::Choice("Mode", &Mode, {"Fast", "Safe"}),
+                App::Number("Count", &Count, 0, 99),
+                App::Field("Name", &Name, "Type a name") } } } } },
+    .console = "myplugin",
+    .keybind = "Open My Plugin",
+    .changed = [] { SaveSettings(); },
+};
 
 // While the plugin loads:
-Gui::Init(context, "my-plugin");
-Gui::Commands::Listen(OnCommand);
+App::Start(context, "my-plugin", std::move(window));
 ```
 
-Every widget function returns a piece of the game's layout JSON. You add
-the pieces together, and the game draws them with its own widgets, fonts and
-sounds. Button clicks come back to your plugin as short command names, on
-the UI thread.
+That is the whole window. The library lays out the rows, makes the menu and
+page tabs, writes the player's changes into the variables, opens the
+drop-downs, types into the text boxes, scrolls the page, and behaves like the
+game's left panels. It also adds the console command and the key binding.
+
+| Component | What the player gets |
+| --- | --- |
+| `Section` | A gold title with a rule under it. |
+| `Text` | A paragraph, wrapped to the window. |
+| `Check` | A check box. |
+| `Choice` | A drop-down. A long one scrolls, filters as you type and can have section headers. |
+| `Number` | A number between arrows, kept between a minimum and a maximum. |
+| `Field` | A text box. |
+| `Action` | A button. |
+| `List` | Rows with a name and a value, clickable. |
+| `Cells` | Item cells that each take one item code, with a text beside each. |
+| `Custom` | The plugin's own widgets in a row, for anything else. |
+
+Any component can have a tooltip, a function called when it changes, and a
+condition that shows it only when it applies.
+
+Every piece below is also there on its own, for a plugin that draws its own
+window.
 
 ---
 
@@ -67,12 +93,13 @@ the UI thread.
 | Buttons | Sprite buttons with normal, hovered and pressed frames, text buttons, invisible click areas, tooltips, the game's click sounds. |
 | Check boxes | Ticked, unticked and greyed out. |
 | Text boxes | Real typing: keyboard layouts, Shift, AltGr, copy, paste, undo, select all. A caret while typing, a grey hint while empty. Enter, Esc and click-away each call your code. |
-| Drop-downs | The game's own drop-down box and list. |
+| Drop-downs | The game's own drop-down box and list. Long lists scroll with the wheel and a scroll bar, filter as you type, and can have section headers. |
 | Number steppers | A number between two arrows. |
 | Scroll bars | A recessed track with a bronze thumb sized to the share shown. Click a step to jump, drag the thumb, or use the mouse wheel over the window. |
 | Clip views | Content taller than its room, cut to the room. |
 | Section titles, dividers, table rows | For settings pages and long lists. |
 | Icon tabs | A row or column of square tabs with an icon each, as Grail On!'s menus: lighter on hover, gold-rimmed when current. |
+| Menus and pages | Menus as a row of icon tabs and the current menu's pages under them. Each menu remembers its last page. |
 | Inventory button | A button on the inventory's left edge in the stone and gold mold that Charm Inventory uses. You can move it while the game runs. You can also hide it and show it again live. |
 
 ## Items

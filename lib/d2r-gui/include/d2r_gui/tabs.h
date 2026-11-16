@@ -21,6 +21,9 @@ struct Tab {
 	std::string icon;    // an icons.h name ("cog")
 	std::string tooltip; // its tooltip (text or "@<id>:<key>")
 	std::string command; // what a click sends
+	std::string sprite;  // instead of `icon`: any sprite name (escaped, as SpriteName gives), drawn at iconSize, e.g. item art
+	std::string badge;   // a sprite drawn over the button under the icon (a progress ring), `size` square
+	bool        shown = true;
 };
 
 struct Look {
@@ -40,16 +43,21 @@ inline int TabY(int y, int index, const Look& look = {}) { return look.vertical 
 inline int Length(std::size_t count, const Look& look = {}) { return count ? static_cast<int>(count) * (look.size + look.gap) - look.gap : 0; }
 
 // The tabs at x, y (widgets <name>0, <name>0Icon, <name>1...), `current` the
-// selected one (-1: none).
+// selected one (-1: none). Hidden tabs (shown false) take no place.
 inline std::string Bar(const std::string& name, int x, int y, const std::vector<Tab>& tabs, int current, const Look& look = {}) {
 	std::string out;
 	const int   inset = (look.size - look.iconSize) / 2;
+	int         slot  = 0;
 	for (std::size_t i = 0; i < tabs.size(); ++i) {
-		const bool  on  = static_cast<int>(i) == current;
-		const auto  n   = name + std::to_string(i);
-		const int   tx  = TabX(x, static_cast<int>(i), look), ty = TabY(y, static_cast<int>(i), look);
+		if (!tabs[i].shown) continue;
+		const bool on = static_cast<int>(i) == current;
+		const auto n  = name + std::to_string(i);
+		const int  tx = TabX(x, slot, look), ty = TabY(y, slot, look);
+		++slot;
 		out += Button(n, tx, ty, StashKit::SlotButton(look.size, look.size, on), { .normal = 0, .pressed = 2, .hovered = 1 }, tabs[i].command, tabs[i].tooltip, look.size, look.size);
-		if (const auto icon = Icons::Sprite(tabs[i].icon.c_str(), look.iconSize, on ? look.current : look.icon); !icon.empty()) out += Image(n + "Icon", tx + inset, ty + inset, icon);
+		if (!tabs[i].badge.empty()) out += Image(n + "Badge", tx, ty, tabs[i].badge);
+		const auto icon = !tabs[i].sprite.empty() ? tabs[i].sprite : Icons::Sprite(tabs[i].icon.c_str(), look.iconSize, on ? look.current : look.icon);
+		if (!icon.empty()) out += Image(n + "Icon", tx + inset, ty + inset, icon);
 	}
 	return out;
 }
