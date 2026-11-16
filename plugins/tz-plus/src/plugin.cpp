@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.78";
+constexpr const char* PluginVersion = "0.0.79";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1722,8 +1722,7 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 	using EventKind = D2RL::Lifecycle::GameplayEventKind;
 	if (!D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) return;
 	switch (event->kind) {
-	case EventKind::GameJoined: InGame = true, CurrentLevel = -1; break;
-	case EventKind::LocalPlayerReady: UseRoranLook(); break;
+	case EventKind::GameJoined: InGame = true, CurrentLevel = -1, UseRoranLook(); break;
 	case EventKind::GameLeft: {
 		InGame = false, CurrentLevel = -1, ZonePortalOpen = false;
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
@@ -2031,56 +2030,144 @@ std::string TierText(const int (&v)[3], const char* unit) {
 	return line;
 }
 
+// The look of a mod: its icon, colour and what it does (tiers I / II / III on the right, the rest under its name).
+struct ModLook {
+	const char* icon;
+	Gui::Rgb    colour;
+	std::string tiers, what;
+};
+
+ModLook LookOf(const Mod& m) {
+	const std::string key = m.key;
+	const Gui::Rgb gold { 215, 200, 150 }, red { 230, 90, 60 }, blue { 120, 170, 240 }, yellow { 240, 220, 90 }, green { 120, 210, 90 }, violet { 180, 130, 230 };
+	if (key == "extra_strong") return { "sword-clash", red, "+49 / 75 / 100%", "damage; +33 / 50 / 75% attack rating" };
+	if (key == "extra_fast") return { "stopwatch", yellow, "+" + TierText(FastMove, "%"), "run speed on top of the game's Extra Fast; +10% attack speed at III" };
+	if (key == "cursed") return { "pentagram-rose", violet, TierText(CurseLevelPct, "%"), "of the game's Amplify Damage level" };
+	if (key == "magic_resistant") return { "bolt-shield", gold, "+" + TierText(MagicRes, ""), "fire, cold and lightning resistance" };
+	if (key == "fire_enchanted") return { "fire", red, "+" + TierText(OwnResist, ""), "fire resistance; 33-100% of the damage added as fire" };
+	if (key == "lightning_enchanted") return { "lightning-branches", yellow, "+" + TierText(OwnResist, ""), "lightning resistance; 33-100% added as lightning" };
+	if (key == "cold_enchanted") return { "ice-bolt", blue, "+" + TierText(OwnResist, ""), "cold resistance; 33-100% added as cold" };
+	if (key == "poison_enchanted") return { "poison-bottle", green, TierText(PoisonPerLevel, "") + " x lvl", "poison over 3 seconds (a third on ranged attacks)" };
+	if (key == "mana_burn") return { "magic-potion", blue, "+" + TierText(ManaBurnRes, ""), "magic resistance on top of the game's Mana Burn" };
+	if (key == "teleportation") return { "portal", violet, TierText(TeleportChance, "%"), "chance to teleport away when hit (not bosses)" };
+	if (key == "spectral_hit") return { "crystal-ball", violet, "+" + TierText(SpectralRes, ""), "elemental resistance on top of Spectral Hit" };
+	if (key == "stone_skin") return { "breastplate", gold, "x1.5 / 2 / 2.5", "defense; +" + TierText(StonePhys, "%") + " physical resistance" };
+	if (key == "multiple_shots") return { "pocket-bow", gold, "", "the game's Multiple Shots, on normal monsters too (not bosses)" };
+	if (key == "tough") return { "heart-bottle", red, "+" + TierText(ToughLife, "%"), "life" };
+	if (key == "vampiric") return { "vial", red, TierText(LifeSteal, "%"), "life steal" };
+	if (key == "regenerating") return { "anticlockwise-rotation", green, TierText(RegenPct, "%"), "of their life back each second" };
+	return { "sun", yellow, TierText(AuraPct, "%"), "of the aura level the game gives elites" }; // the auras
+}
+
+std::string IconOf(const char* name, Gui::Rgb colour = { 215, 200, 150 }) { return Gui::Icons::Sprite(name, 40, colour); }
+
+App::Row ModRow(const Mod& m, int tier = 0) {
+	ModLook look = LookOf(m);
+	App::Row row;
+	row.icon  = IconOf(look.icon, look.colour);
+	row.text  = std::string(m.name) + (m.kind == Kind::Aura ? " aura" : "");
+	row.sub   = look.what;
+	row.value = look.tiers;
+	if (tier) row.value = "tier " + Roman(tier), row.sub = (look.tiers.empty() ? "" : look.tiers + " ") + look.what; // this game: the tier on the right
+	row.tooltip = std::string(m.name) + ": " + look.tiers + (look.tiers.empty() ? "" : " ") + look.what;
+	return row;
+}
+
 std::vector<App::Item> RuleItems() {
 	std::vector<App::Item> out;
 	out.push_back(App::Section("This game"));
-	std::string game;
-	for (const auto& l : GameLines()) game += (game.empty() ? "" : "\n") + l;
-	out.push_back(App::Text(game));
+	out.push_back(App::List([] {
+		std::vector<App::Row> rows;
+		AcquireSRWLockShared(&Lock);
+		if (const GameMods* g = Last; g && InGame) {
+			App::Row head;
+			head.icon = IconOf(g->difficulty == 2 ? "horned-skull" : "death-skull", { 230, 90, 60 });
+			head.text = g->difficulty == 2 ? "Hell: every level terrorized" : "Nightmare: act " + std::to_string(g->act.load()) + " terrorized";
+			head.value = "zone level " + std::to_string(g->zoneLevel);
+			rows.push_back(head);
+			for (int i = 0; i < g->count; ++i) {
+				App::Row r = ModRow(Mods[g->mods[i].mod], g->mods[i].tier);
+				r.indent   = 1;
+				rows.push_back(r);
+			}
+			App::Row gold;
+			gold.icon  = IconOf("gold-stack", { 240, 200, 80 });
+			gold.text  = "Rewards";
+			gold.value = "+" + std::to_string(g->gold) + "% gold, +" + std::to_string(g->magic) + "% MF";
+			gold.sub   = "+" + std::to_string(g->xp) + "% experience";
+			rows.push_back(gold);
+		} else {
+			App::Row none;
+			none.icon = IconOf("info");
+			none.text = InGame ? "No TZ Plus mods in this game" : "Not in a game";
+			rows.push_back(none);
+		}
+		ReleaseSRWLockShared(&Lock);
+		return rows;
+	}));
+
 	out.push_back(App::Section("Terror zones"));
-	char text[320];
-	std::snprintf(text, sizeof(text),
-	              "Normal: the game's own terror zone, untouched.\nNightmare: one whole act is terrorized, the act changing every 30 minutes. Zone level %d to %d, 1 to %d mods, tier I to %s.\n"
-	              "Hell: every level is terrorized for the whole game (no rotation). Zone level %d to %d, 1 to %d mods, tier I to %s.",
-	              Ranges[1].minLevel, Ranges[1].maxLevel, Ranges[1].maxMods, Roman(Ranges[1].maxTier).c_str(), Ranges[2].minLevel, Ranges[2].maxLevel, Ranges[2].maxMods,
-	              Roman(Ranges[2].maxTier).c_str());
-	out.push_back(App::Text(text));
-	out.push_back(App::Text("The mods roll once per game. The higher the zone level, the more mods and the higher their tiers: a level 99 zone has 3 tier III mods. "
-	                        "Champions, uniques, minions and bosses get every mod one tier higher. No monster goes over level 99."));
-	out.push_back(App::Section("Rewards"));
-	std::snprintf(text, sizeof(text),
-	              "Each mod gives points: tier I 1 gold find point; tier II 2 gold find and 1 magic find; tier III 3 gold find, 2 magic find and 1 experience. "
-	              "A point is +%d%% gold find, +%d%% magic find or +%d%% experience: three tier III mods give +%d%% gold find, +%d%% magic find, +%d%% experience.",
-	              GoldPerPoint, MagicPerPoint, XpPerPoint, 9 * GoldPerPoint, 6 * MagicPerPoint, 3 * XpPerPoint);
-	out.push_back(App::Text(text));
-	out.push_back(App::Section("Roran Stronghammer"));
-	out.push_back(App::Text("At the fire in Harrogath, Roran opens portals to TZ Plus zones in Nightmare and Hell, " + std::to_string(ZoneSlots / ZoneParts)
-	                        + " per game. A zone: an outdoor area (twice the monsters, elite packs x1.5) and its dungeon (x1.5 the density, elite packs x2), "
-	                          "8 monster types from every act. The exit area holds 3 golden chests; the dungeon's stairs lead back to Harrogath."));
-	out.push_back(App::Section("Mods (tier I / II / III)"));
-	const auto mod = [&](const std::string& name, const std::string& what) { out.push_back(App::Text(name + ": " + what)); };
-	mod("Extra Strong", "+49% / +75% / +100% damage, +33% / +50% / +75% attack rating");
-	mod("Extra Fast", "the game's Extra Fast, then +" + TierText(FastMove, "%") + " run speed and +" + TierText(FastAttack, "%") + " attack speed");
-	mod("Cursed", "Amplify Damage at " + TierText(CurseLevelPct, "%") + " of the game's curse level");
-	mod("Magic Resistant", "+" + TierText(MagicRes, "") + " fire, cold and lightning resistance");
-	for (const char* e : { "Fire", "Lightning", "Cold" }) {
-		std::string lower = e;
-		lower[0]          = static_cast<char>(std::tolower(static_cast<unsigned char>(lower[0])));
-		mod(std::string(e) + " Enchanted", "+" + TierText(OwnResist, "") + " " + lower + " resistance, 33-50% / 50-75% / 66-100% of the attack's damage added as " + lower);
-	}
-	mod("Poison Enchanted", "poison of " + TierText(PoisonPerLevel, "") + " x the monster's level over 3 seconds (a third on ranged attacks)");
-	mod("Mana Burn", "the game's Mana Burn, then +" + TierText(ManaBurnRes, "") + " magic resistance");
-	mod("Teleportation", TierText(TeleportChance, "%") + " chance to teleport away when hit (not on bosses)");
-	mod("Spectral Hit", "the game's Spectral Hit, then +" + TierText(SpectralRes, "") + " fire, cold and lightning resistance");
-	mod("Stone Skin", "defense x1.5 / x2 / x2.5, +" + TierText(StonePhys, "%") + " physical resistance");
-	mod("Multiple Shots", "the game's Multiple Shots, on normal monsters too (not on bosses)");
-	mod("Tough", "+" + TierText(ToughLife, "%") + " life");
-	mod("Vampiric", TierText(LifeSteal, "%") + " life steal");
-	mod("Regenerating", TierText(RegenPct, "%") + " of their life back each second");
-	std::string auras;
-	for (const Mod& m : Mods)
-		if (m.kind == Kind::Aura) auras += (auras.empty() ? "" : ", ") + std::string(m.name);
-	mod("Auras", auras + ". One per game at most, at " + TierText(AuraPct, "%") + " of the aura level the game gives elites");
+	out.push_back(App::List([] {
+		const auto row = [](const char* icon, Gui::Rgb c, std::string text, std::string sub, std::string value) {
+			App::Row r;
+			r.icon = IconOf(icon, c), r.text = std::move(text), r.sub = std::move(sub), r.value = std::move(value);
+			return r;
+		};
+		const auto range = [](int d) {
+			return "level " + std::to_string(Ranges[d].minLevel) + "-" + std::to_string(Ranges[d].maxLevel) + ", " + std::to_string(Ranges[d].maxMods) + " mods max";
+		};
+		return std::vector<App::Row> {
+			row("castle", { 215, 200, 150 }, "Normal", "the game's own terror zone, untouched", ""),
+			row("death-skull", { 230, 150, 60 }, "Nightmare", "one whole act, a new act every 30 minutes; tier I-" + Roman(Ranges[1].maxTier), range(1)),
+			row("horned-skull", { 230, 90, 60 }, "Hell", "every level, the whole game (no rotation); tier I-" + Roman(Ranges[2].maxTier), range(2)),
+			row("rank-3", { 215, 200, 150 }, "Elites", "champions, uniques, minions and bosses: every mod one tier higher", "max level 99"),
+		};
+	}));
+
+	out.push_back(App::Section("Rewards per mod"));
+	out.push_back(App::List([] {
+		const auto row = [](int tier, int g, int m, int x) {
+			App::Row r;
+			r.icon  = IconOf(tier == 1 ? "rank-1" : tier == 2 ? "rank-2" : "rank-3", { 240, 200, 80 });
+			r.text  = "Tier " + Roman(tier);
+			r.value = "+" + std::to_string(g * GoldPerPoint) + "% gold" + (m ? ", +" + std::to_string(m * MagicPerPoint) + "% MF" : "");
+			r.sub   = x ? "+" + std::to_string(x * XpPerPoint) + "% experience" : "";
+			return r;
+		};
+		return std::vector<App::Row> { row(1, 1, 0, 0), row(2, 2, 1, 0), row(3, 3, 2, 1) };
+	}));
+
+	out.push_back(App::Section("Roran's zones"));
+	out.push_back(App::List([] {
+		const auto row = [](const char* icon, std::string text, std::string sub, std::string value) {
+			App::Row r;
+			r.icon = IconOf(icon), r.text = std::move(text), r.sub = std::move(sub), r.value = std::move(value);
+			return r;
+		};
+		return std::vector<App::Row> {
+			row("campfire", "Roran Stronghammer", "at the fire in Harrogath, Nightmare and Hell", std::to_string(ZoneSlots / ZoneParts) + " zones a game"),
+			row("world", "Outdoor area", "8 monster types from every act", "x2 monsters"),
+			row("castle", "Its dungeon", "the stairs lead back to Harrogath", "x1.5 density"),
+			row("open-treasure-chest", "Exit area", "3 golden chests", ""),
+			row("rune-stone", "Offerings", "runes Vex to Zod ban a mod or a monster family", "Offering tab"),
+		};
+	}));
+
+	out.push_back(App::Section("Mods"));
+	out.push_back(App::List([] {
+		std::vector<App::Row> rows;
+		for (const Mod& m : Mods)
+			if (m.kind != Kind::Aura) rows.push_back(ModRow(m));
+		std::string auras;
+		for (const Mod& m : Mods)
+			if (m.kind == Kind::Aura) auras += (auras.empty() ? "" : ", ") + std::string(m.name);
+		App::Row aura = ModRow(Mods[ModCount - 1]);
+		aura.text     = "Auras (one a game at most)";
+		aura.tooltip  = auras;
+		aura.sub      = auras;
+		rows.push_back(aura);
+		return rows;
+	}));
 	out.push_back(App::Section("Settings"));
 	out.push_back(App::Text("Which mods can roll, and Nightmare and Hell on or off: the TOML config or I Hate TOMLs."));
 	return out;
@@ -2353,10 +2440,9 @@ bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 
 
 // ---- Roran's look: heavy armor and an Ogre Maul at his belt ----
-// His HD definition is ours: the client's unit names (D2R+0x662610() mapper, monsters at +0x18 {rows of 0x30-byte names,
-// count}, read by D2R+0x662FB0 for "data/hd/character/enemy/<name>.json") get "d2rloader/tz-plus/roran" for act5pow, and that
-// file is registered with the resource service: act5pow's skeleton, animations and colours, the Act 5 barbarians' body and
-// heavy torso, and the Ogre Maul's model (hammer/maul) on his left thigh (his special1 part, "lit" for act5pow).
+// His HD definition is ours (see HookDefName): "d2rloader/tz-plus/roran" for act5pow, registered with the resource service at
+// load: act5pow's skeleton, animations and colours, the Act 5 barbarians' body and heavy torso, and the Ogre Maul's model
+// (hammer/maul) on his left thigh (his special1 part, "lit" for act5pow).
 constexpr const char* RoranDefName = "d2rloader/tz-plus/roran";
 constexpr const char* RoranDefPath = "data/hd/character/enemy/d2rloader/tz-plus/roran.json";
 constexpr const char* RoranDef = R"JSON({"dependencies":{"particles":[],"models":[{"path":"data/hd/character/enemy/act5barb1/body_young.model"},{"path":"data/hd/character/enemy/act5barb1/torso_hvy.model"}],"skeletons":[{"path":"data/hd/character/enemy/act5pow/skeleton/act5pow.skeleton"}],"animations":[],"textures":[{"path":"data/hd/character/common/common_hair1_FLOW.texture"},{"path":"data/hd/character/common/common_hair1_HRT.texture"},{"path":"data/hd/character/common/common_ktint.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_SSS.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_hair_ALB.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_SSS.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_vest_ALB.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_vest_NRM.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_vest_ORM.texture"}],"physics":[],"json":[{"path":"data/hd/character/enemy/act5pow/act5pow_state_machine.json"},{"path":"data/hd/items/weapon/hammer/maul.json"}],"variantdata":[{"path":"data/hd/character/enemy/act5pow/act5pow_variant.json"}],"objecteffects":[],"other":[]},"type":"UnitDefinition","name":"roran","entities":[{"type":"Entity","name":"entity_root","id":3706763854,"components":[{"type":"UnitRootComponent","name":"component_root","state_machine_filename":"data/hd/character/enemy/act5pow/act5pow_state_machine.json","doNotInheritRotation":false,"rotationOverride":{"x":0.0,"y":0.3826834,"z":0.0,"w":0.9238795},"doNotUseHDHeight":false,"hideAllMeshWhenInOpenedMode":false,"onCreateEventName":"","animations":[]},{"type":"SkeletonDefinitionComponent","name":"component_skeleton","filename":"data/hd/character/enemy/act5pow/skeleton/act5pow.skeleton","enableWeaponAttachInertialization":false},{"type":"VariantDefinitionComponent","name":"component_variant","filename":"data/hd/character/enemy/act5pow/act5pow_variant.json"}]},{"type":"Entity","name":"entity_basebody","id":3170001002,"components":[{"type":"ModelDefinitionComponent","name":"component_model_basebody","filename":"data/hd/character/enemy/act5barb1/body_young.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1}]},{"type":"Entity","name":"entity_torso","id":267185926,"components":[{"type":"UnitPartComponent","name":"component_part_torso","part":"torso","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_torso","filename":"data/hd/character/enemy/act5barb1/torso_hvy.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1}]},{"type":"Entity","name":"entity_belt_maul","id":3170001001,"components":[{"type":"UnitPartComponent","name":"component_part_special1_maul","part":"special1","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_special1_maul","filename":"","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1},{"type":"UnitAttachmentComponent","name":"entity_belt_maul_UnitAttachment","filename":"data/hd/items/weapon/hammer/maul.json","overrideBoneName":"L_Thigh","orientTowardBoneName":"","attachmentTransform":{"type":"Transform","name":"entity_belt_maul_UnitAttachment_attachmentTransform","translation":{"x":0.0,"y":0.0,"z":0.0},"rotation":{"x":0.0,"y":0.0,"z":0.0},"scale":{"x":1.0,"y":1.0,"z":1.0}},"attachmentStateMachineFilename":"","part":"special1","variant":"lit"}]}]})JSON";
@@ -2371,27 +2457,38 @@ void RegisterRoranLook(const D2RL::PluginContext* context) noexcept {
 	if (resources->registerResource(context, &file, &handle) != D2RL::Resources::Result::Success) return Log(true, "Roran keeps his look: %s was refused", RoranDefPath);
 }
 
-// UI thread, once a game is ready: act5pow's definition name -> ours.
+// His definition's name: D2R+0x6631A0 builds "data/hd/character/enemy/<name>.json" with the name from D2R+0x662440(mapper, unit,
+// unit type, class), called at D2R+0x6633EA. That call is chained (Merc Gear Models sends it to its own answer first, so whatever
+// it calls now is called) and act5pow becomes ours. Patched on joining the first game: every plugin has loaded by then.
+using DefNameFn = const char* (*)(void* mapper, void* unit, int unitType, int classId) noexcept;
+constexpr std::uint64_t DefNameCallRva = 0x6633EA;
+DefNameFn               PrevDefName = nullptr;
+
+const char* HookDefName(void* mapper, void* unit, int unitType, int classId) noexcept {
+	const char* name = PrevDefName(mapper, unit, unitType, classId);
+	if (unitType == 1 && name && std::strcmp(name, "act5pow") == 0) return RoranDefName;
+	return name;
+}
+
 void UseRoranLook() noexcept {
 	static bool done = false;
 	if (done) return;
-	auto* mapper = At<std::uint8_t* (*)() noexcept>(0x662610)();
-	auto* rows   = mapper ? Field<std::uint8_t*>(mapper, 0x18) : nullptr;
-	const auto count = mapper ? Field<std::uint64_t>(mapper, 0x20) : 0;
-	if (!rows || count <= 534 || count > 4096) return Log(true, "Roran keeps his look: the client's monster names are not there (%llu)", static_cast<unsigned long long>(count));
-	done      = true;
-	char* row = reinterpret_cast<char*>(rows + 534 * 0x30);
-	if (std::strncmp(row, "act5pow", 8) != 0) return Log(true, "Roran keeps his look: monster 534's definition is \"%.16s\", not act5pow", row);
-	DWORD old = 0;
-	VirtualProtect(row, 0x30, PAGE_READWRITE, &old);
-	std::memset(row, 0, 0x30);
-	std::memcpy(row, RoranDefName, std::strlen(RoranDefName));
-	Log(false, "Roran: his look is %s", RoranDefPath);
+	done            = true;
+	const auto* at  = reinterpret_cast<const std::uint8_t*>(Base + DefNameCallRva);
+	if (at[0] != 0xE8) return Log(true, "Roran keeps his look: no call at D2R+0x%llX", static_cast<unsigned long long>(DefNameCallRva));
+	std::int32_t rel = 0;
+	std::memcpy(&rel, at + 1, 4);
+	const std::uint64_t target = static_cast<std::uint64_t>(static_cast<std::int64_t>(DefNameCallRva) + 5 + rel);
+	PrevDefName                = reinterpret_cast<DefNameFn>(Base + target);
+	if (!PatchCall(DefNameCallRva, target, reinterpret_cast<const void*>(&HookDefName)))
+		return Log(true, "Roran keeps his look: could not patch D2R+0x%llX", static_cast<unsigned long long>(DefNameCallRva));
+	Log(false, "Roran: his look is %s (definition name call chained to D2R+0x%llX%s)", RoranDefPath, static_cast<unsigned long long>(target),
+	    target == 0x662440 ? "" : ", another plugin's");
 }
 
 bool OnWindowCommand(const std::string& command) {
 	if (command == "roran") {
-		if (!OpenRoranMenu(RoranUnitId.load())) App::Go(0), App::Open(); // his old menu: the TZ Plus window
+		App::Go(0), App::Open(); // his menu: the TZ Plus window (the game's NPC menu is off, see MenuHooked)
 		return true;
 	}
 	if (command == "zone-open") return ApplyBans(), PortalRequested = true, true; // the monster bans need the game's texts: resolved here
@@ -2805,18 +2902,83 @@ std::vector<std::pair<std::int16_t, std::string>> PoolNames() {
 	return out;
 }
 
+// A monster's family: its MonStats BaseId (the first of its kind: Undead Stygian Doll .. Undead Soul Killer share bonefetish1).
+// The column is found in the rows: the word where many rows are their own base, many others point to an earlier row that is.
+int BaseColumn = -2; // -2 not looked for, -1 none found
+std::vector<std::int16_t> FamilyBases;
+
+void FindFamilies() {
+	if (BaseColumn != -2) return;
+	for (int bank = 1; bank <= 3; ++bank) {
+		const ZoneBank& b = Banks[bank];
+		if (!b.tables) continue;
+		const auto* stats = Field<std::uint8_t*>(b.tables, MonStatsVec);
+		const auto  total = static_cast<int>(Field<std::uint64_t>(b.tables, MonStatsVec + 8));
+		if (!stats || total < 200) break;
+		const auto word = [&](int row, int col) { return static_cast<int>(Field<std::int16_t>(stats + static_cast<std::size_t>(row) * MonStatsRow, col)); };
+		for (int col = 0; col < 0x40 && BaseColumn < 0; col += 2) {
+			int own = 0, other = 0;
+			bool ok = true;
+			for (int i = 0; i < total && ok; ++i) {
+				const int v = word(i, col);
+				if (v == i) ++own;
+				else if (v >= 0 && v < i && word(v, col) == v) ++other;
+				else ok = false;
+			}
+			if (ok && own > 100 && other > 100) BaseColumn = col;
+		}
+		if (BaseColumn >= 0) {
+			FamilyBases.resize(static_cast<std::size_t>(total));
+			for (int i = 0; i < total; ++i) FamilyBases[static_cast<std::size_t>(i)] = static_cast<std::int16_t>(word(i, BaseColumn));
+		}
+		Log(BaseColumn < 0, "offering: monster families %s", BaseColumn >= 0 ? ("from MonStats +0x" + [](int c) { char t[8]; std::snprintf(t, 8, "%X", c); return std::string(t); }(BaseColumn)).c_str() : "not found: bans by name");
+		return;
+	}
+}
+
+std::int16_t FamilyOf(std::int16_t monster) {
+	FindFamilies();
+	return monster >= 0 && static_cast<std::size_t>(monster) < FamilyBases.size() ? FamilyBases[static_cast<std::size_t>(monster)] : monster;
+}
+
+// The pool's families: {its first name (the choice's id), its label (every name in it, for the filter), its classes}.
+struct Family {
+	std::string               name, label;
+	std::vector<std::int16_t> classes;
+};
+
+std::vector<Family> PoolFamilies() {
+	auto pool = PoolNames();
+	std::sort(pool.begin(), pool.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+	std::vector<std::pair<std::int16_t, Family>> by; // base -> family
+	for (const auto& [m, name] : pool) {
+		const std::int16_t base = FamilyOf(m);
+		auto it = std::find_if(by.begin(), by.end(), [base](const auto& e) { return e.first == base; });
+		if (it == by.end()) by.push_back({ base, Family { name, {}, {} } }), it = by.end() - 1;
+		Family& f = it->second;
+		f.classes.push_back(m);
+		if (f.label.find(name) == std::string::npos) f.label += (f.label.empty() ? "" : ", ") + name;
+	}
+	// one choice a name: families that share a name (two bases named alike) are merged
+	std::vector<Family> out;
+	for (auto& [base, f] : by) {
+		auto same = std::find_if(out.begin(), out.end(), [&](const Family& o) { return o.name == f.name; });
+		if (same == out.end()) out.push_back(std::move(f));
+		else same->classes.insert(same->classes.end(), f.classes.begin(), f.classes.end());
+	}
+	std::sort(out.begin(), out.end(), [](const Family& a, const Family& b) { return a.name < b.name; });
+	return out;
+}
+
 void BuildChoices() {
 	OfferEntries.clear(), EntryIds.clear();
 	OfferEntries.push_back({ "Nothing" }), EntryIds.push_back({});
 	OfferEntries.push_back({ "Mods", true }), EntryIds.push_back({});
 	for (const Mod& m : Mods) OfferEntries.push_back({ std::string(m.name) + (m.kind == Kind::Aura ? " aura" : "") }), EntryIds.push_back(std::string("mod:") + m.key);
-	std::vector<std::string> names;
-	for (const auto& [m, name] : PoolNames())
-		if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
-	std::sort(names.begin(), names.end());
-	OfferEntries.push_back({ "Monsters", true }), EntryIds.push_back({});
-	for (const auto& name : names) OfferEntries.push_back({ name }), EntryIds.push_back("mon:" + name);
-	Log(false, "offering: %zu choices (%d mods, %zu monster names)", OfferEntries.size(), ModCount, names.size());
+	OfferEntries.push_back({ "Monsters (every variant)", true }), EntryIds.push_back({});
+	const auto families = PoolFamilies();
+	for (const auto& f : families) OfferEntries.push_back({ f.label }), EntryIds.push_back("mon:" + f.name);
+	Log(false, "offering: %zu choices (%d mods, %zu monster families)", OfferEntries.size(), ModCount, families.size());
 }
 
 bool MonstersResolved = false;
@@ -2835,9 +2997,10 @@ void ApplyBans() {
 	std::vector<std::int16_t> monsters;
 	const bool                tables = Banks[1].tables || Banks[2].tables || Banks[3].tables;
 	if (tables && InGame.load()) { // the game's texts are there
-		if (!names.empty())
-			for (const auto& [m, name] : PoolNames())
-				if (std::find(names.begin(), names.end(), name) != names.end()) monsters.push_back(m);
+		if (!names.empty()) // a name bans its whole family (an older save may name any of its variants)
+			for (const Family& f : PoolFamilies())
+				if (std::any_of(names.begin(), names.end(), [&](const std::string& n) { return n == f.name || (", " + f.label + ", ").find(", " + n + ", ") != std::string::npos; }))
+					monsters.insert(monsters.end(), f.classes.begin(), f.classes.end());
 		MonstersResolved = true;
 	}
 	AcquireSRWLockExclusive(&BanLock);
@@ -4057,9 +4220,10 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 	for (const std::uint64_t site : LabelCalls)
 		if (!PatchCall(site, LabelRva, reinterpret_cast<const void*>(&HookLabel)))
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
-	MenuHooked = PatchCall(MenuTextCall, StringByIndexRva, reinterpret_cast<const void*>(&HookMenuText)) &&
-	             PatchCall(NpcPacketCall, SendPacket5Rva, reinterpret_cast<const void*>(&HookNpcPacket));
-	if (!MenuHooked) Log(true, "Roran keeps the TZ Plus window as his menu: could not patch the game's NPC menu");
+	// The game's own NPC menu for Roran (OpenRoranMenu) is off: opened on the client alone, it left the game's talk state stuck
+	// (his name gone, him highlighted, no panel opening until a new game). He opens the TZ Plus window.
+	MenuHooked = false;
+	(void)&HookMenuText, (void)&HookNpcPacket;
 	for (int i = 0; i < 2; ++i)
 		if (!PatchCall(RotationClearCalls[i], RotationClearRva, reinterpret_cast<const void*>(&HookRotationClear)) ||
 		    !PatchCall(RotationCheckCalls[i], RotationCheckRva, reinterpret_cast<const void*>(&HookRotationCheck)))
