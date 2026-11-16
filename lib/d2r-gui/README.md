@@ -25,9 +25,80 @@ x86_64-w64-mingw32-g++ -std=c++20 ... -I"$sdk/include" -I"$gui" src/plugin.cpp .
 
 The D2RLoader SDK is the same one the plugins use (PluginSDK 03a5af9).
 
-`plugins/d2r-gui-demo` is a small plugin built only from the library: a window
-with a search box, a check box, a drop-down, a number with arrows, a reset
-button and a long scrolling list. Console command `guidemo`.
+## The standard: declare the window, fill the data
+
+A plugin describes its window and the library does everything else. This is
+how every plugin integrates:
+
+```cpp
+#include <d2r_gui.h>
+#include <d2r_gui/icons.h>
+#include <d2r_gui/app.h>
+namespace App = D2RGui::App;
+
+bool ShowOdd = true; int Mode = 0, Count = 10; std::string Name;
+
+App::Window window {
+    .title = "My Plugin",
+    .menus = {
+        { .tab = {"scroll-unfurled", "Rules"}, .items = { App::Text("How it works...") } },
+        { .tab = {"cog", "Settings"}, .pages = {
+            { .tab = {"eyeball", "Display"}, .items = {
+                App::Section("Display"),
+                App::Check("Show odd rows", &ShowOdd).Tip("Shows or hides them"),
+                App::Choice("Mode", &Mode, {"Fast", "Safe"}),
+                App::Number("Count", &Count, 0, 99),
+                App::Field("Name", &Name, "Type a name") } } } } },
+    .console = "myplugin",
+    .keybind = "Open My Plugin",
+    .changed = [] { SaveSettings(); },
+};
+
+// D2RLoaderLoadPlugin:   App::Start(context, "my-plugin", std::move(window));
+// D2RLoaderUnloadPlugin: App::Stop();
+// data changed elsewhere: App::Refresh();
+```
+
+- **Frame**: `.frame = App::Frame::Stash` (default) or `App::Frame::Character`.
+- **Menus and pages**: a row of icon tabs for the menus, a row for the current
+  menu's pages. A menu without pages is a page. Each menu remembers its last page.
+  A window without menus takes `.items` (or `.content`) directly.
+- **Components**: `Section`, `Text`, `Check`, `Choice` (long lists over 12
+  entries, or `.Filter()`, scroll and get a filter box; `Entries` adds section
+  headers), `Number` (int or double, `.Decimals`, `.Step`, Shift and Ctrl
+  steps, `.Reset`), `Position` (X and Y with arrows and a reset), `Table` (a
+  check box per row and column, cells disabled with a reason), `Field`
+  (`.Draft`: Enter saves, Esc cancels; `.Clearable`), `Value` (read-only),
+  `Action` (`.Arrow`, `.Confirm`), `Adder`, `List` (rows with an icon, two
+  lines, a value or a button, a gear; `.Empty`), `Cells` (the window's
+  `.cells`), `HostGrid` (a Player Page Host area's grid), `Custom`. Each takes
+  `.Tip()`, `.Note()`, `.Restart()`, `.Remove()`, `.OnChange()`, `.When()`.
+- **Data**: components point at the plugin's variables, or take
+  `App::Bound(get, set)` when the value lives elsewhere. A set can refuse a
+  value: the reason shows in the window's notice line (`App::Notice` too).
+  A page whose components depend on the data gives `.content`, a function
+  called at every view.
+- **Fixed parts**: `.header` and `.footer` on the window, a menu or a page
+  stay outside the scrolled part. `App::Push(page)` opens a page with a back
+  arrow, a title and a subtitle; `App::Back()`, `App::OpenOn(page)`. Each
+  level keeps its scroll.
+- **On a Player Page Host area**: `.host = {layout, open, close, isOpen}` makes
+  the window the area's panel (one view, `@PANEL@`, `@GRID@`).
+- **Handled by the library**: the views (panel pool), clicks, typing, open
+  drop-downs, scrolling (bar, drag, wheel), the game's left-panel behaviour,
+  `Kit::Read` and `Font::Measure` once the tables load, the console command,
+  the key binding, an inventory button (`.inventory`), and a tick about 4 times
+  a second (`.tick`).
+- **Hooks for the rest**: `.command` (Custom and list row buttons), `.opened`,
+  `.loaded`, `.inGame`, `.mouse` (`.mouseAlways`: from the first game on). `App::Go(menu, page)`, `App::SetMenus`,
+  `App::Button()` (the inventory button).
+
+The parts below stay available for windows App can't describe, but a plugin
+asks this library for a missing component instead of building it.
+
+`plugins/d2r-gui-demo` is the example: its whole window is one `App::Window`
+(an About page, settings pages with each component, a long filtered list with
+headers, a searchable clickable list). Console command `guidemo`.
 
 ## Parts
 
@@ -60,6 +131,11 @@ button and a long scrolling list. Console command `guidemo`.
 | `panels.h` | `SinglePanel` (one panel, a new layout per show) and `ViewCache` (many panels that each keep a view) | Grail On! |
 | `icons.h` (opt-in) | 120 game-icons.net icons at any size and colour, as pictures or sprites ([preview](docs/icons.png), [credits](ICONS-CREDITS.txt)) | Grail On! |
 | `stash_window.h` (opt-in) | a window in the stash's look (frame, gold title, close button), as Charm Inventory's | Charm Inventory |
+| `tabs.h` (opt-in) | a row or column of icon tabs, as Grail On!'s menus | Grail On! |
+| `menus.h` (opt-in) | a window's menus and pages as rows of icon tabs, each menu remembering its page | Grail On! |
+| `app.h` (opt-in) | the declared window: frame, menus, pages and components bound to the plugin's data | new |
+| `item_cells.h` (opt-in) | single item cells that each take one item code (an offering), on Player Page Host's page or the plugin's own | new |
+| `page_host_api.h` | Player Page Host's client header (used by item_cells.h) | Player Page Host |
 
 ## Rules the library follows
 
