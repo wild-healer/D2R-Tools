@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.77";
+constexpr const char* PluginVersion = "0.0.78";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1715,7 +1715,6 @@ const D2RL::LifecycleService* Lifecycle {};
 std::atomic<bool>             InGame { false };
 std::atomic<int>              CurrentLevel { -1 };
 void ShowRewards(int level) noexcept;
-void StartWindowHook() noexcept;
 void UseRoranLook() noexcept;
 std::atomic<bool> ZonePortalOpen { false }; // this game has an open TZ Plus zone portal (the barbarian offers to close it)
 
@@ -1724,7 +1723,7 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 	if (!D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) return;
 	switch (event->kind) {
 	case EventKind::GameJoined: InGame = true, CurrentLevel = -1; break;
-	case EventKind::LocalPlayerReady: StartWindowHook(), UseRoranLook(); break;
+	case EventKind::LocalPlayerReady: UseRoranLook(); break;
 	case EventKind::GameLeft: {
 		InGame = false, CurrentLevel = -1, ZonePortalOpen = false;
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
@@ -2390,11 +2389,6 @@ void UseRoranLook() noexcept {
 	Log(false, "Roran: his look is %s", RoranDefPath);
 }
 
-// The game window's messages, from the first game on (Roran's clicks), with the window's wheel.
-void StartWindowHook() noexcept {
-	Gui::WindowHook::Start({ .active = [] { return App::IsOpen(); }, .wheel = App::Detail::Wheel, .extra = OnGameMessage });
-}
-
 bool OnWindowCommand(const std::string& command) {
 	if (command == "roran") {
 		if (!OpenRoranMenu(RoranUnitId.load())) App::Go(0), App::Open(); // his old menu: the TZ Plus window
@@ -2413,6 +2407,7 @@ void StartWindow(const D2RL::PluginContext* context) noexcept {
 		.keybind  = "Open TZ Plus",
 		.cells    = Gui::ItemCells::Options { .id = "offering", .label = "TZ Plus offering", .codes = { RuneCodes, RuneCodes + RuneCount }, .vertical = true,
 		                                      .changed = OnOfferChanged, .problem = [](const char* what) { Log(true, "offering: %s", what); } },
+		.mouseAlways = true,
 		.command  = OnWindowCommand,
 		.tick     = [] {
             if (!InGame.load()) return;
@@ -4288,5 +4283,5 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
 	Menu.Stop();
-	D2RGui::WindowHook::Stop();
+	App::Stop();
 }
