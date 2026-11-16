@@ -40,6 +40,8 @@ int         Monster = 1;
 int         Number  = 10;
 std::string Search;
 std::string Picked = "Click a row";
+double      Scale  = 1.0;
+int         PosX = 0, PosY = 0;
 
 std::vector<Gui::DropDown::Entry> Monsters() {
 	std::vector<Gui::DropDown::Entry> entries { { "Mods", true } };
@@ -93,8 +95,15 @@ App::Window Describe() {
 	                  App::Text(Picked),
 	                  App::List(Rows, [](int row) {
 	                      const auto rows = Rows();
-	                      if (row < static_cast<int>(rows.size())) Picked = "Clicked " + rows[static_cast<std::size_t>(row)].text;
-	                  }),
+	                      if (row >= static_cast<int>(rows.size())) return;
+	                      Picked = "Clicked " + rows[static_cast<std::size_t>(row)].text;
+	                      App::Push({ .title = rows[static_cast<std::size_t>(row)].text, .subtitle = "A page opened from the list", .items = {
+	                                      App::Text("The arrow at the top left goes back to the list, where it was scrolled."),
+	                                      App::Number("A decimal", &Scale, 0.0, 10.0).Decimals(2).Step(0.05).Tip("Shift and Ctrl take bigger steps"),
+	                                      App::Position("A position", &PosX, &PosY).Reset([] { PosX = PosY = 0; }),
+	                                      App::Action("Twice to run", "Run", [] { App::Notice("Done."); }).Confirm(),
+	                                  } });
+	                  }).Empty("No row matches"),
 	              };
 	          } },
 	    },

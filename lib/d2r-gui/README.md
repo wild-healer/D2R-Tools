@@ -65,18 +65,32 @@ App::Window window {
   A window without menus takes `.items` (or `.content`) directly.
 - **Components**: `Section`, `Text`, `Check`, `Choice` (long lists over 12
   entries, or `.Filter()`, scroll and get a filter box; `Entries` adds section
-  headers), `Number`, `Field`, `Action`, `List` (rows, clickable), `Cells`
-  (the window's `.cells`, item cells of item_cells.h), `Custom` (the plugin's
-  own widgets in a row). Each takes `.Tip()`, `.OnChange()`, `.When()`.
-- **Data**: components point at the plugin's variables. A page whose
-  components depend on the data gives `.content`, a function called at every view.
+  headers), `Number` (int or double, `.Decimals`, `.Step`, Shift and Ctrl
+  steps, `.Reset`), `Position` (X and Y with arrows and a reset), `Table` (a
+  check box per row and column, cells disabled with a reason), `Field`
+  (`.Draft`: Enter saves, Esc cancels; `.Clearable`), `Value` (read-only),
+  `Action` (`.Arrow`, `.Confirm`), `Adder`, `List` (rows with an icon, two
+  lines, a value or a button, a gear; `.Empty`), `Cells` (the window's
+  `.cells`), `HostGrid` (a Player Page Host area's grid), `Custom`. Each takes
+  `.Tip()`, `.Note()`, `.Restart()`, `.Remove()`, `.OnChange()`, `.When()`.
+- **Data**: components point at the plugin's variables, or take
+  `App::Bound(get, set)` when the value lives elsewhere. A set can refuse a
+  value: the reason shows in the window's notice line (`App::Notice` too).
+  A page whose components depend on the data gives `.content`, a function
+  called at every view.
+- **Fixed parts**: `.header` and `.footer` on the window, a menu or a page
+  stay outside the scrolled part. `App::Push(page)` opens a page with a back
+  arrow, a title and a subtitle; `App::Back()`, `App::OpenOn(page)`. Each
+  level keeps its scroll.
+- **On a Player Page Host area**: `.host = {layout, open, close, isOpen}` makes
+  the window the area's panel (one view, `@PANEL@`, `@GRID@`).
 - **Handled by the library**: the views (panel pool), clicks, typing, open
   drop-downs, scrolling (bar, drag, wheel), the game's left-panel behaviour,
   `Kit::Read` and `Font::Measure` once the tables load, the console command,
   the key binding, an inventory button (`.inventory`), and a tick about 4 times
   a second (`.tick`).
-- **Hooks for the rest**: `.command` (a Custom component's buttons), `.opened`,
-  `.loaded`, `.inGame`, `.mouse`. `App::Go(menu, page)`, `App::SetMenus`,
+- **Hooks for the rest**: `.command` (Custom and list row buttons), `.opened`,
+  `.loaded`, `.inGame`, `.mouse` (`.mouseAlways`: from the first game on). `App::Go(menu, page)`, `App::SetMenus`,
   `App::Button()` (the inventory button).
 
 The parts below stay available for windows App can't describe, but a plugin

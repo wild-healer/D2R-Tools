@@ -16,4 +16,5 @@
 * Long drop-down lists that scroll, take a filter box and have section headers.
 * Menus and pages as icon tabs (opt-in menus.h).
 * Declared windows (opt-in app.h): a plugin lists its menus, pages and components bound to its data, and the library does the rest.
+* Declared windows take values through get and set, pages opened over others with Back, fixed headers and footers, and windows on a Player Page Host area.
 * D2R GUI Demo plugin 0.0.2 to try it, declared with app.h (console command guidemo).
