@@ -112,8 +112,7 @@ App::Window CharmWindow() {
 
 void RegisterButtonArt() {
 	const auto icon = Gui::Icons::Mask("rune-stone", IconSize);
-	if (icon.empty() || !Gui::RegisterSprite("mold", { Gui::MoldPicture() })
-	    || !Gui::RegisterSprite("button", Gui::MaskButton(icon.data(), IconSize, Gui::InventoryButton::Width - 2, 60, IconDrawn)))
+	if (icon.empty() || !Gui::RegisterSprite("button", Gui::MaskButton(icon.data(), IconSize, Gui::InventoryButton::Width - 2, 60, IconDrawn)))
 		Log(true, "could not register the button art");
 }
 
