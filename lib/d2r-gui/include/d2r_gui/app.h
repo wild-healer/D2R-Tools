@@ -61,6 +61,9 @@
 // footer's restart line), .OnChange(fn), .When(fn: shown while true), and
 // .Remove(fn) (a remove button at the row's end).
 //
+// window.overStash: opened while the stash is open, the window goes over it
+// (the stash stays open under it, as under the cube) and closes with it.
+//
 // Other commands (Custom buttons, list row buttons) go to window.command; the
 // library's own start with "a.", "typea.", "anav" and "abar". One window
 // per plugin. The plugin no longer calls Init, Commands::Listen, Kit::Read,
@@ -72,6 +75,7 @@
 #include "commands.h"
 #include "core.h"
 #include "font.h"
+#include "hud.h"
 #include "inventory_button.h"
 #include "item_cells.h"
 #include "kit.h"
@@ -89,6 +93,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -291,6 +296,7 @@ struct Window {
 	int                               views       = 16; // panels in the pool
 	int                               priority    = 10;
 	bool                              mouseAlways = false; // `mouse` (and the hook) from the first game on, not from the first open
+	bool                              overStash   = false; // opened while the stash is open: over it (priority 130), the stash left open, closing with it as the cube does
 
 	std::function<void()>                     changed; // after any change the player made
 	std::function<bool(const std::string&)>   command; // the plugin's own commands (true: show the window again)
@@ -299,6 +305,7 @@ struct Window {
 	std::function<void(bool inGame)>          inGame;  // a game was joined or left
 	std::function<void()>                     tick;    // UI thread, about 4 times a second from `loaded`
 	std::function<bool(UINT, WPARAM, LPARAM)> mouse;   // window thread, every message first (true: kept from the game)
+	std::function<void(const D2RL::SharedEvents::UiMessageEvent&)> uiMessage; // any thread: every UI message the game sends (Commands::Watch)
 };
 
 namespace Detail {
@@ -330,7 +337,9 @@ struct View {
 
 struct State {
 	Window                     window;
-	PanelPool                  pool;
+	PanelPool                  pool, over; // over: the views over the open stash
+	bool                       onOver {};  // the window is over the stash
+	std::atomic<bool>          stashClosing {};
 	Menus::Nav                 nav { "anav" };
 	std::unique_ptr<ScrollBar> bar;
 	std::atomic<bool>          open {};
@@ -360,6 +369,8 @@ inline State& Get() {
 }
 
 inline bool Hosted() { return Get().window.host.has_value(); }
+inline PanelPool& Pool() { return Get().onOver ? Get().over : Get().pool; }
+constexpr int OverPriority = 130; // over the stash: above the panels other plugins put on it (Stash Tab Dropdown: 110, 120)
 inline bool Long(const Item& item) { return item.filter || item.entries.size() > ListAt; }
 inline int& Scroll() { return Get().stack.empty() ? Get().scroll : Get().stack.back().scroll; }
 
@@ -780,8 +791,9 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 	}
 	const auto title = Title();
 	if (Hosted()) return StashWindow::Layout("@PANEL@", title, "", c, s.window.priority);
-	if (s.window.frame == Frame::Character) return CharacterWindow::Layout(panelName, probe, title, "a.close", c, s.window.priority);
-	return StashWindow::Layout(panelName, title, "a.close", Probe(probe) + c, s.window.priority);
+	const int priority = s.onOver ? OverPriority : s.window.priority;
+	if (s.window.frame == Frame::Character) return CharacterWindow::Layout(panelName, probe, title, "a.close", c, priority);
+	return StashWindow::Layout(panelName, title, "a.close", Probe(probe) + c, priority);
 }
 
 inline void SyncCells() {
@@ -800,7 +812,7 @@ inline void Show() {
 		if (s.window.host->layout) s.window.host->layout(layout, s.gridX, s.gridY);
 		return;
 	}
-	s.pool.Show();
+	Pool().Show();
 }
 
 inline void Notice(std::string text, bool warn) {
@@ -826,7 +838,7 @@ inline void Leave() {
 inline bool IsShown() {
 	auto& s = Get();
 	if (Hosted()) return s.window.host->isOpen && s.window.host->isOpen();
-	return s.pool.IsOpen() || s.pool.Busy();
+	return Pool().IsOpen() || Pool().Busy();
 }
 
 inline void Close() {
@@ -834,12 +846,12 @@ inline void Close() {
 	TextInput::Stop();
 	if (Hosted()) {
 		if (s.window.host->close && s.window.host->isOpen && s.window.host->isOpen()) s.window.host->close();
-	} else s.pool.Close();
+	} else Pool().Close();
 	s.drop         = -1;
 	const bool was = s.open.exchange(false);
 	s.cellsWanted  = false;
 	SyncCells();
-	if (!Hosted()) LeftPanel::Closed();
+	if (!Hosted() && !s.onOver) LeftPanel::Closed();
 	if (was && s.window.opened) s.window.opened(false);
 }
 
@@ -877,12 +889,16 @@ inline void Open() {
 		if (s.window.opened) s.window.opened(true);
 		return;
 	}
-	if (!s.pool.Ready()) return;
+	// over the open stash (it stays open), else as a left panel (closing the game's)
+	const bool over = s.window.overStash && s.over.Ready() && Hud::StashShown();
+	if (over != s.onOver) Pool().Close(), s.onOver = over;
+	if (!Pool().Ready()) return;
 	Font::Refresh();
 	Hook();
-	LeftPanel::Opening();
+	s.stashClosing = false;
+	if (!s.onOver) LeftPanel::Opening();
 	s.open = true;
-	s.pool.Show();
+	Pool().Show();
 	if (s.window.opened) s.window.opened(true);
 }
 
@@ -895,7 +911,8 @@ inline void Tick() {
 	auto& s = Get();
 	if (s.open) {
 		if (!IsShown()) Close();
-		else if (!Hosted() && LeftPanel::Watch(s.pool.IsOpen(), s.pool.Busy())) Close();
+		else if (s.onOver && (s.stashClosing.exchange(false) || !Hud::StashShown())) Close(); // the stash closed: the window with it
+		else if (!Hosted() && !s.onOver && LeftPanel::Watch(Pool().IsOpen(), Pool().Busy())) Close();
 	}
 	if (s.armed >= 0 && GetTickCount64() >= s.armedUntil) {
 		s.armed = -1;
@@ -1057,6 +1074,18 @@ inline void OnCommand(const std::string& command) {
 	Show();
 }
 
+// Any thread: every UI message; the stash closing closes a window over it at once.
+inline void OnUiMessage(const D2RL::SharedEvents::UiMessageEvent& event) {
+	auto& s = Get();
+	if (s.window.uiMessage) s.window.uiMessage(event);
+	if (!s.onOver || !s.open || !event.target || !event.command) return;
+	if ((!std::strcmp(event.target, "BankPanelMessage") && !std::strcmp(event.command, "Close"))
+	    || (!std::strcmp(event.target, "PanelManager") && event.text && !std::strncmp(event.text, "Bank", 4) && (!std::strcmp(event.command, "ClosePanel") || !std::strcmp(event.command, "UnloadPanel")))) {
+		s.stashClosing = true;
+		RunOnUi(Tick);
+	}
+}
+
 inline void __cdecl OnLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
 	auto& s = Get();
 	if (s.ticking) return;
@@ -1114,7 +1143,12 @@ inline bool Start(const D2RL::PluginContext* context, const char* pluginId, Wind
 	if (!Hosted()) {
 		if (!s.pool.Register(Build, "View", std::max(2, s.window.views))) return false;
 		s.pool.OnShown(SyncCells);
+		if (s.window.overStash) {
+			if (s.over.Register(Build, "Over", 4)) s.over.OnShown(SyncCells);
+			else Log(true, "d2r-gui: no panels for the window over the stash; it closes the stash instead");
+		}
 	}
+	Commands::Watch(OnUiMessage);
 	Commands::Listen(OnCommand);
 	if (s.window.cells) s.hasCells = ItemCells::Register(*s.window.cells);
 	if (s.window.inventory)
