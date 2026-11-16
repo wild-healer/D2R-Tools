@@ -632,12 +632,138 @@ inline int TilesHeight(const Item& item, int width) {
 }
 
 inline bool AboveOf(const Item& item, int width);
-constexpr int AboveLine = 46, GridLine = 56;
+constexpr int AboveLine = 46, GridLine = 56, CardInset = 26;
+
+
+// ---- text with colour codes ----
+// The game's TextBoxWidget doesn't take colour codes, so text holding them
+// (App::Red...) is cut into runs, wrapped by the font's widths, each run its
+// own text box in its colour.
+inline constexpr const char* CodeMark = "\xC3\xBF" "c";
+inline bool HasCodes(const std::string& text) { return text.find(CodeMark) != std::string::npos; }
+
+inline std::string ColorJson(const std::string& color) { return !color.empty() && color[0] == '{' ? color : "\"" + color + "\""; }
+
+inline std::string CodeColor(char code, const std::string& base) {
+	const auto rgb = [](int r, int g, int b) { return "{\"r\": " + std::to_string(r) + ", \"g\": " + std::to_string(g) + ", \"b\": " + std::to_string(b) + ", \"a\": 255}"; };
+	switch (code) {
+	case '1': return rgb(255, 90, 90);
+	case '2': return rgb(80, 210, 80);
+	case '3': return rgb(120, 130, 255);
+	case '4': return rgb(200, 180, 120);
+	case '5': return rgb(150, 150, 150);
+	case '8': return rgb(255, 168, 40);
+	case '9': return rgb(255, 255, 110);
+	case ';': return rgb(180, 90, 255);
+	default: return ColorJson(base);
+	}
+}
+
+struct Run {
+	std::string text, color; // color: a JSON value
+};
+
+// The text's words with their colours ("\n" as a word of its own).
+inline std::vector<Run> Words(const std::string& text, const std::string& base) {
+	std::vector<Run> out;
+	std::string      color = ColorJson(base), word;
+	const auto       flush = [&] {
+		if (!word.empty()) out.push_back({ word, color }), word.clear();
+	};
+	for (std::size_t i = 0; i < text.size();) {
+		if (text.compare(i, 3, CodeMark) == 0 && i + 3 < text.size()) {
+			flush();
+			color = CodeColor(text[i + 3], base);
+			i += 4;
+			continue;
+		}
+		const char c = text[i++];
+		if (c == '\n') flush(), out.push_back({ "\n", color });
+		else if (c == ' ') word += ' ', flush();
+		else word += c;
+	}
+	flush();
+	return out;
+}
+
+// A text over lines of `lineHeight` from x, y, `width` wide (wrapped, or
+// one line cut with an ellipsis); `lines` gets how many it took.
+inline std::string RichText(const std::string& name, int x, int y, int width, int lineHeight, const std::string& text, const std::string& base, bool medium, bool wrap, int* lines = nullptr,
+                            const std::string& tooltip = {}) {
+	struct Segment {
+		std::string text, color;
+		int         x, line;
+	};
+	std::vector<Segment> segments;
+	int                  line = 0, at = 0;
+	bool                 cut  = false;
+	for (const auto& word : Words(text, base)) {
+		if (word.text == "\n") {
+			if (!wrap) break;
+			++line, at = 0;
+			continue;
+		}
+		const int w = Font::TextWidth(word.text, medium);
+		if (at > 0 && at + w > width) {
+			if (!wrap) {
+				cut = true;
+				break;
+			}
+			++line, at = 0;
+		}
+		if (!segments.empty() && segments.back().line == line && segments.back().color == word.color) segments.back().text += word.text;
+		else segments.push_back({ word.text, word.color, at, line });
+		at += w;
+	}
+	if (lines) *lines = line + 1;
+	std::string out;
+	for (std::size_t k = 0; k < segments.size(); ++k) {
+		auto& seg = segments[k];
+		if (cut && k + 1 == segments.size()) seg.text += "...";
+		const int  room  = std::max(10, width - seg.x + 20);
+		const auto style = std::string(R"({"fontColor": )") + seg.color + R"(, "pointSize": ")" + (medium ? "$MediumFontSize" : "$SmallFontSize")
+		                 + R"(", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}})";
+		out += D2RGui::Text(name + "_" + std::to_string(k), x + seg.x, y + seg.line * lineHeight, room, lineHeight, seg.text, style.c_str(), k == 0 ? tooltip : std::string());
+	}
+	return out;
+}
+
+inline int RichLines(const std::string& text, int width, bool medium) {
+	int lines = 1;
+	(void)RichText("", 0, 0, width, 1, text, "$FontColorWhite", medium, true, &lines);
+	return lines;
+}
+
+// `text` cut with an ellipsis to fit `width` (small or medium font).
+inline std::string FitWidth(const std::string& text, int width, bool medium) {
+	if (Font::TextWidth(text, medium) <= width) return text;
+	std::string cut = text;
+	while (!cut.empty() && Font::TextWidth(cut + "...", medium) > width) {
+		cut.pop_back();
+		while (!cut.empty() && (static_cast<unsigned char>(cut.back()) & 0xC0) == 0x80) cut.pop_back(); // whole UTF-8 characters
+		if (!cut.empty() && static_cast<unsigned char>(cut.back()) >= 0xC0) cut.pop_back();
+	}
+	return cut + "...";
+}
+
+// A table's column widths in `width`: fixed ones (scaled down when too wide), the rest shared.
+inline std::vector<int> GridWidths(const std::vector<GridColumn>& columns, int width) {
+	int fixedW = 0, flexible = 0;
+	for (const auto& column : columns) fixedW += column.width, flexible += column.width ? 0 : 1;
+	const int        least = 120 * flexible;
+	const double     scale = fixedW > 0 && fixedW > width - least ? std::max(0.2, static_cast<double>(width - least) / fixedW) : 1.0;
+	int              used  = 0;
+	std::vector<int> out;
+	for (const auto& column : columns) out.push_back(column.width ? static_cast<int>(column.width * scale) : 0), used += out.back();
+	for (std::size_t c = 0; c < columns.size(); ++c)
+		if (!columns[c].width) out[c] = std::max(60, (width - used) / std::max(1, flexible));
+	return out;
+}
 
 // A list row's height: its sub-text wraps.
 inline int RowHeightOf(const Row& row, int width) {
 	if (row.sub.empty()) return 80;
-	const int lines = std::max(1, Font::WrappedLines(row.sub, std::max(200, width - 380), std::max(20, (width - 380) / 14), false));
+	const int lines = HasCodes(row.sub) ? RichLines(row.sub, std::max(200, width - 380), false) : std::max(1, Font::WrappedLines(row.sub, std::max(200, width - 380), std::max(20, (width - 380) / 14), false));
 	return std::max(80, 50 + lines * 32 + 8);
 }
 
@@ -646,11 +772,11 @@ inline int HeightOf(const Item& item, int width) {
 	switch (item.kind) {
 	case Item::Kind::Legend: return 60;
 	case Item::Kind::Grid: return (item.label.empty() ? 0 : 64) + 56 + static_cast<int>(item.gridCells.size()) * GridLine + 10;
-	case Item::Kind::Bullet: return Lines(item.label, width - 60) * NoteLine() + 14;
+	case Item::Kind::Bullet: return (HasCodes(item.label) ? RichLines(item.label, width - 60, false) : Lines(item.label, width - 60)) * NoteLine() + 14;
 	case Item::Kind::CardStart: return item.label.empty() ? 30 : 84;
 	case Item::Kind::CardEnd: return 34;
 	case Item::Kind::Section: return 100;
-	case Item::Kind::Text: return Lines(item.label, width) * NoteLine() + 16;
+	case Item::Kind::Text: return (HasCodes(item.label) ? RichLines(item.label, width, false) : Lines(item.label, width)) * NoteLine() + 16;
 	case Item::Kind::Table: return (item.label.empty() ? 0 : TableTitle) + TableHead + static_cast<int>(item.rowNames.size()) * TableLine + NoteHeight(item, width) + 8;
 	case Item::Kind::List: {
 		const auto rows = item.rows ? item.rows() : std::vector<Row> {};
@@ -758,7 +884,10 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 	if (item.remove) out += RemoveButton(n + "X", a.right - 52, y + 9, 52, "a.x" + id, "Remove");
 	switch (item.kind) {
 	case Item::Kind::Section: out += SectionTitle(n, a.left, y, width, item.label, item.tooltip); break;
-	case Item::Kind::Text: out += D2RGui::Text(n, a.left, y, width, HeightOf(item, width) - 8, item.label, item.warn ? WarnLeft : Style::Comment, item.tooltip); break;
+	case Item::Kind::Text:
+		if (HasCodes(item.label)) out += RichText(n, a.left, y, width, NoteLine(), item.label, item.warn ? "$FontColorLightRed" : "$FontColorWhite", false, true, nullptr, item.tooltip);
+		else out += D2RGui::Text(n, a.left, y, width, HeightOf(item, width) - 8, item.label, item.warn ? WarnLeft : Style::Comment, item.tooltip);
+		break;
 	case Item::Kind::Legend: {
 		int total = 0;
 		for (const auto& [sprite, word] : item.legend) total += 50 + std::min(260, Font::TextWidth(word, false) + 40);
@@ -774,15 +903,14 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 	case Item::Kind::Grid: {
 		int at = y;
 		if (!item.label.empty()) out += D2RGui::Text(n + "T", a.left, at, width, 60, item.label, Style::Label, item.tooltip), at += 64;
-		// widths: fixed ones, the rest shared
-		std::vector<int> widths;
-		int              fixedW = 0, flexible = 0;
-		for (const auto& column : item.gridColumns2) fixedW += column.width, flexible += column.width ? 0 : 1;
-		for (const auto& column : item.gridColumns2) widths.push_back(column.width ? column.width : std::max(60, (width - fixedW) / std::max(1, flexible)));
-		int x = a.left;
+		const auto widths = GridWidths(item.gridColumns2, width);
+		int        x      = a.left;
 		for (int c = 0; c < static_cast<int>(widths.size()); ++c) {
-			out += D2RGui::Text(n + "H" + std::to_string(c), x + 10, at, widths[static_cast<std::size_t>(c)] - 20, 52, item.gridColumns2[static_cast<std::size_t>(c)].title, Style::Axis);
-			x += widths[static_cast<std::size_t>(c)];
+			const auto& title = item.gridColumns2[static_cast<std::size_t>(c)].title;
+			const int   w     = widths[static_cast<std::size_t>(c)];
+			const auto  shown = FitWidth(title, w - 20, true);
+			out += D2RGui::Text(n + "H" + std::to_string(c), x + 10, at, w - 20, 52, shown, Style::Axis, shown != title ? title : std::string());
+			x += w;
 		}
 		out += Image(n + "HR", a.left, at + 50, StashKit::Divider(width));
 		at += 56;
@@ -795,10 +923,16 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 				const auto& cell = cells[static_cast<std::size_t>(c)];
 				const int   w    = widths[static_cast<std::size_t>(c)];
 				int         tx   = x + 14;
-				if (!cell.icon.empty()) out += Image(rn + "I" + std::to_string(c), tx, at + 8, cell.icon), tx += 48;
-				const std::string style = std::string(R"({"fontColor": ")") + (cell.color.empty() ? "$FontColorLightGold" : cell.color)
-				                        + R"(", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}})";
-				out += D2RGui::Text(rn + "C" + std::to_string(c), tx, at, x + w - tx - 8, GridLine, cell.text, style.c_str(), cell.tooltip);
+				if (!cell.icon.empty() && w > 80) out += Image(rn + "I" + std::to_string(c), tx, at + 8, cell.icon), tx += 48;
+				const int         room  = x + w - tx - 12;
+				const std::string base  = cell.color.empty() ? "$FontColorLightGold" : cell.color;
+				const std::string cname = rn + "C" + std::to_string(c);
+				if (HasCodes(cell.text)) out += RichText(cname, tx, at, room, GridLine, cell.text, base, false, false, nullptr, cell.tooltip);
+				else {
+					const auto shown = FitWidth(cell.text, room, false);
+					const auto style = std::string(R"({"fontColor": )") + ColorJson(base) + R"(, "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}})";
+					out += D2RGui::Text(cname, tx, at, room + 10, GridLine, shown, style.c_str(), !cell.tooltip.empty() ? cell.tooltip : (shown != cell.text ? cell.text : std::string()));
+				}
 				x += w;
 			}
 		}
@@ -807,7 +941,8 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 	case Item::Kind::Bullet:
 		if (!item.icon.empty()) out += Image(n + "I", a.left + 6, y + 4, item.icon);
 		else out += D2RGui::Text(n + "D", a.left, y, 40, NoteLine(), "*", Style::Axis);
-		out += D2RGui::Text(n, a.left + 56, y, width - 60, HeightOf(item, width) - 8, item.label, Style::Comment, item.tooltip);
+		if (HasCodes(item.label)) out += RichText(n, a.left + 56, y, width - 60, NoteLine(), item.label, "$FontColorWhite", false, true, nullptr, item.tooltip);
+		else out += D2RGui::Text(n, a.left + 56, y, width - 60, HeightOf(item, width) - 8, item.label, Style::Comment, item.tooltip);
 		break;
 	case Item::Kind::CardStart:
 		if (!item.label.empty()) out += D2RGui::Text(n, a.left + 30, y + 14, width - 60, 60, item.label, Style::Section, item.tooltip);
@@ -968,11 +1103,11 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 			const bool side  = !row.button.empty() || !row.value.empty();
 			const int  textW = right - textX - (side ? 250 : 20);
 			const auto tip   = clicked ? std::string() : row.tooltip;
-			if (row.sub.empty()) out += D2RGui::Text(rn + "T", textX, ry, textW, ListRow, row.text, Style::LabelOneLine, tip);
-			else {
-				out += D2RGui::Text(rn + "T", textX, ry + 4, textW, 40, row.text, Style::LabelOneLine, tip);
-				out += D2RGui::Text(rn + "S", textX, ry + 44, textW, ListRow - 50, row.sub, SmallWrap);
-			}
+			if (HasCodes(row.text)) out += RichText(rn + "T", textX, row.sub.empty() ? ry : ry + 4, textW, row.sub.empty() ? ListRow : 40, row.text, "$FontColorLightGold", true, false, nullptr, tip);
+			else if (row.sub.empty()) out += D2RGui::Text(rn + "T", textX, ry, textW, ListRow, row.text, Style::LabelOneLine, tip);
+			else out += D2RGui::Text(rn + "T", textX, ry + 4, textW, 40, row.text, Style::LabelOneLine, tip);
+			if (HasCodes(row.sub)) out += RichText(rn + "S", textX, ry + 44, textW, 32, row.sub, "$FontColorLightGold", false, true);
+			else if (!row.sub.empty()) out += D2RGui::Text(rn + "S", textX, ry + 44, textW, ListRow - 50, row.sub, SmallWrap);
 			if (!row.button.empty()) out += TextButton(rn + "U", right - 250, ry + (ListRow - BoxHeight) / 2, 240, BoxHeight, row.button, row.buttonCommand, row.buttonTip);
 			else if (!row.value.empty()) out += D2RGui::Text(rn + "V", right - 250, ry, 230, ListRow, row.value, Style::SmallRight, row.valueTip);
 		}
@@ -1140,8 +1275,15 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 
 	const int room  = std::max(1, a.bottom - a.top);
 	int       total = 0;
-	for (const auto& item : v.content)
-		if (Visible(item)) total += HeightOf(item, width);
+	{
+		int depth = 0;
+		for (const auto& item : v.content) {
+			if (!Visible(item)) continue;
+			if (item.kind == Item::Kind::CardEnd && depth) --depth;
+			total += HeightOf(item, width - 2 * CardInset * depth);
+			if (item.kind == Item::Kind::CardStart) ++depth;
+		}
+	}
 	int& scroll = Scroll();
 	if (!s.reveal.empty()) { // App::Reveal: the tile a third of the way down
 		int at = 0;
@@ -1179,25 +1321,29 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 	for (int i = 0; i < static_cast<int>(v.content.size()); ++i) {
 		const auto& item = v.content[static_cast<std::size_t>(i)];
 		if (!Visible(item)) continue;
+		const int depth = static_cast<int>(cards.size()) - (item.kind == Item::Kind::CardEnd && !cards.empty() ? 1 : 0);
+		Area      in    = a; // inside cards: narrower
+		in.left += CardInset * depth, in.right -= CardInset * depth;
+		const int inWidth = in.right - in.left;
 		if (item.kind == Item::Kind::CardStart) cards.push_back({ inside.size(), y - scroll });
 		if (item.kind == Item::Kind::CardEnd && !cards.empty()) {
 			const auto [at, top] = cards.back();
 			cards.pop_back();
-			const int bottom = y - scroll + HeightOf(item, width) - 10;
+			const int bottom = y - scroll + HeightOf(item, inWidth) - 10;
 			if (bottom > 0 && top < room && bottom - top > 20)
-				inside.insert(at, Image("Card" + std::to_string(i), a.left - 14, top, Kit::Box(width + 28, bottom - top)));
+				inside.insert(at, Image("Card" + std::to_string(i), in.left, top, Kit::Box(inWidth, bottom - top)));
 		}
 		if (item.kind == Item::Kind::HostGrid) {
 			fixed += GridLayout(item);
 			continue;
 		}
-		const int h = HeightOf(item, width), at = y - scroll;
+		const int h = HeightOf(item, inWidth), at = y - scroll;
 		y += h;
 		if (item.kind != Item::Kind::List && item.kind != Item::Kind::Cells && (at + h < 0 || at > room)) {
 			if (s.drop == i) s.drop = -1;
 			continue;
 		}
-		inside += Draw(item, i, at, a.top, room, a);
+		inside += Draw(item, i, at, a.top, room, in); // a card's components sit one inset inside its frame
 	}
 	if (s.drop >= 0 && s.drop < HeaderBase && s.dropY < a.top) s.drop = -1;
 	std::string c = fixed + (inside.empty() ? std::string() : Clip("Content", 0, a.top, a.bar - 6, room, inside));

@@ -18,3 +18,8 @@
 * Declared windows (opt-in app.h): a plugin lists its menus, pages and components bound to its data, and the library does the rest.
 * Declared windows take values through get and set, pages opened over others with Back, fixed headers and footers, windows on a Player Page Host area or over the open stash, item tile pages, ring charts, tree rows and an icon picker.
 * D2R GUI Demo plugin 0.0.2 to try it, declared with app.h (console command guidemo).
+
+**Fixed**
+* Coloured text parts (App::Red and the others) show in colour instead of as raw codes.
+* Table headers and cells are cut to their column with "...", and the full text shows on hover.
+* Components inside a card stay inside its frame and clear of the scroll bar.
