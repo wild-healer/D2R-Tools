@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.86";
+constexpr const char* PluginVersion = "0.0.87";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1716,13 +1716,15 @@ std::atomic<bool>             InGame { false };
 std::atomic<int>              CurrentLevel { -1 };
 void ShowRewards(int level) noexcept;
 void UseRoranLook() noexcept;
+bool RoranMenuRow() noexcept;
+extern bool MenuHooked;
 std::atomic<bool> ZonePortalOpen { false }; // this game has an open TZ Plus zone portal (the barbarian offers to close it)
 
 void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
 	using EventKind = D2RL::Lifecycle::GameplayEventKind;
 	if (!D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) return;
 	switch (event->kind) {
-	case EventKind::GameJoined: InGame = true, CurrentLevel = -1, UseRoranLook(); break;
+	case EventKind::GameJoined: InGame = true, CurrentLevel = -1, UseRoranLook(), (MenuHooked && RoranMenuRow()); break;
 	case EventKind::GameLeft: {
 		InGame = false, CurrentLevel = -1, ZonePortalOpen = false;
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
@@ -2433,7 +2435,7 @@ bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 	const std::uint32_t cls = Field<std::uint32_t>(unit, 4);
 	if (cls != 534) return false; // act5pow: Roran Stronghammer
 	RoranUnitId = Field<std::uint32_t>(unit, 8);
-	Gui::Commands::Post("roran");
+	if (!MenuHooked) Gui::Commands::Post("roran"); // no NPC: his click opens the window (else the game talks to him)
 	return false; // the click goes on: you walk to him
 }
 
@@ -2495,6 +2497,31 @@ void UseRoranLook() noexcept {
 		return Log(true, "Roran keeps his look: could not patch D2R+0x%llX", static_cast<unsigned long long>(DefNameCallRva));
 	Log(false, "Roran: his look is %s (definition name call chained to D2R+0x%llX%s)", RoranDefPath, static_cast<unsigned long long>(target),
 	    target == 0x662440 ? "" : ", another plugin's");
+}
+
+// ---- Roran, a real NPC: the game's NPC records ----
+// D2R+0x3971A0(mode, class) returns the 28-byte record of a town NPC from the table at D2R+0x237EA60 (43 rows {+0 word class,
+// +8/+9 trade flags, +0xA act, +0xC dword, +0x18 store index or -1}), or null: the server only starts a talk with a monster that has
+// one (and its MonStats npc/interact flags). 18 callers, client and server; the table is read nowhere else. The function is
+// replaced (jmp at its entry): act5pow gets a record like Tyrael's in Harrogath (act 5, no trade, no store), the rest the table's.
+constexpr std::uint64_t NpcRecordRva = 0x3971A0, NpcTableRva = 0x237EA60;
+constexpr int           NpcTableRows = 43;
+alignas(8) std::int32_t RoranRecord[7] { 534, 0, 0x40000, 0, 0, 0, -1 };
+
+void* __cdecl HookNpcRecord(std::uint8_t, int monster) noexcept {
+	if (monster == static_cast<int>(RoranMenuClass)) return RoranRecord;
+	auto* table = reinterpret_cast<std::uint8_t*>(Base + NpcTableRva);
+	for (int i = 0; i < NpcTableRows; ++i)
+		if (Field<std::int16_t>(table + i * 28, 0) == monster) return table + i * 28;
+	return nullptr;
+}
+
+bool PatchNpcRecord() noexcept {
+	static const std::uint8_t expected[14] { 0x45, 0x33, 0xC0, 0x4C, 0x8D, 0x15, 0xB6, 0x78, 0xFE, 0x01, 0x41, 0x8B, 0xC8, 0x4D };
+	std::uint8_t              jump[14] { 0xFF, 0x25, 0, 0, 0, 0 };
+	const auto                target = reinterpret_cast<std::uint64_t>(&HookNpcRecord);
+	std::memcpy(jump + 6, &target, 8);
+	return Context->PatchBytes(NpcRecordRva, expected, 14, jump, 14);
 }
 
 bool OnWindowCommand(const std::string& command) {
@@ -2794,7 +2821,7 @@ void MakeTownguardsSelectable(const D2RL::PluginContext* context, const D2RL::Da
 	}
 }
 
-// Roran (act5pow): Tyrael's NpcStationary AI (stands still, faces nearby players) and not killable (no life bar).
+// Roran (act5pow): a town NPC (npc/interact flags, Larzuk's Npc AI) and not killable (no life bar).
 // Found by comparing rows: the flags dword has npc/interact (bits 8, 9) on Larzuk, killable (bit 15) on the Townguard and none of
 // them on the injured barbarian, inTown (bit 10) on all three; the AI word (+0x52) is the same for Larzuk and the Townguard (Npc).
 void MakeRoranStill(const D2RL::PluginContext* context, const D2RL::DataTableService* service, int bank) noexcept {
@@ -2819,8 +2846,8 @@ void MakeRoranStill(const D2RL::PluginContext* context, const D2RL::DataTableSer
 	}
 	if (matches == 1) {
 		const std::uint32_t before = Field<std::uint32_t>(row, flagsAt);
-		SetField<std::uint32_t>(row, flagsAt, before & ~Killable);
-		Log(false, "Roran: bank %d monstats flags at +0x%X: 0x%X -> 0x%X (not killable)", bank, flagsAt, before, Field<std::uint32_t>(row, flagsAt));
+		SetField<std::uint32_t>(row, flagsAt, (before & ~Killable) | Npc | Interact); // a town NPC: talks, not killable
+		Log(false, "Roran: bank %d monstats flags at +0x%X: 0x%X -> 0x%X (npc, interact, not killable)", bank, flagsAt, before, Field<std::uint32_t>(row, flagsAt));
 	} else if (matches == 0 && !(Field<std::uint32_t>(row, 0x3C) & Killable)) {
 		Log(true, "Roran: bank %d monstats flags not found (%d matches), he keeps his life bar", bank, matches);
 	}
@@ -2829,9 +2856,10 @@ void MakeRoranStill(const D2RL::PluginContext* context, const D2RL::DataTableSer
 	RowView tyrael { .structSize = RowViewSize };
 	const std::uint16_t aiStationary = service->getRow(context, static_cast<Bank>(bank), TableId::MonStats, 521, &tyrael) == Result::Success && tyrael.row
 	                                     ? Field<std::uint16_t>(tyrael.row, 0x52) : 0;
-	const std::uint16_t want = aiStationary == 54 ? aiStationary : aiIdle;
+	(void)aiStationary;
+	const std::uint16_t want = aiLarzuk; // the town NPCs' AI (Npc): faces you when you talk
 	if (Field<std::uint16_t>(townguard, 0x52) == aiLarzuk && aiLarzuk != aiIdle) { // the AI word checked on the Townguard (Npc, like Larzuk)
-		if (ai != want) SetField<std::uint16_t>(row, 0x52, want), Log(false, "Roran: bank %d AI %u -> %u (%s)", bank, ai, want, want == aiIdle ? "Idle, stands still: Tyrael's AI not found" : "NpcStationary, faces nearby players");
+		if (ai != want) SetField<std::uint16_t>(row, 0x52, want), Log(false, "Roran: bank %d AI %u -> %u (%s)", bank, ai, want, "Npc, like Larzuk");
 	} else Log(true, "Roran: bank %d AI word not as expected (Townguard %u, Larzuk %u, injured %u), he keeps walking", bank, Field<std::uint16_t>(townguard, 0x52), aiLarzuk, aiIdle);
 }
 
@@ -4236,10 +4264,13 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 	for (const std::uint64_t site : LabelCalls)
 		if (!PatchCall(site, LabelRva, reinterpret_cast<const void*>(&HookLabel)))
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
-	// The game's own NPC menu for Roran (OpenRoranMenu) is off: opened on the client alone, it left the game's talk state stuck
-	// (his name gone, him highlighted, no panel opening until a new game). He opens the TZ Plus window.
-	MenuHooked = false;
-	(void)&HookMenuText, (void)&HookNpcPacket;
+	// Roran is a real NPC: the server has his record (HookNpcRecord) and starts the talk, the client opens its own NPC menu with his
+	// row (RoranMenuRow, added on joining a game) and our line texts. (0.0.77 opened the menu on the client alone (OpenRoranMenu):
+	// the talk state stuck; not used.)
+	MenuHooked = PatchNpcRecord() && PatchCall(MenuTextCall, StringByIndexRva, reinterpret_cast<const void*>(&HookMenuText));
+	if (!MenuHooked) Log(true, "Roran is no NPC: could not patch D2R+0x%llX / D2R+0x%llX, a click on him opens the TZ Plus window", static_cast<unsigned long long>(NpcRecordRva), static_cast<unsigned long long>(MenuTextCall));
+	else Log(false, "Roran is a town NPC (record and menu texts patched)");
+	(void)&HookNpcPacket, (void)&OpenRoranMenu;
 	for (int i = 0; i < 2; ++i)
 		if (!PatchCall(RotationClearCalls[i], RotationClearRva, reinterpret_cast<const void*>(&HookRotationClear)) ||
 		    !PatchCall(RotationCheckCalls[i], RotationCheckRva, reinterpret_cast<const void*>(&HookRotationCheck)))
