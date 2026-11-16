@@ -169,6 +169,21 @@ inline std::string Row(int width, int height) {
 	});
 }
 
+// An info card's frame: a flat dark panel with a thin muted gold line around it (no bevel).
+inline std::string Card(int width, int height) {
+	return Detail::Once("card" + std::to_string(width) + "x" + std::to_string(height), [&] {
+		Picture out = Fill(width, height, 0, 0, 0, 0x48);
+		for (int y = 0; y < height; ++y)
+			for (int x = 0; x < width; ++x) {
+				const int edge = std::min({ x, y, width - 1 - x, height - 1 - y });
+				if (edge > 1) continue;
+				unsigned char* px = out.at(x, y);
+				px[0] = 0x9C, px[1] = 0x86, px[2] = 0x5A, px[3] = edge ? 0x50 : 0xA0;
+			}
+		return std::vector<Picture> { out };
+	});
+}
+
 // A read-only table or list line: a flat warm stripe (`shaded`) or clear, with a faint line at its foot.
 inline std::string Stripe(int width, int height, bool shaded = true) {
 	return Detail::Once(std::string(shaded ? "stripe" : "stripeclear") + std::to_string(width) + "x" + std::to_string(height), [&] {

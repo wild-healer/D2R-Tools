@@ -1331,7 +1331,7 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 			cards.pop_back();
 			const int bottom = y - scroll + HeightOf(item, inWidth) - 10;
 			if (bottom > 0 && top < room && bottom - top > 20)
-				inside.insert(at, Image("Card" + std::to_string(i), in.left, top, Kit::Box(inWidth, bottom - top)));
+				inside.insert(at, Image("Card" + std::to_string(i), in.left, top, Kit::Card(inWidth, bottom - top)));
 		}
 		if (item.kind == Item::Kind::HostGrid) {
 			fixed += GridLayout(item);
