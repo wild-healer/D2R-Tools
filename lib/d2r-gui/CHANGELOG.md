@@ -25,3 +25,4 @@
 * Components inside a card stay inside its frame and clear of the scroll bar.
 * Table and list rows have flat stripes behind them instead of a button sprite.
 * Cards are a flat dark panel with a thin line around it instead of a bevelled box sprite.
+* Long tooltips wrap over several lines instead of running off the screen.

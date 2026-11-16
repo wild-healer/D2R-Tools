@@ -40,7 +40,7 @@ inline std::string Box(const std::string& name, int x, int y, int width, int hei
 	                + R"(", "normalFrame": 0, "pressedFrame": 1, "disabledFrame": 2, "hoveredFrame": 3, "textString": )" + Json(GameText(shown))
 	                + R"(, "textColor": "$FontColorLightGold", "text/style": {"pointSize": ")" + (Font::TextWidth(shown) > width - 110 ? "$SmallFontSize" : "$MediumFontSize")
 	                + R"(", "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "center", "v": "center"}})";
-	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(GameText(tooltip));
+	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(WrapLines(GameText(tooltip)));
 	return out + R"(, "sound": "cursor_button_click_hd", "onClickMessage": )" + Command(command) + "}}";
 }
 

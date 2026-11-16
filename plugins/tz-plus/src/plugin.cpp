@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.92";
+constexpr const char* PluginVersion = "0.0.93";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -144,7 +144,7 @@ constexpr int StrongDamage[3] { 75, 114, 152 }; // row 14: Hell +49% / +75% / +1
 constexpr int StrongAr[3]     { 50, 76, 114 };  // row 12: Hell +33% / +50% / +75% attack rating
 constexpr int ElemScale[3]    { 100, 150, 200 }; // rows 16-21: 33-50% / 50-75% / 66-100% of base damage
 constexpr int CurseLevelPct[3] { 50, 100, 150 }; // Amplify Damage level, % of the game's (monster level / 5 + 1)
-constexpr int FastMove[3]     { 0, 15, 30 };  // % run/walk speed on top of the game's Extra Fast
+constexpr int FastMove[3]     { 75, 100, 125 }; // % run/walk speed (replaces the game's Extra Fast 10-100% by monster)
 constexpr int FastAttack[3]   { 0, 0, 10 };   // % attack speed
 
 constexpr int GoldPerPoint = 25, MagicPerPoint = 15, XpPerPoint = 5;
@@ -808,6 +808,7 @@ void ApplyUMod(void* unit, std::uint8_t mode, int id, int tier, bool elite) noex
 	int before[6] {};
 	constexpr int watched[6] { StatFireRes, StatLightRes, StatColdRes, StatMagicRes, StatPhysRes, StatDefense };
 	for (int i = 0; i < 6; ++i) before[i] = GetStat(unit, watched[i]);
+	const int velocityBefore = GetStat(unit, StatVelocity), attackBefore = GetStat(unit, StatAttackRate);
 
 	list[slot] = static_cast<std::uint8_t>(id);
 	const auto start = *reinterpret_cast<UModStartFn*>(Base + UModTableRva + static_cast<std::uint64_t>(id) * 8);
@@ -828,8 +829,8 @@ void ApplyUMod(void* unit, std::uint8_t mode, int id, int tier, bool elite) noex
 		for (int i = 0; i < 3; ++i) SetStat(unit, Resists[i], before[i] + MagicRes[t]);
 		break;
 	case 6:
-		if (FastMove[t]) SetStat(unit, StatVelocity, GetStat(unit, StatVelocity) + FastMove[t]);
-		if (FastAttack[t]) SetStat(unit, StatAttackRate, GetStat(unit, StatAttackRate) + FastAttack[t]);
+		SetStat(unit, StatVelocity, velocityBefore + FastMove[t]); // ours replaces the game's (2048 / MonStats velocity - 128, 10-100)
+		SetStat(unit, StatAttackRate, attackBefore + FastAttack[t]);
 		break;
 	case 28:
 		SetStat(unit, StatDefense, before[5] * StoneDefense[t] / 100);
@@ -1388,6 +1389,32 @@ constexpr std::uint64_t MissileEventCallRva = 0x537B96;
 constexpr std::uint64_t MissileEventRva     = 0x499160;
 using MissileEventFn = void (*)(void* game, void* monster, void* missile) noexcept;
 
+// Multiple Shots by tier: the game's handler (D2R+0x4A0C40, umod 29 event 5) adds 2 missiles beside the target (x -/+ dy sign,
+// y +/- dx sign, dx/dy the shooter-to-target signs; none for the mummy missiles 0x3F-0x42), each with D2R+0x4333F0(game, class,
+// owner, skill, level, a6, 0, 0, x, y, 0), the owner's monster flag 0x80 set meanwhile (D2R+0x38E710) so they shoot no more.
+// Tier II adds a third at twice the offset on one side, tier III a fourth on the other: +2 / +3 / +4 missiles.
+using CreateMissileFn = void* (*)(void* game, int missile, void* owner, int skill, int level, int a6, int a7, int a8, int x, int y, int a11) noexcept;
+constexpr int MultiShotExtra[3] { 0, 1, 2 };
+
+void ExtraShots(std::uint8_t* game, void* monster, void* missile, int tier) noexcept {
+	const int extra = MultiShotExtra[std::clamp(tier, 1, 3) - 1];
+	if (!extra) return;
+	const int cls = At<int (*)(void*, const char*, int) noexcept>(0x349860)(missile, "tz-plus", 0);
+	if (cls >= 0x3F && cls <= 0x42) return; // the mummies' missiles: no spread
+	struct { std::int32_t x, y; } owner {}, target {};
+	At<void (*)(void*, void*) noexcept>(0x34A040)(monster, &owner);
+	if (void* aim = At<void* (*)(void*, void*) noexcept>(0x48FE20)(game, monster)) At<void (*)(void*, void*) noexcept>(0x34A040)(aim, &target);
+	else return;
+	const int dx = owner.x > target.x ? 1 : owner.x < target.x ? -1 : 0, dy = owner.y > target.y ? 1 : owner.y < target.y ? -1 : 0;
+	const int skill = At<int (*)(void*) noexcept>(0x3BC450)(missile), level = At<int (*)(void*) noexcept>(0x3BB470)(missile), a6 = At<int (*)(void*) noexcept>(0x34B6C0)(missile);
+	At<void (*)(void*, int, int) noexcept>(0x38E710)(monster, 0x80, 1);
+	for (int k = 0; k < extra; ++k) {
+		const int side = k == 0 ? 1 : -1;
+		At<CreateMissileFn>(0x4333F0)(game, cls, monster, skill, level, a6, 0, 0, target.x - side * 2 * dy, target.y + side * 2 * dx, 0);
+	}
+	At<void (*)(void*, int, int) noexcept>(0x38E710)(monster, 0x80, 0);
+}
+
 void HookMissileEvent(std::uint8_t* game, void* monster, void* missile) noexcept {
 	GameMods*     mods   = nullptr;
 	std::uint8_t* data   = nullptr;
@@ -1399,11 +1426,25 @@ void HookMissileEvent(std::uint8_t* game, void* monster, void* missile) noexcept
 	}
 	static thread_local int depth = 0;
 	const bool extra = depth > 0; // created by a mod's handler (Multiple Shots) while the first missile is set up
+	static thread_local int extrasSeen = 0; // missiles the game's Multiple Shots added for this first one
+	if (extra) ++extrasSeen;
+	else extrasSeen = 0;
 	++depth;
 	At<MissileEventFn>(MissileEventRva)(game, monster, missile);
 	--depth;
 	if (raised) SetField<std::uint16_t>(data, 0x1A, Field<std::uint16_t>(data, 0x1A) & ~std::uint16_t { 8 });
 	if (!ours || !missile || Field<std::uint32_t>(missile, 0) != 3) return;
+	if (!extra) { // the first missile of a shot (ours and the game's extra ones come back here with depth > 0)
+		bool shots = false;
+		if (const std::uint8_t* umods = At<UModListFn>(0x38E310)(monster))
+			for (int x = 0; x < 9; ++x) shots = shots || umods[x] == 29;
+		if (shots) {
+			int tier = TierOf(*mods, 29);
+			const std::uint8_t* md = Field<std::uint8_t*>(monster, 0x10);
+			if (md && (Field<std::uint16_t>(md, 0x1A) & 0xC)) tier = std::min(3, tier + 1); // champions and uniques: one tier higher
+			if (tier && extrasSeen >= 2) ++depth, ExtraShots(game, monster, missile, tier), --depth; // only where the game's spread its own two
+		}
+	}
 	const bool poison = TierOf(*mods, 0, Kind::Poison) != 0;
 	if (poison) {
 		const std::int32_t low = GetStat(monster, StatPoisonMin), high = GetStat(monster, StatPoisonMax), length = GetStat(monster, StatPoisonLength);
@@ -2034,40 +2075,46 @@ std::string TierText(const int (&v)[3], const char* unit) {
 	return line;
 }
 
-// The look of a mod: its icon, colour, its values at tiers I / II / III and what they are.
+// The look of a mod: its icon, colour, a short description and each value it changes at tiers I / II / III.
 struct ModLook {
-	const char*  icon;
-	Gui::Rgb     colour;
-	std::string  tier[3], what;
+	const char*                             icon;
+	Gui::Rgb                                colour;
+	std::string                             what;
+	std::vector<std::array<std::string, 4>> values; // {value, I, II, III}
 };
 
-std::array<std::string, 3> Tiers(const int (&v)[3], const char* before, const char* after) {
-	std::array<std::string, 3> out;
-	for (int i = 0; i < 3; ++i) out[static_cast<std::size_t>(i)] = std::string(before) + std::to_string(v[i]) + after;
+std::array<std::string, 4> Row(const char* name, const int (&v)[3], const char* before, const char* after) {
+	std::array<std::string, 4> out { name };
+	for (int i = 0; i < 3; ++i) out[static_cast<std::size_t>(i + 1)] = std::string(before) + std::to_string(v[i]) + after;
 	return out;
 }
 
 ModLook LookOf(const Mod& m) {
 	const std::string key = m.key;
 	const Gui::Rgb gold { 215, 200, 150 }, red { 230, 90, 60 }, blue { 120, 170, 240 }, yellow { 240, 220, 90 }, green { 120, 210, 90 }, violet { 180, 130, 230 };
-	const auto make = [](const char* icon, Gui::Rgb c, std::array<std::string, 3> t, std::string what) { return ModLook { icon, c, { t[0], t[1], t[2] }, std::move(what) }; };
-	if (key == "extra_strong") return make("sword-clash", red, { "+49%", "+75%", "+100%" }, "damage; +33 / 50 / 75% attack rating");
-	if (key == "extra_fast") return make("stopwatch", yellow, Tiers(FastMove, "+", "%"), "run speed over the game's Extra Fast; +10% attack speed at III");
-	if (key == "cursed") return make("pentagram-rose", violet, Tiers(CurseLevelPct, "", "%"), "of the game's Amplify Damage level");
-	if (key == "magic_resistant") return make("bolt-shield", gold, Tiers(MagicRes, "+", ""), "fire, cold and lightning resistance");
-	if (key == "fire_enchanted") return make("fire", red, Tiers(OwnResist, "+", ""), "fire resistance; 33-100% of the damage added as fire");
-	if (key == "lightning_enchanted") return make("lightning-branches", yellow, Tiers(OwnResist, "+", ""), "lightning resistance; 33-100% added as lightning");
-	if (key == "cold_enchanted") return make("ice-bolt", blue, Tiers(OwnResist, "+", ""), "cold resistance; 33-100% added as cold");
-	if (key == "poison_enchanted") return make("poison-bottle", green, Tiers(PoisonPerLevel, "", " x lvl"), "poison over 3 s (a third on ranged attacks)");
-	if (key == "mana_burn") return make("magic-potion", blue, Tiers(ManaBurnRes, "+", ""), "magic resistance over the game's Mana Burn");
-	if (key == "teleportation") return make("portal", violet, Tiers(TeleportChance, "", "%"), "chance to teleport away when hit (not bosses)");
-	if (key == "spectral_hit") return make("crystal-ball", violet, Tiers(SpectralRes, "+", ""), "elemental resistance over Spectral Hit");
-	if (key == "stone_skin") return make("breastplate", gold, { "x1.5", "x2", "x2.5" }, "defense; +" + TierText(StonePhys, "%") + " physical resistance");
-	if (key == "multiple_shots") return make("pocket-bow", gold, { "-", "-", "-" }, "the game's Multiple Shots, on normal monsters too (not bosses)");
-	if (key == "tough") return make("heart-bottle", red, Tiers(ToughLife, "+", "%"), "life");
-	if (key == "vampiric") return make("vial", red, Tiers(LifeSteal, "", "%"), "life steal");
-	if (key == "regenerating") return make("anticlockwise-rotation", green, Tiers(RegenPct, "", "%"), "of their life back each second");
-	return make("sun", yellow, Tiers(AuraPct, "", "%"), "of the aura level the game gives elites"); // the auras
+	using V = std::vector<std::array<std::string, 4>>;
+	if (key == "extra_strong") return { "sword-clash", red, "Hits much harder and more often.", V { { "Damage", "+49%", "+75%", "+100%" }, { "Attack rating", "+33%", "+50%", "+75%" } } };
+	if (key == "extra_fast") return { "stopwatch", yellow, "Runs you down and swings faster.", V { Row("Run and walk speed", FastMove, "+", "%"), Row("Attack speed", FastAttack, "+", "%") } };
+	if (key == "cursed") return { "pentagram-rose", violet, "Casts Amplify Damage on the players it hits.", V { Row("Curse level (of the game's)", CurseLevelPct, "", "%") } };
+	if (key == "magic_resistant") return { "bolt-shield", gold, "Shrugs off elemental damage.", V { Row("Fire, cold, lightning resistance", MagicRes, "+", "%") } };
+	if (key == "fire_enchanted") return { "fire", red, "Burns with every hit, explodes in fire on death.",
+		                                  V { Row("Fire resistance", OwnResist, "+", "%"), { "Damage added as fire", "33-50%", "50-75%", "66-100%" } } };
+	if (key == "lightning_enchanted") return { "lightning-branches", yellow, "Hits with lightning, sends bolts when struck.",
+		                                       V { Row("Lightning resistance", OwnResist, "+", "%"), { "Damage added as lightning", "33-50%", "50-75%", "66-100%" } } };
+	if (key == "cold_enchanted") return { "ice-bolt", blue, "Chills with every hit, a frost nova on death.",
+		                                  V { Row("Cold resistance", OwnResist, "+", "%"), { "Damage added as cold", "33-50%", "50-75%", "66-100%" } } };
+	if (key == "poison_enchanted") return { "poison-bottle", green, "Poisons with every hit (a third with missiles), over 3 seconds.",
+		                                    V { Row("Poison damage (x monster level)", PoisonPerLevel, "", "x") } };
+	if (key == "mana_burn") return { "magic-potion", blue, "Drains your mana with every hit (the game's Mana Burn).", V { Row("Magic resistance", ManaBurnRes, "+", "%") } };
+	if (key == "teleportation") return { "portal", violet, "Teleports away when hit (not bosses).", V { Row("Teleport chance when hit", TeleportChance, "", "%") } };
+	if (key == "spectral_hit") return { "crystal-ball", violet, "Hits with random elements (the game's Spectral Hit).", V { Row("Fire, cold, lightning resistance", SpectralRes, "+", "%") } };
+	if (key == "stone_skin") return { "breastplate", gold, "Tough to hit and to hurt.", V { { "Defense", "x1.5", "x2", "x2.5" }, Row("Physical resistance", StonePhys, "+", "%") } };
+	if (key == "multiple_shots") return { "pocket-bow", gold, "Every missile comes with more beside it, normal monsters too (not bosses).",
+		                                  V { { "Extra missiles", "+2", "+3", "+4" } } };
+	if (key == "tough") return { "heart-bottle", red, "More life.", V { Row("Life", ToughLife, "+", "%") } };
+	if (key == "vampiric") return { "vial", red, "Heals from the damage it deals.", V { Row("Life steal", LifeSteal, "", "%") } };
+	if (key == "regenerating") return { "anticlockwise-rotation", green, "Heals itself quickly.", V { Row("Life back each second", RegenPct, "", "%") } };
+	return { "sun", yellow, "An aura for the zone's monsters (one aura a game at most).", V { Row("Aura level (of the elites' level)", AuraPct, "", "%") } };
 }
 
 // Colour runs: the library's (App::Red...).
@@ -2082,10 +2129,9 @@ std::string Orange(const std::string& t) { return App::Orange(t); }
 
 std::string IconOf(const char* name, Gui::Rgb colour = { 215, 200, 150 }) { return Gui::Icons::Sprite(name, 40, colour); }
 
-std::vector<App::Item> RuleItems() {
+// Page 1: this game's terror zone, mods and rewards.
+std::vector<App::Item> GameItems() {
 	std::vector<App::Item> out;
-
-	// this game
 	out.push_back(App::Card("This game"));
 	AcquireSRWLockShared(&Lock);
 	if (const GameMods* g = Last; g && InGame) {
@@ -2097,9 +2143,14 @@ std::vector<App::Item> RuleItems() {
 			const Mod&    m    = Mods[g->mods[i].mod];
 			const ModLook look = LookOf(m);
 			const int     t    = std::clamp(g->mods[i].tier, 1, 3);
-			rows.push_back({ { .text = std::string(m.name) + (m.kind == Kind::Aura ? " aura" : ""), .icon = IconOf(look.icon, look.colour), .tooltip = look.what },
-			                 { .text = Paint::Gold(Roman(t)), .tooltip = look.what },
-			                 { .text = Paint::Green(look.tier[t - 1]), .tooltip = look.what } });
+			std::string values, tip = look.what;
+			for (const auto& v : look.values) {
+				values += (values.empty() ? "" : ", ") + v[static_cast<std::size_t>(t)];
+				tip += "\n" + v[0] + ": " + v[static_cast<std::size_t>(t)];
+			}
+			rows.push_back({ { .text = std::string(m.name) + (m.kind == Kind::Aura ? " aura" : ""), .icon = IconOf(look.icon, look.colour), .tooltip = tip },
+			                 { .text = Paint::Gold(Roman(t)), .tooltip = tip },
+			                 { .text = Paint::Green(values), .tooltip = tip } });
 		}
 		if (!rows.empty()) out.push_back(App::Grid("", { { "Mod", 0 }, { "Tier", 120 }, { "Value", 220 } }, std::move(rows)));
 		out.push_back(App::Bullet("Rewards: " + Paint::Gold("+" + std::to_string(g->gold) + "% gold find") + ", " + Paint::Blue("+" + std::to_string(g->magic) + "% magic find") + ", "
@@ -2108,8 +2159,12 @@ std::vector<App::Item> RuleItems() {
 	} else out.push_back(App::Bullet(InGame ? "No TZ Plus mods in this game" : "Not in a game", IconOf("info")));
 	ReleaseSRWLockShared(&Lock);
 	out.push_back(App::CardEnd());
+	return out;
+}
 
-	// terror zones
+// Page 2: the rules.
+std::vector<App::Item> RuleItems() {
+	std::vector<App::Item> out;
 	out.push_back(App::Card("Terror zones"));
 	const auto range = [](int d) { return std::to_string(Ranges[d].minLevel) + "-" + std::to_string(Ranges[d].maxLevel); };
 	out.push_back(App::Grid("", { { "Difficulty", 0 }, { "Levels", 190 }, { "Mods", 120 }, { "Tiers", 140 } },
@@ -2147,29 +2202,25 @@ std::vector<App::Item> RuleItems() {
 	out.push_back(App::Bullet("Its dungeon: x1.5 the density, x2 elite packs; its stairs lead back to Harrogath.", IconOf("castle")));
 	out.push_back(App::Bullet("The exit area holds " + Paint::Gold("3 golden chests") + ".", IconOf("open-treasure-chest", { 240, 200, 80 })));
 	out.push_back(App::Bullet("Offer runes (Offering tab) to ban a mod or a monster family from your zones.", IconOf("rune-stone")));
+	out.push_back(App::Bullet(Paint::Red("Beware: ") + "these zones mix monsters from every act with this game's mods. Some combinations can be deadly, even for a strong character.",
+	                          IconOf("hazard-sign", { 230, 90, 60 })));
 	out.push_back(App::CardEnd());
 
-	// every mod
+	// every mod: a paragraph each, with the values it changes by tier
 	out.push_back(App::Card("Mods"));
-	std::vector<std::vector<App::GridCell>> mods;
 	std::string auras;
-	for (const Mod& m : Mods) {
-		if (m.kind == Kind::Aura) {
-			auras += (auras.empty() ? "" : ", ") + std::string(m.name);
-			continue;
-		}
+	for (const Mod& m : Mods)
+		if (m.kind == Kind::Aura) auras += (auras.empty() ? "" : ", ") + std::string(m.name);
+	for (int i = 0; i < ModCount; ++i) {
+		const Mod& m = Mods[i];
+		if (m.kind == Kind::Aura && i != ModCount - 1) continue; // the auras: one paragraph, at the end
 		const ModLook look = LookOf(m);
-		mods.push_back({ { .text = m.name, .icon = IconOf(look.icon, look.colour), .tooltip = look.what }, { .text = look.tier[0], .tooltip = look.what },
-		                 { .text = look.tier[1], .tooltip = look.what }, { .text = Paint::Green(look.tier[2]), .tooltip = look.what } });
+		const bool    aura = m.kind == Kind::Aura;
+		out.push_back(App::Bullet(Paint::Gold(aura ? std::string("Auras") : std::string(m.name)) + ": " + look.what + (aura ? " " + auras + "." : ""), IconOf(look.icon, look.colour)));
+		std::vector<std::vector<App::GridCell>> rows;
+		for (const auto& v : look.values) rows.push_back({ { .text = v[0], .tooltip = v[0] }, { .text = v[1] }, { .text = v[2] }, { .text = Paint::Green(v[3]) } });
+		out.push_back(App::Grid("", { { "Value", 0 }, { "I", 150 }, { "II", 150 }, { "III", 150 } }, std::move(rows)));
 	}
-	{
-		const ModLook look = LookOf(Mods[ModCount - 1]);
-		const std::string tip = "Auras, one a game at most (" + look.what + "): " + auras;
-		mods.push_back({ { .text = "Auras", .icon = IconOf(look.icon, look.colour), .tooltip = tip }, { .text = look.tier[0], .tooltip = tip },
-		                 { .text = look.tier[1], .tooltip = tip }, { .text = Paint::Green(look.tier[2]), .tooltip = tip } });
-	}
-	out.push_back(App::Grid("", { { "Mod", 0 }, { "I", 160 }, { "II", 160 }, { "III", 170 } }, std::move(mods)));
-	out.push_back(App::Bullet("Hover a mod for what its values do.", IconOf("info")));
 	out.push_back(App::CardEnd());
 
 	out.push_back(App::Bullet(Paint::Gray("Which mods can roll, and Nightmare and Hell on or off: the TOML config or I Hate TOMLs."), IconOf("cog")));
@@ -2423,6 +2474,38 @@ bool OpenRoranMenu(std::uint32_t id) noexcept {
 	return open;
 }
 
+// A pending talk to Roran (asked by a click), sent when the local player is within reach of him.
+std::atomic<std::uint32_t> RoranTalkPending { 0 };
+std::atomic<ULONGLONG>     RoranTalkSince { 0 };
+
+void* ClientMonster(std::uint32_t id) noexcept {
+	auto* table = reinterpret_cast<std::uint8_t*>(Base + 0x2A23910 + 1 * 0x400); // client units: 128 lists (next +0x158)
+	for (int bucket = 0; bucket < 128; ++bucket) {
+		int guard = 0;
+		for (auto* u = Field<std::uint8_t*>(table, bucket * 8); u && guard < 256; u = Field<std::uint8_t*>(u, 0x158), ++guard)
+			if (Field<std::uint32_t>(u, 0) == 1 && Field<std::uint32_t>(u, 8) == id) return u;
+	}
+	return nullptr;
+}
+
+void RoranTalkTick() noexcept {
+	const std::uint32_t id = RoranTalkPending.load();
+	if (!id) return;
+	if (!InGame.load() || CurrentLevel.load() != 109 || GetTickCount64() - RoranTalkSince.load() > 10000) return void(RoranTalkPending = 0);
+	const int index  = At<LocalIndexFn>(0x8B2D0)();
+	void*     player = index >= 0 && index < 8 ? At<PlayerByIndexFn>(0x9A480)(index) : nullptr;
+	void*     roran  = ClientMonster(id);
+	if (!player || !roran) return void(RoranTalkPending = 0);
+	using CoordsFn = void (*)(void* unit, void* coord) noexcept;
+	std::int32_t a[2] {}, b[2] {};
+	At<CoordsFn>(0x34A040)(player, a), At<CoordsFn>(0x34A040)(roran, b);
+	const int dx = a[0] - b[0], dy = a[1] - b[1];
+	if (dx * dx + dy * dy > 5 * 5) return; // still walking over
+	RoranTalkPending = 0;
+	At<SendPacket5Fn>(SendPacket5Rva)(0x2F, id);
+	if (TalkLogs < 40) ++TalkLogs, Log(false, "Roran: talk asked (unit %u, %d subtiles away)", id, static_cast<int>(std::sqrt(double(dx * dx + dy * dy))));
+}
+
 bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 	if (message != WM_LBUTTONDOWN || !InGame.load()) return false;
 	const int index = At<LocalIndexFn>(0x8B2D0)();
@@ -2442,12 +2525,9 @@ bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 		// The client never asks the server to talk to him (its click on a monster picks an interaction from data he is not in):
 		// the talk request is sent here, as the client does for an NPC (packet 0x2F + unit id, D2R+0xFA809). The server checks
 		// range and the rest, then starts the talk and the client opens its NPC menu.
-		static ULONGLONG last = 0;
-		if (const ULONGLONG now = GetTickCount64(); now - last > 400) {
-			last = now;
-			At<SendPacket5Fn>(SendPacket5Rva)(0x2F, RoranUnitId.load());
-			if (TalkLogs < 40) ++TalkLogs, Log(false, "Roran: talk asked (unit %u)", RoranUnitId.load());
-		}
+		// Sent once you are next to him (RoranTalkTick): from afar the server turns it down and the client walks you over.
+		RoranTalkPending = RoranUnitId.load(), RoranTalkSince = GetTickCount64();
+		RoranTalkTick();
 	}
 	return false; // the click goes on: you walk to him
 }
@@ -2461,7 +2541,7 @@ bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 // skeleton; 0.0.84: act5barb1's skeleton and state machine left him in a T-pose.)
 constexpr const char* RoranDefName = "d2rloader/tz-plus/roran";
 constexpr const char* RoranDefPath = "data/hd/character/enemy/d2rloader/tz-plus/roran.json";
-constexpr const char* RoranDef = R"JSON({"dependencies":{"particles":[],"models":[{"path":"data/hd/character/enemy/act5pow/torso.model"},{"path":"data/hd/character/enemy/act5barb1/special1_med.model"},{"path":"data/hd/character/enemy/act5barb1/special2_med.model"},{"path":"data/hd/character/enemy/act5barb1/torso_hvy.model"}],"skeletons":[{"path":"data/hd/character/enemy/act5pow/skeleton/act5pow.skeleton"}],"animations":[],"textures":[{"path":"data/hd/character/common/common_hair1_FLOW.texture"},{"path":"data/hd/character/common/common_hair1_HRT.texture"},{"path":"data/hd/character/common/common_ktint.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_med_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_med_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_med_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_SSS.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_hair_ALB.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_SSS.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_lit_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_lit_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_lit_orm.texture"}],"physics":[],"json":[{"path":"data/hd/character/enemy/act5pow/act5pow_state_machine.json"},{"path":"data/hd/items/weapon/hammer/maul.json"}],"variantdata":[{"path":"data/hd/character/enemy/act5pow/act5pow_variant.json"}],"objecteffects":[],"other":[]},"type":"UnitDefinition","name":"roran","entities":[{"type":"Entity","name":"entity_root","id":3706763854,"components":[{"type":"UnitRootComponent","name":"component_root","state_machine_filename":"data/hd/character/enemy/act5pow/act5pow_state_machine.json","doNotInheritRotation":false,"rotationOverride":{"x":0.0,"y":0.3826834,"z":0.0,"w":0.9238795},"doNotUseHDHeight":false,"hideAllMeshWhenInOpenedMode":false,"onCreateEventName":"","animations":[]},{"type":"SkeletonDefinitionComponent","name":"component_skeleton","filename":"data/hd/character/enemy/act5pow/skeleton/act5pow.skeleton","enableWeaponAttachInertialization":false},{"type":"VariantDefinitionComponent","name":"component_variant","filename":"data/hd/character/enemy/act5pow/act5pow_variant.json"},{"type":"IKComponent","name":"entity_root_IK","preset":{"type":"IKPreset","name":"Default_Biped_VV","footIKSetup":[{"type":"FootIKSetup","name":"Default_Biped_VV_footIKSetup_0","footBoneName":"R_Foot","kneeBoneName":"R_Calf","hipBoneName":"R_Thigh","locationTrackName":"R_IK_position","enabledTrackName":"R_FKIK","hyperExtensionStart":0.0,"hyperExtensionScale":1.0,"defaultEnabled":false,"kneeRotationAxis":2,"flipKneeRotationAxis":false},{"type":"FootIKSetup","name":"Default_Biped_VV_footIKSetup_1","footBoneName":"L_Foot","kneeBoneName":"L_Calf","hipBoneName":"L_Thigh","locationTrackName":"L_IK_position","enabledTrackName":"L_FKIK","hyperExtensionStart":0.0,"hyperExtensionScale":1.0,"defaultEnabled":false,"kneeRotationAxis":2,"flipKneeRotationAxis":false}]}}]},{"type":"Entity","name":"entity_basebody","id":3170002001,"components":[{"type":"ModelDefinitionComponent","name":"entity_basebody_ModelDefinition","filename":"data/hd/character/enemy/act5pow/torso.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1}]},{"type":"Entity","name":"entity_torso_hvy","id":3170002002,"components":[{"type":"UnitPartComponent","name":"entity_torso_hvy_part","part":"torso","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_torso_hvy","filename":"data/hd/character/enemy/act5barb1/torso_hvy.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1},{"type":"AimLayersComponent","name":"entity_torso_hvy_AimLayers","aimLayers":[{"type":"AimLayerSetup","name":"entity_torso_hvy_AimLayers_aimLayers_0","layerName":"Aim_Head","yawAnimationState":"HeadAimLayer_Yaw","yawOutOfRangeBehavior":2,"yawAngleOffset":0.0,"pitchAnimationState":"","pitchOutOfRangeBehavior":0,"pitchAngleOffset":0.0,"aimLocationTrackName":"aim_Location","aimDampingFactor":0.15,"aimTarget":2}]},{"type":"LookAtAnimationControlComponent","name":"entity_torso_hvy_LookAtAnimationControl","controlOverrides":[],"aimLayerName":"Aim_Head","blendInTime":0.25,"blendOutTime":0.25}]},{"type":"Entity","name":"entity_special1_med","id":3170002003,"components":[{"type":"UnitPartComponent","name":"entity_special1_med_part","part":"torso","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_special1_med","filename":"data/hd/character/enemy/act5barb1/special1_med.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1}]},{"type":"Entity","name":"entity_special2_med","id":3170002004,"components":[{"type":"UnitPartComponent","name":"entity_special2_med_part","part":"torso","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_special2_med","filename":"data/hd/character/enemy/act5barb1/special2_med.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1}]},{"type":"Entity","name":"entity_belt_maul","id":3170002005,"components":[{"type":"UnitPartComponent","name":"entity_belt_maul_part","part":"torso","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_belt_maul","filename":"","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1},{"type":"UnitAttachmentComponent","name":"entity_belt_maul_UnitAttachment","filename":"data/hd/items/weapon/hammer/maul.json","overrideBoneName":"L_Thigh","orientTowardBoneName":"","attachmentTransform":{"type":"Transform","name":"entity_belt_maul_UnitAttachment_attachmentTransform","translation":{"x":0.0,"y":0.0,"z":0.0},"rotation":{"x":0.0,"y":0.0,"z":0.0},"scale":{"x":1.0,"y":1.0,"z":1.0}},"attachmentStateMachineFilename":"","part":"torso","variant":"lit"}]}]})JSON";
+constexpr const char* RoranDef = R"JSON({"dependencies":{"particles":[],"models":[{"path":"data/hd/character/enemy/act5pow/torso.model"},{"path":"data/hd/character/enemy/act5barb1/special1_med.model"},{"path":"data/hd/character/enemy/act5barb1/special2_med.model"},{"path":"data/hd/character/enemy/act5barb1/torso_hvy.model"}],"skeletons":[{"path":"data/hd/character/enemy/act5pow/skeleton/act5pow.skeleton"}],"animations":[],"textures":[{"path":"data/hd/character/common/common_hair1_FLOW.texture"},{"path":"data/hd/character/common/common_hair1_HRT.texture"},{"path":"data/hd/character/common/common_ktint.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_med_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_med_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_med_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_SSS.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_hair_ALB.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_SSS.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_lit_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_lit_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_lit_orm.texture"}],"physics":[],"json":[{"path":"data/hd/character/enemy/act5pow/act5pow_state_machine.json"},{"path":"data/hd/items/weapon/hammer/maul.json"}],"variantdata":[{"path":"data/hd/character/enemy/act5pow/act5pow_variant.json"}],"objecteffects":[],"other":[]},"type":"UnitDefinition","name":"roran","entities":[{"type":"Entity","name":"entity_root","id":3706763854,"components":[{"type":"UnitRootComponent","name":"component_root","state_machine_filename":"data/hd/character/enemy/act5pow/act5pow_state_machine.json","doNotInheritRotation":false,"rotationOverride":{"x":0.0,"y":0.3826834,"z":0.0,"w":0.9238795},"doNotUseHDHeight":false,"hideAllMeshWhenInOpenedMode":false,"onCreateEventName":"","animations":[]},{"type":"SkeletonDefinitionComponent","name":"component_skeleton","filename":"data/hd/character/enemy/act5pow/skeleton/act5pow.skeleton","enableWeaponAttachInertialization":false},{"type":"VariantDefinitionComponent","name":"component_variant","filename":"data/hd/character/enemy/act5pow/act5pow_variant.json"},{"type":"IKComponent","name":"entity_root_IK","preset":{"type":"IKPreset","name":"Default_Biped_VV","footIKSetup":[{"type":"FootIKSetup","name":"Default_Biped_VV_footIKSetup_0","footBoneName":"R_Foot","kneeBoneName":"R_Calf","hipBoneName":"R_Thigh","locationTrackName":"R_IK_position","enabledTrackName":"R_FKIK","hyperExtensionStart":0.0,"hyperExtensionScale":1.0,"defaultEnabled":false,"kneeRotationAxis":2,"flipKneeRotationAxis":false},{"type":"FootIKSetup","name":"Default_Biped_VV_footIKSetup_1","footBoneName":"L_Foot","kneeBoneName":"L_Calf","hipBoneName":"L_Thigh","locationTrackName":"L_IK_position","enabledTrackName":"L_FKIK","hyperExtensionStart":0.0,"hyperExtensionScale":1.0,"defaultEnabled":false,"kneeRotationAxis":2,"flipKneeRotationAxis":false}]}}]},{"type":"Entity","name":"entity_basebody","id":3170002001,"components":[{"type":"ModelDefinitionComponent","name":"entity_basebody_ModelDefinition","filename":"data/hd/character/enemy/act5pow/torso.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1}]},{"type":"Entity","name":"entity_torso_hvy","id":3170002002,"components":[{"type":"UnitPartComponent","name":"entity_torso_hvy_part","part":"torso","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_torso_hvy","filename":"data/hd/character/enemy/act5barb1/torso_hvy.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1},{"type":"AimLayersComponent","name":"entity_torso_hvy_AimLayers","aimLayers":[{"type":"AimLayerSetup","name":"entity_torso_hvy_AimLayers_aimLayers_0","layerName":"Aim_Head","yawAnimationState":"HeadAimLayer_Yaw","yawOutOfRangeBehavior":2,"yawAngleOffset":0.0,"pitchAnimationState":"","pitchOutOfRangeBehavior":0,"pitchAngleOffset":0.0,"aimLocationTrackName":"aim_Location","aimDampingFactor":0.15,"aimTarget":2}]},{"type":"LookAtAnimationControlComponent","name":"entity_torso_hvy_LookAtAnimationControl","controlOverrides":[],"aimLayerName":"Aim_Head","blendInTime":0.25,"blendOutTime":0.25}]},{"type":"Entity","name":"entity_special1_med","id":3170002003,"components":[{"type":"UnitPartComponent","name":"entity_special1_med_part","part":"torso","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_special1_med","filename":"data/hd/character/enemy/act5barb1/special1_med.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1}]},{"type":"Entity","name":"entity_special2_med","id":3170002004,"components":[{"type":"UnitPartComponent","name":"entity_special2_med_part","part":"torso","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_special2_med","filename":"data/hd/character/enemy/act5barb1/special2_med.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1}]},{"type":"Entity","name":"entity_belt_maul","id":3170002005,"components":[{"type":"UnitPartComponent","name":"entity_belt_maul_part","part":"torso","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_belt_maul","filename":"","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1},{"type":"UnitAttachmentComponent","name":"entity_belt_maul_UnitAttachment","filename":"data/hd/items/weapon/hammer/maul.json","overrideBoneName":"L_Thigh","orientTowardBoneName":"","attachmentTransform":{"type":"Transform","name":"entity_belt_maul_UnitAttachment_attachmentTransform","translation":{"x":0.1,"y":0.0,"z":0.25},"rotation":{"x":0.0,"y":0.0,"z":0.0},"scale":{"x":1.0,"y":1.0,"z":1.0}},"attachmentStateMachineFilename":"","part":"torso","variant":"lit"}]}]})JSON";
 
 void RegisterRoranLook(const D2RL::PluginContext* context) noexcept {
 	const D2RL::ResourceService* resources = nullptr;
@@ -2588,7 +2668,8 @@ bool OnWindowCommand(const std::string& command) {
 void StartWindow(const D2RL::PluginContext* context) noexcept {
 	App::Window window {
 		.title    = "TZ Plus",
-		.menus    = { { .tab = { "scroll-unfurled", "Rules" }, .title = "TZ Plus", .content = RuleItems },
+		.menus    = { { .tab = { "hourglass", "This game" }, .title = "This game", .content = GameItems },
+		              { .tab = { "scroll-unfurled", "Rules" }, .title = "Rules", .content = RuleItems },
 		              { .tab = { "rune-stone", "Offering" }, .title = "Offering", .content = OfferingItems } },
 		.keybind  = "Open TZ Plus",
 		.cells    = Gui::ItemCells::Options { .id = "offering", .label = "TZ Plus offering", .codes = { RuneCodes, RuneCodes + RuneCount }, .vertical = true,
@@ -2597,6 +2678,7 @@ void StartWindow(const D2RL::PluginContext* context) noexcept {
 		.command  = OnWindowCommand,
 		.tick     = [] {
             if (!InGame.load()) return;
+            RoranTalkTick();
             if (const std::string name = CharacterName(); !name.empty() && name != OfferCharacter) LoadOfferings(name), App::Refresh();
 		},
 		.mouse = OnGameMessage,
