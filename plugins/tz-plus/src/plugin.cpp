@@ -56,13 +56,15 @@
 
 #include <d2r_gui.h>
 #include <d2r_gui/stash_window.h>
+#include <d2r_gui/tabs.h>
+#include <d2r_gui/item_cells.h>
 
 #include "i_hate_tomls_client.h"
 
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.74";
+constexpr const char* PluginVersion = "0.0.75";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2051,61 +2053,179 @@ std::string BuildTalk(const std::string& panelName, std::string c) {
 	return Gui::StashWindow::Layout(panelName, "Barbarian", "close", c);
 }
 
+// ---- the window's tabs: Rules (this game, the rules, every mod with its numbers) and Offering (runes that ban) ----
+int CurrentTab = 0; // 0 rules, 1 offering
+
+struct RuleLine {
+	std::string text;
+	const char* style;
+	int         indent;
+};
+
+std::string TierText(const int (&v)[3], const char* unit) {
+	char line[64];
+	std::snprintf(line, sizeof(line), "%d%s / %d%s / %d%s", v[0], unit, v[1], unit, v[2], unit);
+	return line;
+}
+
+std::vector<RuleLine> RuleLines() {
+	std::vector<RuleLine> out;
+	const auto section = [&](const char* t) { out.push_back({ t, Gui::Style::Section, 0 }); };
+	const auto line    = [&](const std::string& t) { out.push_back({ t, Gui::Style::Label, 20 }); };
+	const auto small   = [&](const std::string& t) { out.push_back({ t, Gui::Style::SmallLabel, 40 }); };
+	section("This game");
+	for (const auto& l : GameLines()) line(l);
+	section("Terror zones");
+	line("Normal: the game's own terror zone, untouched.");
+	char text[256];
+	std::snprintf(text, sizeof(text), "Nightmare: one whole act is terrorized, the act changing every 30 minutes. Zone level %d to %d, %d to %d mods, tier I to %s.",
+	              Ranges[1].minLevel, Ranges[1].maxLevel, 1, Ranges[1].maxMods, Roman(Ranges[1].maxTier).c_str());
+	line(text);
+	std::snprintf(text, sizeof(text), "Hell: every level is terrorized for the whole game (no rotation). Zone level %d to %d, %d to %d mods, tier I to %s.",
+	              Ranges[2].minLevel, Ranges[2].maxLevel, 1, Ranges[2].maxMods, Roman(Ranges[2].maxTier).c_str());
+	line(text);
+	line("The mods roll once per game. The higher the zone level, the more mods and the higher their tiers: a level 99 zone has 3 tier III mods.");
+	line("Champions, uniques, minions and bosses get every mod one tier higher. No monster goes over level 99.");
+	section("Rewards");
+	std::snprintf(text, sizeof(text), "Each mod gives points: tier I 1 gold find point, tier II 2 gold find and 1 magic find, tier III 3 gold find, 2 magic find and 1 experience.");
+	line(text);
+	std::snprintf(text, sizeof(text), "A point is +%d%% gold find, +%d%% magic find or +%d%% experience. Three tier III mods: +%d%% gold find, +%d%% magic find, +%d%% experience.",
+	              GoldPerPoint, MagicPerPoint, XpPerPoint, 9 * GoldPerPoint, 6 * MagicPerPoint, 3 * XpPerPoint);
+	line(text);
+	section("Roran Stronghammer");
+	std::snprintf(text, sizeof(text), "At the fire in Harrogath, Roran opens portals to TZ Plus zones in Nightmare and Hell, %d per game.", ZoneSlots / ZoneParts);
+	line(text);
+	line("A zone: an outdoor area (twice the monsters, elite packs x1.5) and its dungeon (x1.5 the density, elite packs x2), 8 monster types from every act.");
+	line("The exit area holds 3 golden chests. The dungeon's stairs lead back to Harrogath.");
+	section("Mods (tier I / II / III)");
+	const auto mod = [&](const char* name, const std::string& what) { line(name), small(what); };
+	mod("Extra Strong", "+49% / +75% / +100% damage, +33% / +50% / +75% attack rating");
+	mod("Extra Fast", "the game's Extra Fast, then +" + TierText(FastMove, "%") + " run speed and +" + TierText(FastAttack, "%") + " attack speed");
+	mod("Cursed", "Amplify Damage at " + TierText(CurseLevelPct, "%") + " of the game's curse level");
+	mod("Magic Resistant", "+" + TierText(MagicRes, "") + " fire, cold and lightning resistance");
+	for (const char* e : { "Fire", "Lightning", "Cold" })
+		mod((std::string(e) + " Enchanted").c_str(), "+" + TierText(OwnResist, "") + " " + std::string(e == std::string("Fire") ? "fire" : e == std::string("Cold") ? "cold" : "lightning")
+		                                              + " resistance, 33-50% / 50-75% / 66-100% of the attack's damage added");
+	mod("Poison Enchanted", "poison of " + TierText(PoisonPerLevel, "") + " x the monster's level over 3 seconds (a third on ranged attacks)");
+	mod("Mana Burn", "the game's Mana Burn, then +" + TierText(ManaBurnRes, "") + " magic resistance");
+	mod("Teleportation", TierText(TeleportChance, "%") + " chance to teleport away when hit (not on bosses)");
+	mod("Spectral Hit", "the game's Spectral Hit, then +" + TierText(SpectralRes, "") + " fire, cold and lightning resistance");
+	mod("Stone Skin", "defense x1.5 / x2 / x2.5, +" + TierText(StonePhys, "%") + " physical resistance");
+	mod("Multiple Shots", "the game's Multiple Shots, on normal monsters too (not on bosses)");
+	mod("Tough", "+" + TierText(ToughLife, "%") + " life");
+	mod("Vampiric", TierText(LifeSteal, "%") + " life steal");
+	mod("Regenerating", TierText(RegenPct, "%") + " of their life back each second");
+	std::string auras;
+	for (const Mod& m : Mods)
+		if (m.kind == Kind::Aura) auras += (auras.empty() ? "" : ", ") + std::string(m.name);
+	mod("Auras", auras + ": one per game at most, at " + TierText(AuraPct, "%") + " of the aura level the game gives elites");
+	section("Offering");
+	line("Offer one rune of each, Vex to Zod, to ban one mod (from the next game) or one monster (from the next zone). Take a rune back to lift its ban.");
+	small("Advanced settings (which mods can roll, Nightmare and Hell on or off): the TOML config or I Hate TOMLs.");
+	return out;
+}
+
+// A text's height when it wraps in `width` (Medium or Small font).
+int WrappedHeight(const std::string& text, int width, bool smallFont) {
+	const int measured = Gui::Font::TextWidth(text) * (smallFont ? 8 : 10) / 10;
+	const int lines    = std::max(1, (measured + width - 1) / std::max(1, width));
+	return lines * (smallFont ? 44 : LineHeight) + 8;
+}
+
+constexpr int TabTop = Gui::StashWindow::InnerY + 8, ContentTop = TabTop + 84 + 24;
+
+// Offering: the runes, their choices and what they ban.
+constexpr int RuneCount = 8;
+const char* const RuneCodes[RuneCount] { "r26", "r27", "r28", "r29", "r30", "r31", "r32", "r33" };
+const char* const RuneNames[RuneCount] { "Vex", "Ohm", "Lo", "Sur", "Ber", "Jah", "Cham", "Zod" };
+struct Choice {
+	std::string id, name; // id: "mod:<key>" or "mon:<name>"
+};
+std::vector<Choice> Choices;        // UI thread: every mod, then every monster name of the zones' pool (built when the tab first shows)
+std::string         OfferTarget[RuneCount];
+bool                OfferHeld[RuneCount] {};
+std::string         OfferCharacter; // whose choices these are
+bool                CellsReady = false;
+
+void BuildChoices(); // after the zones' tables (needs their monster pool)
+void ApplyBans();
+void SaveOfferings();
+std::string CharacterName();
+
+int ChoiceIndex(const std::string& id) {
+	for (std::size_t i = 0; i < Choices.size(); ++i)
+		if (Choices[i].id == id) return static_cast<int>(i);
+	return -1;
+}
+
+std::string ChoiceName(const std::string& id) {
+	if (id.empty()) return "Nothing chosen";
+	if (const int i = ChoiceIndex(id); i >= 0) return Choices[static_cast<std::size_t>(i)].name;
+	return id.substr(id.find(':') + 1);
+}
+
+std::string BuildOffering(std::string c) {
+	if (Choices.empty()) BuildChoices();
+	int y = ContentTop;
+	c += Gui::Text("OfferText", Left, y, Right - Left, 110,
+	               "Offer one of each rune. Each one bans what you choose beside it: a mod from the next game, a monster from the next zone. Take a rune back to lift its ban.",
+	               Gui::Style::SmallLabel);
+	y += 130;
+	if (CellsReady) Gui::ItemCells::Place(Gui::StashWindow::X + Left, Gui::StashWindow::Y + y);
+	const int pickX = Left + 300, arrow = 44, boxX = pickX + arrow + 12, boxW = Right - boxX - arrow - 12;
+	for (int i = 0; i < RuneCount; ++i) {
+		const int         top = y + i * Gui::ItemCells::Cell;
+		const std::string n   = "Offer" + std::to_string(i);
+		if (!CellsReady) c += Gui::Image(n + "Cell", Left, top, Gui::Kit::Row(Gui::ItemCells::Cell - 4, Gui::ItemCells::Cell - 4));
+		c += Gui::Text(n + "Rune", Left + 115, top, 180, Gui::ItemCells::Cell, std::string(RuneNames[i]) + " Rune", Gui::Style::Label);
+		c += Gui::ArrowButton(n + "Prev", pickX, top + (Gui::ItemCells::Cell - arrow) / 2, true, arrow, "prev" + std::to_string(i), "Previous choice");
+		const bool        held = OfferHeld[i] && !OfferTarget[i].empty();
+		const std::string what = (held ? "Banned: " : "") + ChoiceName(OfferTarget[i]);
+		c += Gui::Image(n + "Back", boxX, top + 10, Gui::Kit::Row(boxW, Gui::ItemCells::Cell - 20));
+		c += Gui::Text(n + "Choice", boxX + 20, top, boxW - 40, Gui::ItemCells::Cell, what, held ? Gui::Style::Label : Gui::Style::SmallLabel,
+		               held ? "Banned while the rune is offered" : "Offer the rune to ban it");
+		c += Gui::ArrowButton(n + "Next", boxX + boxW + 12, top + (Gui::ItemCells::Cell - arrow) / 2, false, arrow, "next" + std::to_string(i), "Next choice");
+	}
+	y += RuneCount * Gui::ItemCells::Cell + 20;
+	if (!CellsReady) c += Gui::Text("OfferNoCells", Left, y, Right - Left, 100, "The rune cells are off: no custom page for TZ Plus (see the log).", Gui::Style::SmallLabel);
+	return c;
+}
+
+std::string BuildRules(std::string c) {
+	const int   listTop = ContentTop, listRoom = PanelHeight - 150 - listTop;
+	const auto  lines   = RuleLines();
+	std::string inside;
+	int         total = 0;
+	for (std::size_t i = 0; i < lines.size(); ++i) {
+		const RuleLine& l      = lines[i];
+		const bool      smallF = l.style == Gui::Style::SmallLabel;
+		const int       width  = Right - Left - l.indent - 10;
+		const int       height = l.style == Gui::Style::Section ? LineHeight + 14 : WrappedHeight(l.text, width, smallF);
+		const int       top    = total - Scroll;
+		if (top + height > 0 && top < listRoom)
+			inside += Gui::Text("Rule" + std::to_string(i), Left + l.indent, top + (l.style == Gui::Style::Section && i ? 14 : 0), width, height - (l.style == Gui::Style::Section && i ? 14 : 0), l.text, l.style);
+		total += height;
+	}
+	Scroll = std::clamp(Scroll, 0, std::max(0, total - listRoom));
+	c += Gui::Clip("Rules", 0, listTop, BarLeft - 6, listRoom, inside);
+	c += Bar.Layout(listTop, listRoom, total, Scroll);
+	return c;
+}
+
 std::string BuildWindow(const std::string& panelName, const std::string& probe) {
 	std::string c = Gui::Probe(probe);
 	if (TalkMode.load()) return BuildTalk(panelName, c);
-
-	int y = Gui::StashWindow::InnerY + 12;
-	c += Gui::Text("GameTitle", Left, y, Right - Left, LineHeight, "This game", Gui::Style::Section);
-	y += LineHeight;
-	const auto lines = GameLines();
-	for (std::size_t i = 0; i < lines.size(); ++i, y += LineHeight)
-		c += Gui::Text("Game" + std::to_string(i), Left + 20, y, Right - Left - 20, LineHeight, lines[i],
-		               i == 0 || i + 1 == lines.size() ? Gui::Style::Label : Gui::Style::SmallLabel);
-	y += 20;
-
-	c += Gui::Text("SettingsTitle", Left, y, Right - Left, LineHeight, "Settings (from the next game)", Gui::Style::Section);
-	y += LineHeight;
-	const struct {
-		const char* key;
-		const char* label;
-		const char* tip;
-	} options[] {
-		{ "enabled", "TZ Plus", "Turns everything off when unchecked" },
-		{ "nightmare", "Nightmare: a whole act", "One act at a time, changing every 30 minutes. 1 to 2 mods, tier 1 to 2" },
-		{ "hell", "Hell: every level", "Up to level 99. 1 to 3 mods, tier 1 to 3" },
-		{ "show_mods", "Show the mods on the map", "Under \"Terrorized\" in the map's text" },
-	};
-	int o = 0;
-	for (const auto& option : options) {
-		const std::string n = "Option" + std::to_string(o++);
-		c += Gui::Text(n + "Label", Left, y, Right - Left - 100, RowHeight, option.label, Gui::Style::Label, option.tip);
-		c += Gui::Check(n, Right - 60, y + 7, ValueOf(option.key) == "true", std::string("set:") + option.key, option.tip);
-		y += RowHeight;
-	}
-	y += 20;
-
-	c += Gui::Text("ModsTitle", Left, y, Right - Left, LineHeight, "Mods that can roll", Gui::Style::Section);
-	y += LineHeight;
-	const int listTop = y, listRoom = PanelHeight - 150 - listTop;
-	const int total   = ModCount * RowHeight;
-	Scroll            = std::clamp(Scroll, 0, std::max(0, total - listRoom));
-	std::string inside;
-	const int   first = Scroll / RowHeight, last = std::min(ModCount, (Scroll + listRoom) / RowHeight + 1);
-	for (int m = first; m < last; ++m) {
-		const int         top = m * RowHeight - Scroll;
-		const std::string n   = "Row" + std::to_string(m - first);
-		const Mod&        mod = Mods[m];
-		inside += Gui::Image(n + "Back", Left, top + 3, Gui::Kit::Row(Right - Left, RowHeight - 6));
-		inside += Gui::Text(n + "Name", Left + 30, top, Right - Left - 140, RowHeight, std::string(mod.name) + (mod.kind == Kind::Aura ? " aura" : ""), Gui::Style::Label);
-		inside += Gui::Check(n + "Check", Right - 74, top + 7, Config.allowed[m].load(), std::string("set:") + mod.key);
-	}
-	c += Gui::Clip("List", 0, listTop, BarLeft - 6, listRoom, inside);
-	c += Bar.Layout(listTop, listRoom, total, Scroll);
+	const std::vector<Gui::Tabs::Tab> tabs { { "scroll-unfurled", "Rules", "tab0" }, { "rune-stone", "Offering", "tab1" } };
+	c += Gui::Tabs::Bar("Tab", Left, TabTop, tabs, CurrentTab);
+	c += Gui::Text("TabName", Left + Gui::Tabs::Length(tabs.size()) + 30, TabTop, 500, 84, CurrentTab == 0 ? "Rules" : "Offering", Gui::Style::Section);
+	c = CurrentTab == 1 ? BuildOffering(c) : BuildRules(c);
 	return Gui::StashWindow::Layout(panelName, "TZ Plus", "close", c);
 }
 
+void LoadOfferings(const std::string& character);
+
 void CloseWindow() {
+	if (CellsReady) Gui::ItemCells::Show(false);
 	Window.Close();
 	WindowOpen = false;
 	Gui::LeftPanel::Closed();
@@ -2114,7 +2234,39 @@ void CloseWindow() {
 void WatchWindow() {
 	const bool open = Window.IsOpen();
 	WindowOpen      = open;
-	if (Gui::LeftPanel::Watch(open, Window.Busy())) CloseWindow();
+	if (Gui::LeftPanel::Watch(open, Window.Busy())) return CloseWindow();
+	if (!CellsReady) return;
+	if (InGame.load()) {
+		if (const std::string name = CharacterName(); !name.empty() && name != OfferCharacter) LoadOfferings(name);
+		Gui::ItemCells::Show(open && CurrentTab == 1 && !TalkMode.load());
+		Gui::ItemCells::Tick();
+	} else if (Gui::ItemCells::Shown()) Gui::ItemCells::Show(false);
+}
+
+void OnOfferChanged(int cell, bool held) {
+	if (cell < 0 || cell >= RuneCount) return;
+	OfferHeld[cell] = held;
+	Log(false, "offering: %s Rune %s (%s)", RuneNames[cell], held ? "offered" : "taken back", OfferTarget[cell].empty() ? "nothing chosen" : OfferTarget[cell].c_str());
+	ApplyBans();
+	SaveOfferings();
+	if (Window.IsOpen()) Window.Show();
+}
+
+void StepChoice(int cell, int step) {
+	if (cell < 0 || cell >= RuneCount) return;
+	if (Choices.empty()) BuildChoices();
+	if (Choices.empty()) return;
+	const int count = static_cast<int>(Choices.size());
+	int       at    = ChoiceIndex(OfferTarget[cell]);
+	for (int guard = 0; guard < count; ++guard) {
+		at = at < 0 ? (step > 0 ? 0 : count - 1) : (at + step + count) % count;
+		bool used = false; // one rune a choice
+		for (int i = 0; i < RuneCount; ++i) used = used || (i != cell && OfferTarget[i] == Choices[static_cast<std::size_t>(at)].id);
+		if (!used) break;
+	}
+	OfferTarget[cell] = Choices[static_cast<std::size_t>(at)].id;
+	ApplyBans();
+	SaveOfferings();
 }
 
 // ---- the fire barbarian (an Act 5 Combatant in Harrogath): a click on him opens his menu ----
@@ -2198,6 +2350,107 @@ void DumpBarbarians() noexcept {
 	}
 }
 
+// ---- Roran's menu: the game's own NPC menu (npcmenu.cpp), opened on the client alone ----
+// The menu table: a vector at D2R+0x2A48830 {rows, count, capacity} of 0x48-byte rows {+0 word monster, +4 dword lines
+// (with Cancel), +8 5 words string indexes, +0x18 5 callbacks bool(byte)}, built at start (D2R+0x360D0) with the allocator
+// D2R+0x12063C0() (vtable +8 alloc(size, align)). The menu: D2R+0x1147A0(byte) builds it for the NPC in the globals
+// (+0x2A4875C unit id, +0x2A48760 talking, +0x2A48764 monster), once UI state 8 (the NPC menu) is opened by D2R+0xCD7C0(8, 0).
+// Its lines' texts come from D2R+0x3E2B730(index), called at D2R+0x114CDC: ours answer our indexes. The game's Cancel
+// (D2R+0x112C30) ends the talk through D2R+0x10DE80, which tells the server (packet 0x30 at D2R+0x10E2AD): skipped for Roran,
+// the server never started a talk with him.
+constexpr std::uint64_t NpcMenusRva = 0x2A48830, NpcIdRva = 0x2A4875C, NpcTalkingRva = 0x2A48760, NpcClassRva = 0x2A48764, NpcMenuRva = 0x2A487B0;
+constexpr std::uint64_t NpcMenuBuildRva = 0x1147A0, UiOpenRva = 0xCD7C0, NpcCancelRva = 0x112C30, AllocatorRva = 0x12063C0;
+constexpr std::uint64_t MenuTextCall = 0x114CDC, StringByIndexRva = 0x3E2B730, NpcPacketCall = 0x10E2AD, SendPacket5Rva = 0xEC6E0;
+constexpr std::size_t   NpcMenuRow = 0x48;
+constexpr std::uint32_t RoranMenuClass = 534; // act5pow
+constexpr std::uint16_t TextPortal = 0xF7A0, TextRules = 0xF7A1;
+std::atomic<std::uint32_t> RoranUnitId { 0 }, RoranTalkId { 0 };
+bool                       MenuHooked = false;
+
+using MenuCallbackFn = bool (*)(std::uint8_t) noexcept;
+using SendPacket5Fn  = void (*)(std::uint8_t command, std::uint32_t value) noexcept;
+
+const char* HookMenuText(std::uint32_t index) noexcept {
+	if (index == TextPortal) return ZonePortalOpen.load() ? "Close the portal" : "Open a portal to a terror zone";
+	if (index == TextRules) return "Rules and offerings";
+	return At<const char* (*)(std::uint32_t) noexcept>(StringByIndexRva)(index);
+}
+
+void HookNpcPacket(std::uint8_t command, std::uint32_t value) noexcept {
+	if (command == 0x30 && value && value == RoranTalkId.load()) {
+		RoranTalkId = 0;
+		return Log(false, "Roran: menu closed (no server talk to end)");
+	}
+	At<SendPacket5Fn>(SendPacket5Rva)(command, value);
+}
+
+bool __cdecl RoranPortal(std::uint8_t a) noexcept {
+	const bool result = At<MenuCallbackFn>(NpcCancelRva)(a);
+	Gui::Commands::Post(ZonePortalOpen.load() ? "zone-close" : "zone-open");
+	return result;
+}
+
+bool __cdecl RoranRules(std::uint8_t a) noexcept {
+	const bool result = At<MenuCallbackFn>(NpcCancelRva)(a);
+	Gui::Commands::Post("toggle");
+	return result;
+}
+
+// Our row in the game's menu table (once: a copy of the table one row longer, the old one left as it is).
+bool RoranMenuRow() noexcept {
+	static int state = 0; // 1 done, -1 failed
+	if (state) return state > 0;
+	state    = -1;
+	auto* vec  = reinterpret_cast<std::uint8_t*>(Base + NpcMenusRva);
+	auto* rows = Field<std::uint8_t*>(vec, 0);
+	const auto count = Field<std::uint64_t>(vec, 8);
+	if (!rows || count == 0 || count > 200 || Field<std::uint64_t>(vec, 0x10) < count) return Log(true, "Roran: the game's NPC menu table is not as expected (%llu rows)", static_cast<unsigned long long>(count)), false;
+	const std::uint8_t* larzuk = nullptr;
+	for (std::uint64_t i = 0; i < count; ++i) {
+		const std::uint8_t* row = rows + i * NpcMenuRow;
+		if (Field<std::int16_t>(row, 0) == static_cast<std::int16_t>(RoranMenuClass)) return state = 1, true;
+		if (Field<std::int16_t>(row, 0) == 511) larzuk = row;
+	}
+	if (!larzuk) larzuk = rows;
+	using AllocFn = void* (*)(void* self, std::uint64_t size, std::uint64_t align) noexcept;
+	void* allocator = At<void* (*)() noexcept>(AllocatorRva)();
+	auto* fresh     = allocator ? static_cast<std::uint8_t*>((*reinterpret_cast<AllocFn* const*>(allocator))[1](allocator, (count + 1) * NpcMenuRow, 0x10)) : nullptr;
+	if (!fresh) return Log(true, "Roran: no memory for his menu row"), false;
+	std::memcpy(fresh, rows, count * NpcMenuRow);
+	std::uint8_t* row = fresh + count * NpcMenuRow;
+	std::memcpy(row, larzuk, NpcMenuRow);
+	SetField<std::int16_t>(row, 0, static_cast<std::int16_t>(RoranMenuClass));
+	SetField<std::uint32_t>(row, 4, 3); // 2 lines + Cancel
+	for (int i = 0; i < 5; ++i) SetField<std::uint16_t>(row, 8 + i * 2, 0), SetField<const void*>(row, 0x18 + i * 8, nullptr);
+	SetField<std::uint16_t>(row, 8, TextPortal), SetField<std::uint16_t>(row, 10, TextRules);
+	SetField<const void*>(row, 0x18, reinterpret_cast<const void*>(&RoranPortal));
+	SetField<const void*>(row, 0x20, reinterpret_cast<const void*>(&RoranRules));
+	SetField<std::uint8_t*>(vec, 0, fresh);
+	SetField<std::uint64_t>(vec, 0x10, count + 1);
+	SetField<std::uint64_t>(vec, 8, count + 1);
+	Log(false, "Roran: menu row added to the game's NPC menus (row %llu)", static_cast<unsigned long long>(count));
+	return state = 1, true;
+}
+
+// UI thread: the menu for Roran (unit id), as the game opens it when the server starts a talk.
+bool OpenRoranMenu(std::uint32_t id) noexcept {
+	if (!MenuHooked || !id || !RoranMenuRow()) return false;
+	if (Field<void*>(reinterpret_cast<void*>(Base + NpcMenuRva), 0)) return true; // a menu is up
+	if (Field<std::uint32_t>(reinterpret_cast<void*>(Base + NpcTalkingRva), 0)) return Log(true, "Roran: you are already talking to someone"), true;
+	SetField<std::uint32_t>(reinterpret_cast<void*>(Base + NpcIdRva), 0, id);
+	SetField<std::int16_t>(reinterpret_cast<void*>(Base + NpcClassRva), 0, static_cast<std::int16_t>(RoranMenuClass));
+	SetField<std::uint32_t>(reinterpret_cast<void*>(Base + NpcTalkingRva), 0, 1);
+	RoranTalkId = id;
+	if (!At<bool (*)(int, std::uint8_t) noexcept>(UiOpenRva)(8, 0)) {
+		SetField<std::uint32_t>(reinterpret_cast<void*>(Base + NpcTalkingRva), 0, 0), RoranTalkId = 0;
+		return Log(true, "Roran: the game would not open its NPC menu"), false;
+	}
+	At<void (*)(std::uint8_t) noexcept>(NpcMenuBuildRva)(0);
+	const bool open = Field<void*>(reinterpret_cast<void*>(Base + NpcMenuRva), 0) != nullptr;
+	Log(!open, "Roran: menu %s (unit %u)", open ? "opened" : "not built", id);
+	return open;
+}
+
 bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 	if (message != WM_LBUTTONDOWN || !InGame.load()) return false;
 	const int index = At<LocalIndexFn>(0x8B2D0)();
@@ -2211,7 +2464,8 @@ bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 	if (CurrentLevel.load() != 109 || !unit || Field<std::uint32_t>(unit, 0) != 1) return false;
 	const std::uint32_t cls = Field<std::uint32_t>(unit, 4);
 	if (cls != 534) return false; // act5pow: Roran Stronghammer
-	Gui::Commands::Post("talk");
+	RoranUnitId = Field<std::uint32_t>(unit, 8);
+	Gui::Commands::Post("roran");
 	return false; // the click goes on: you walk to him
 }
 
@@ -2248,19 +2502,21 @@ void ToggleWindow() {
 void OnWindowCommand(const std::string& command) {
 	if (command == "toggle") return ToggleWindow();
 	if (command == "talk") return OpenWindow(true);
+	if (command == "roran") {
+		if (OpenRoranMenu(RoranUnitId.load())) return;
+		return OpenWindow(true); // his old menu: the TZ Plus window
+	}
 	if (command == "zone-open" || command == "zone-close") {
-		if (command == "zone-open") PortalRequested = true;
+		if (command == "zone-open") ApplyBans(), PortalRequested = true; // the monster bans need the game's texts: resolved here
 		else CloseRequested = true;
-		return CloseWindow();
+		return Window.IsOpen() ? CloseWindow() : void();
 	}
 	if (!Window.IsOpen() && command != "close") return;
 	if (Bar.Handle(command)) return;
 	if (command == "close") return CloseWindow();
-	if (command.rfind("set:", 0) == 0) {
-		const std::string key = command.substr(4);
-		std::string       error;
-		if (ApplySetting(key, ValueOf(key) == "true" ? "false" : "true", error)) SaveConfig();
-	}
+	if (command == "tab0" || command == "tab1") CurrentTab = command[3] - '0', Scroll = 0;
+	else if (command.rfind("prev", 0) == 0 || command.rfind("next", 0) == 0) StepChoice(std::atoi(command.c_str() + 4), command[0] == 'n' ? 1 : -1);
+	if (CellsReady) Gui::ItemCells::Show(CurrentTab == 1 && !TalkMode.load());
 	Window.Show();
 }
 
@@ -2284,6 +2540,10 @@ void StartWindow(const D2RL::PluginContext* context) noexcept {
 	Window.Register(BuildWindow, "TZPlus", 16);
 	Bar.OnScroll([](int scroll) { Scroll = scroll, Window.Show(); });
 	Gui::Commands::Listen(OnWindowCommand);
+	CellsReady = Gui::ItemCells::Register({ .id = "offering", .label = "TZ Plus offering",
+	                                        .codes = { RuneCodes, RuneCodes + RuneCount }, .vertical = true, .changed = OnOfferChanged,
+	                                        .problem = [](const char* what) { Log(true, "offering: %s", what); } });
+	LoadOfferings({});
 	if (Lifecycle) {
 		D2RL::Lifecycle::ListenerHandle                 handle {};
 		const D2RL::Lifecycle::DataTablesLoadedListener loaded { .structSize = sizeof(D2RL::Lifecycle::DataTablesLoadedListener), .callback = WindowDataLoaded };
@@ -2660,6 +2920,160 @@ void __cdecl OnTablesLoaded(const D2RL::PluginContext* context, const D2RL::Life
 		    static_cast<unsigned long long>(nm), b.pool.size());
 	}
 	if (base > 0) ZoneBase.store(base);
+}
+
+// ---- offerings: the choices, the bans, the saved state (Saved Games\Diablo II Resurrected\TZ Plus\<mod>\offerings.txt) ----
+using StringByIndexFn = const char* (*)(std::uint32_t index) noexcept; // the game's text of a string index (D2R+0x3E2B730)
+using LocalPlayerFn   = void* (*)(int index) noexcept;
+
+// A monster's name: its MonStats row's NameStr index (+0x36, as the client's unit name D2R+0x9A1B0 reads it).
+std::string MonsterName(std::int16_t monster) {
+	for (int bank = 1; bank <= 3; ++bank) {
+		const ZoneBank& b = Banks[bank];
+		if (!b.tables) continue;
+		const auto* stats = Field<std::uint8_t*>(b.tables, MonStatsVec);
+		const auto  total = Field<std::uint64_t>(b.tables, MonStatsVec + 8);
+		if (!stats || monster < 0 || static_cast<std::uint64_t>(monster) >= total) return {};
+		const char* text = At<StringByIndexFn>(0x3E2B730)(Field<std::uint16_t>(stats + monster * MonStatsRow, 0x36));
+		return text ? std::string(text) : std::string();
+	}
+	return {};
+}
+
+std::vector<std::pair<std::int16_t, std::string>> PoolNames() {
+	std::vector<std::pair<std::int16_t, std::string>> out;
+	for (int bank = 1; bank <= 3; ++bank)
+		for (const std::int16_t m : Banks[bank].pool)
+			if (std::none_of(out.begin(), out.end(), [m](const auto& e) { return e.first == m; }))
+				if (std::string name = MonsterName(m); !name.empty() && name.size() < 64) out.push_back({ m, std::move(name) });
+	return out;
+}
+
+void BuildChoices() {
+	Choices.clear();
+	for (const Mod& m : Mods) Choices.push_back({ std::string("mod:") + m.key, std::string("Mod: ") + m.name + (m.kind == Kind::Aura ? " aura" : "") });
+	std::vector<std::string> names;
+	for (const auto& [m, name] : PoolNames())
+		if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+	std::sort(names.begin(), names.end());
+	for (const auto& name : names) Choices.push_back({ "mon:" + name, name });
+	Log(false, "offering: %zu choices (%d mods, %zu monster names)", Choices.size(), ModCount, names.size());
+}
+
+bool MonstersResolved = false;
+
+void ApplyBans() {
+	bool mods[ModCount] {};
+	std::vector<std::string> names;
+	for (int i = 0; i < RuneCount; ++i) {
+		if (!OfferHeld[i] || OfferTarget[i].empty()) continue;
+		const std::string& t = OfferTarget[i];
+		if (t.rfind("mod:", 0) == 0) {
+			for (int m = 0; m < ModCount; ++m) mods[m] = mods[m] || t.compare(4, std::string::npos, Mods[m].key) == 0;
+		} else if (t.rfind("mon:", 0) == 0) names.push_back(t.substr(4));
+	}
+	for (int m = 0; m < ModCount; ++m) ModBanned[m] = mods[m];
+	std::vector<std::int16_t> monsters;
+	const bool                tables = Banks[1].tables || Banks[2].tables || Banks[3].tables;
+	if (tables && InGame.load()) { // the game's texts are there
+		if (!names.empty())
+			for (const auto& [m, name] : PoolNames())
+				if (std::find(names.begin(), names.end(), name) != names.end()) monsters.push_back(m);
+		MonstersResolved = true;
+	}
+	AcquireSRWLockExclusive(&BanLock);
+	if (MonstersResolved || names.empty()) BannedMonsters = std::move(monsters);
+	ReleaseSRWLockExclusive(&BanLock);
+	std::string text;
+	for (int i = 0; i < RuneCount; ++i)
+		if (OfferHeld[i] && !OfferTarget[i].empty()) text += (text.empty() ? "" : ", ") + OfferTarget[i];
+	Log(false, "offering: bans [%s], %zu monster classes", text.c_str(), BannedMonsters.size());
+}
+
+std::string CharacterName() {
+	void* player = At<LocalPlayerFn>(0x9A480)(At<LocalIndexFn>(0x8B2D0)());
+	const auto* data = player ? Field<const char*>(player, 0x10) : nullptr;
+	if (!data) return {};
+	char name[17] {};
+	std::memcpy(name, data, 16);
+	return name;
+}
+
+std::wstring OfferingsPath() {
+	static std::wstring path;
+	if (!path.empty()) return path;
+	std::wstring mod = L"base";
+	if (Context && Context->pluginConfigPath) {
+		const std::wstring config = Context->pluginConfigPath;
+		std::wstring       lower  = config;
+		for (auto& ch : lower) ch = static_cast<wchar_t>(towlower(ch));
+		if (const auto at = lower.rfind(L"\\mods\\"); at != std::wstring::npos)
+			if (const auto end = config.find_first_of(L"\\/", at + 6); end != std::wstring::npos && end > at + 6) mod = config.substr(at + 6, end - at - 6);
+	}
+	wchar_t profile[MAX_PATH] {};
+	if (!GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH)) return {};
+	std::wstring folder = std::wstring(profile) + L"\\Saved Games";
+	for (const std::wstring& part : { std::wstring(L"Diablo II Resurrected"), std::wstring(L"TZ Plus"), mod }) folder += L"\\" + part, (void)CreateDirectoryW(folder.c_str(), nullptr);
+	return path = folder + L"\\offerings.txt";
+}
+
+// The file: "last<TAB>name", then "name<TAB>cell<TAB>held<TAB>target" lines.
+struct SavedOffer {
+	std::string character, target;
+	int         cell;
+	bool        held;
+};
+
+std::vector<SavedOffer> ReadOfferings(std::string* last) {
+	std::vector<SavedOffer> out;
+	const std::wstring path = OfferingsPath();
+	FILE* f = path.empty() ? nullptr : _wfopen(path.c_str(), L"rb");
+	if (!f) return out;
+	char line[512];
+	while (std::fgets(line, sizeof(line), f)) {
+		std::string l = line;
+		while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+		std::vector<std::string> parts;
+		for (std::size_t at = 0;;) {
+			const auto tab = l.find('\t', at);
+			parts.push_back(l.substr(at, tab == std::string::npos ? std::string::npos : tab - at));
+			if (tab == std::string::npos) break;
+			at = tab + 1;
+		}
+		if (parts.size() == 2 && parts[0] == "last") {
+			if (last) *last = parts[1];
+		} else if (parts.size() == 4) out.push_back({ parts[0], parts[3], std::atoi(parts[1].c_str()), parts[2] == "1" });
+	}
+	std::fclose(f);
+	return out;
+}
+
+void SaveOfferings() {
+	if (OfferCharacter.empty()) return;
+	auto saved = ReadOfferings(nullptr);
+	saved.erase(std::remove_if(saved.begin(), saved.end(), [](const SavedOffer& o) { return o.character == OfferCharacter; }), saved.end());
+	for (int i = 0; i < RuneCount; ++i)
+		if (OfferHeld[i] || !OfferTarget[i].empty()) saved.push_back({ OfferCharacter, OfferTarget[i], i, OfferHeld[i] });
+	const std::wstring path = OfferingsPath();
+	FILE* f = path.empty() ? nullptr : _wfopen(path.c_str(), L"wb");
+	if (!f) return Log(true, "offering: could not write %ls", path.c_str());
+	std::fprintf(f, "last\t%s\n", OfferCharacter.c_str());
+	for (const auto& o : saved) std::fprintf(f, "%s\t%d\t%d\t%s\n", o.character.c_str(), o.cell, o.held ? 1 : 0, o.target.c_str());
+	std::fclose(f);
+}
+
+// A character's choices (empty: the last one saved, at load before any game).
+void LoadOfferings(const std::string& character) {
+	std::string last;
+	const auto  saved = ReadOfferings(&last);
+	OfferCharacter    = character.empty() ? last : character;
+	for (int i = 0; i < RuneCount; ++i) OfferTarget[i].clear(), OfferHeld[i] = false;
+	for (const auto& o : saved)
+		if (o.character == OfferCharacter && o.cell >= 0 && o.cell < RuneCount) OfferTarget[o.cell] = o.target, OfferHeld[o.cell] = o.held;
+	MonstersResolved = false;
+	Log(false, "offering: choices of \"%s\" loaded", OfferCharacter.c_str());
+	ApplyBans();
+	if (!character.empty()) SaveOfferings(); // "last" follows the character in game
 }
 
 // ---- opening a zone portal (console "tzplus portal" for now), on the game's thread ----
@@ -3784,6 +4198,9 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 	for (const std::uint64_t site : LabelCalls)
 		if (!PatchCall(site, LabelRva, reinterpret_cast<const void*>(&HookLabel)))
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
+	MenuHooked = PatchCall(MenuTextCall, StringByIndexRva, reinterpret_cast<const void*>(&HookMenuText)) &&
+	             PatchCall(NpcPacketCall, SendPacket5Rva, reinterpret_cast<const void*>(&HookNpcPacket));
+	if (!MenuHooked) Log(true, "Roran keeps the TZ Plus window as his menu: could not patch the game's NPC menu");
 	for (int i = 0; i < 2; ++i)
 		if (!PatchCall(RotationClearCalls[i], RotationClearRva, reinterpret_cast<const void*>(&HookRotationClear)) ||
 		    !PatchCall(RotationCheckCalls[i], RotationCheckRva, reinterpret_cast<const void*>(&HookRotationCheck)))
