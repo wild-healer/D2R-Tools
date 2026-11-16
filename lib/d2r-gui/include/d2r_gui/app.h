@@ -56,10 +56,17 @@
 //   List(rows, onClick)                 rows: icon, two lines, a value or button, a gear
 //   Cells(text)                         the window's ItemCells, a text beside each
 //   HostGrid(columns, rows)             the Player Page Host area's grid (window.host)
+//   Tiles(rows)                         rows of item tiles (any size in cells, a label
+//                                       above, left/right/middle clicks, hover; App::Reveal)
+//   Chart(slices, size, big, small)     a ring chart with text in it
+//   Squares(squares)                    square buttons with a ring around their icon
 //   Custom(height, fn)                  the plugin's own widgets in a row
 // Each takes .Tip(), .Note() (text under it), .Restart() (" *" and the
 // footer's restart line), .OnChange(fn), .When(fn: shown while true), and
-// .Remove(fn) (a remove button at the row's end).
+// .Remove(fn) (a remove button at the row's end). Field(...).Icon(sprite, fn)
+// puts an icon button before a field; App::PickIcon shows a grid of icons to
+// pick from. List rows can be a tree (indent, an open/close arrow, a check box
+// that can be partly ticked) and carry buttons (.confirm: a second click).
 //
 // window.overStash: opened while the stash is open, the window goes over it
 // (the stash stays open under it, as under the cube) and closes with it.
@@ -84,6 +91,7 @@
 #include "menus.h"
 #include "panel_pool.h"
 #include "scroll_bar.h"
+#include "stash_kit.h"
 #include "stash_window.h"
 #include "text_input.h"
 #include "widgets.h"
@@ -96,6 +104,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -136,8 +145,28 @@ auto Bound(G get, S set) {
 
 // ---- components ----
 
+// Where a Custom component draws: names start with `name`, the row is at
+// x, y (panel units, scrolled already) and `width` wide.
+struct Place {
+	std::string name;
+	int         x = 0, y = 0, width = 0, height = 0;
+};
+
+// A button at a row's right end: text (a text button) or a sprite.
+struct RowButton {
+	std::string text, sprite, command, tooltip;
+	bool        confirm = false; // a second click within 10 s sends it
+	int         width   = 0;     // a text button's width (default 160); a sprite's square (default 56)
+};
+
 struct Row {
 	std::string text, tooltip;                    // the name (and its tooltip)
+	int         indent   = 0;                     // tree depth (40 units a level)
+	int         expander = -1;                    // a tree node's arrow: -1 none, 0 closed, 1 open (sends expandCommand)
+	std::string expandCommand;
+	int         check    = -1;                    // a check box: -1 none, 0 off, 1 on, 2 partly (sends checkCommand)
+	std::string checkCommand, checkTip;
+	std::vector<RowButton> buttons;               // right to left, before the gear
 	std::string sub;                              // a smaller second line under it
 	std::string value;                            // text on the right
 	std::string icon, iconTip;                    // a sprite on the left, 40 square (Kit::Gem, an Icons::Sprite)
@@ -146,15 +175,42 @@ struct Row {
 	std::string command;                          // a click on the row sends it (else List's onClick)
 };
 
-// Where a Custom component draws: names start with `name`, the row is at
-// x, y (panel units, scrolled already) and `width` wide.
-struct Place {
+// An item tile on a Tiles page: `width` x `height` cells, its picture a
+// sprite (or `draw`), its label above it. Clicks: left through a button,
+// right and middle through the mouse hook (over the tile only), `hover`
+// when the mouse comes over it and leaves.
+struct Tile {
+	std::string                              id;      // the plugin's name for it (App::Reveal)
+	int                                      column = -1; // its first column (-1: after the previous tile)
+	int                                      width = 1, height = 1;
+	std::string                              sprite, label, tooltip;
+	bool                                     slot = true; // the stash's empty slot under it
+	std::function<std::string(const Place&)> draw; // instead of the sprite: its widgets
+	std::function<void()>                    click, rightClick, middleClick;
+	std::function<void(bool over)>           hover;
+};
+
+struct TileRow {
+	std::string       header; // a gold title over the row (none: empty)
+	std::vector<Tile> tiles;
+};
+
+// A part of a ring chart.
+struct Slice {
+	int         count = 0;
+	Rgb         color { 200, 170, 90 };
 	std::string name;
-	int         x = 0, y = 0, width = 0, height = 0;
+};
+
+// A square tile button with a ring chart around its icon (a stats page's categories).
+struct Square {
+	std::string           icon, tooltip, command; // command: to window.command (else click)
+	std::vector<Slice>    ring;
+	std::function<void()> click;
 };
 
 struct Item {
-	enum class Kind { Section, Text, Check, Choice, Number, Position, Table, Field, Value, Action, Adder, List, Cells, HostGrid, Custom };
+	enum class Kind { Section, Text, Check, Choice, Number, Position, Table, Field, Value, Action, Adder, List, Cells, HostGrid, Tiles, Chart, Squares, Custom };
 	Kind        kind = Kind::Text;
 	std::string label, tooltip, note, button, hint, value;
 	bool        restart = false, confirm = false, arrow = false, draft = false, clearable = false, filter = false;
@@ -182,6 +238,14 @@ struct Item {
 	int*                                     gridRows    = nullptr;
 	std::function<std::string(const Place&)> custom;
 	int                                      height = 0; // Custom
+	std::function<std::vector<TileRow>()>    tileRows;   // Tiles
+	int                                      cellSize = 98; // Tiles: a cell's size
+	std::vector<Slice>                       slices;     // Chart
+	int                                      size = 0;   // Chart: the ring's size; Squares: a square's
+	std::string                              big, small; // Chart: the text in the ring, under it
+	std::vector<Square>                      squares;    // Squares
+	std::string                              icon;       // Field: an icon button at its left (sends iconClick)
+	std::function<void()>                    iconClick;
 	std::function<void()>                    changed, click, reset, remove;
 	std::function<bool()>                    shown;
 
@@ -204,6 +268,7 @@ struct Item {
 	Item Arrow(bool on = true) const { auto c = *this; c.arrow = on; return c; }     // Action: the right arrow beside the label instead of a text button
 	Item Empty(std::string text) const { auto c = *this; c.empty = std::move(text); return c; }                           // List
 	Item Disabled(std::function<std::string(int, int)> fn) const { auto c = *this; c.disabled = std::move(fn); return c; } // Table
+	Item Icon(std::string sprite, std::function<void()> click) const { auto c = *this; c.icon = std::move(sprite), c.iconClick = std::move(click); return c; } // Field
 };
 
 inline Item Section(std::string title) { return { .kind = Item::Kind::Section, .label = std::move(title) }; }
@@ -238,6 +303,14 @@ inline Item Adder(std::string label, std::string count, std::function<void()> ad
 inline Item List(std::function<std::vector<Row>()> rows, std::function<void(int row)> pick = {}) { return { .kind = Item::Kind::List, .rows = std::move(rows), .pick = std::move(pick) }; }
 inline Item Cells(std::function<std::string(int cell)> text = {}) { return { .kind = Item::Kind::Cells, .cellText = std::move(text) }; }
 inline Item HostGrid(int* columns, int* rows) { return { .kind = Item::Kind::HostGrid, .gridColumns = columns, .gridRows = rows }; }
+// Rows of item tiles (a grail page); `cell` the cell's size.
+inline Item Tiles(std::function<std::vector<TileRow>()> rows, int cell = 98) { return { .kind = Item::Kind::Tiles, .tileRows = std::move(rows), .cellSize = cell }; }
+// A ring chart `size` across, `big` in it, `small` under that.
+inline Item Chart(std::vector<Slice> parts, int size, std::string big = {}, std::string small = {}) {
+	return { .kind = Item::Kind::Chart, .slices = std::move(parts), .size = size, .big = std::move(big), .small = std::move(small) };
+}
+// Square buttons with ring charts, in centred rows.
+inline Item Squares(std::vector<Square> squares, int size = 170) { return { .kind = Item::Kind::Squares, .size = size, .squares = std::move(squares) }; }
 inline Item Custom(int height, std::function<std::string(const Place&)> draw) { return { .kind = Item::Kind::Custom, .custom = std::move(draw), .height = height }; }
 
 // ---- structure ----
@@ -359,6 +432,20 @@ struct State {
 	bool                       noticeWarn {};
 	int                        armed      = -1;
 	ULONGLONG                  armedUntil = 0;
+	std::string                armedCommand; // a row button armed for its second click
+	struct Hit {
+		int left, top, right, bottom, item, row, tile;
+	};
+	std::mutex                 hitLock;
+	std::vector<Hit>           hits;      // the tiles on screen (panel units), for right and middle clicks and hovering
+	std::atomic<int>           hovered { -1 }; // index in hits
+	std::string                reveal;    // a tile to scroll into view at the next view
+	struct Picker {
+		std::vector<std::string> sprites, tips;
+		std::function<void(int)> pick;
+		std::string              title;
+	};
+	std::optional<Picker>      picker;
 	std::string                draft;    // a Draft field's text while typing
 	std::string                original; // a field's text when typing began
 };
@@ -450,6 +537,44 @@ inline int NoteLine() { return std::max(36, Font::LineHeight(false)); }
 inline int Lines(const std::string& text, int width) { return std::max(1, Font::WrappedLines(text, width, std::max(20, width / 17), false)); }
 inline int NoteHeight(const Item& item, int width) { return item.note.empty() ? 0 : Lines(item.note, width) * NoteLine(); }
 
+// Where a Tiles component's tiles go (y from its top), and its height.
+struct Placed {
+	int x, y, w, h, row, tile;
+};
+constexpr int TileHeader = 70, TileLabel = 44, TileGap = 24;
+
+inline std::vector<Placed> PlaceTiles(const std::vector<TileRow>& rows, int cell, int width, int& height) {
+	std::vector<Placed> out;
+	const int           columns = std::max(1, width / cell), left = (width - columns * cell) / 2;
+	int                 y       = 0;
+	for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
+		const auto& row      = rows[static_cast<std::size_t>(r)];
+		bool        labelled = false;
+		for (const auto& tile : row.tiles) labelled = labelled || !tile.label.empty();
+		if (!row.header.empty()) out.push_back({ left, y, columns * cell, TileHeader, r, -1 }), y += TileHeader;
+		const int label = labelled ? TileLabel : 0;
+		int       col = 0, line = 0;
+		for (int t = 0; t < static_cast<int>(row.tiles.size()); ++t) {
+			const auto& tile = row.tiles[static_cast<std::size_t>(t)];
+			const int   w = std::clamp(tile.width, 1, columns), h = std::max(1, tile.height);
+			if (tile.column >= 0) col = tile.column;
+			if (col + w > columns) col = 0, y += label + line * cell + TileGap / 2, line = 0; // the row goes on below
+			out.push_back({ left + col * cell, y + label, w * cell, h * cell, r, t });
+			col += w, line = std::max(line, h);
+		}
+		y += label + line * cell + TileGap;
+	}
+	height = y;
+	return out;
+}
+
+inline int TilesHeight(const Item& item, int width) {
+	if (!item.tileRows) return 0;
+	int height = 0;
+	(void)PlaceTiles(item.tileRows(), item.cellSize, width, height);
+	return height;
+}
+
 inline int HeightOf(const Item& item, int width) {
 	switch (item.kind) {
 	case Item::Kind::Section: return 100;
@@ -461,6 +586,12 @@ inline int HeightOf(const Item& item, int width) {
 	}
 	case Item::Kind::Cells: return Get().hasCells ? (Get().window.cells->vertical ? ItemCells::Count() * ItemCells::Cell : ItemCells::Cell) + 20 : 0;
 	case Item::Kind::HostGrid: return 0; // drawn outside the scrolled part
+	case Item::Kind::Tiles: return TilesHeight(item, width);
+	case Item::Kind::Chart: return item.size + (item.small.empty() ? 20 : 20);
+	case Item::Kind::Squares: {
+		const int count = static_cast<int>(item.squares.size()), per = std::max(1, (width + 36) / (item.size + 36));
+		return count ? ((count + per - 1) / per) * (item.size + 36) : 0;
+	}
 	case Item::Kind::Custom: return item.height;
 	default: return RowHeight + NoteHeight(item, width);
 	}
@@ -594,10 +725,15 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 	case Item::Kind::Field: {
 		const std::string key    = "a.f" + id;
 		const bool        typing = TextInput::Key() == key;
-		const int         w      = item.label.empty() ? end - a.left : std::min(600, end - a.left - 300);
+		const int         start  = item.icon.empty() ? a.left : a.left + 70; // an icon button first
+		const int         w      = item.label.empty() ? end - start : std::min(600, end - start - 300);
+		if (!item.icon.empty()) {
+			out += Button(n + "Ic", a.left, y + 7, StashKit::SlotButton(56, 56), { 0, 2, 1 }, "a.i" + id, "Change the icon", 56, 56);
+			out += Image(n + "Im", a.left + 8, y + 15, item.icon);
+		}
 		const int         right  = item.clearable ? end - 70 : end;
 		const std::string text   = typing && item.draft ? s.draft : item.text.Get();
-		out += Label(n + "L", item, a.left, y, end - w - a.left - 20);
+		out += Label(n + "L", item, start, y, end - w - start - 20);
 		out += TypedBox(n, key, end - w, y + 7, right - (end - w), BoxHeight, text, item.hint.empty() ? "(empty)" : item.hint,
 		                item.tooltip.empty() ? (item.draft ? "Click to type; Enter saves, Esc cancels" : "Click to type") : item.tooltip);
 		if (item.clearable && !text.empty()) out += RemoveButton(n + "C", end - 56, y + 9, 52, "a.e" + id, "Clear");
@@ -634,21 +770,44 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 			if (ry + ListRow < 0 || ry > room) continue; // outside the room: not drawn
 			const auto& row     = rows[static_cast<std::size_t>(r)];
 			const auto  rn      = n + "R" + std::to_string(r);
-			const int   gear    = row.gear.empty() ? 0 : 74, textX = a.left + (row.icon.empty() ? 30 : 92);
 			const bool  clicked = !row.command.empty() || item.pick;
+			int         right   = a.right; // the row's right end, taken by its buttons from the right
+			int         textX   = a.left + 30 + row.indent * 40;
 			out += Image(rn + "B", a.left, ry + 3, Kit::Row(width, ListRow - 6));
 			if (clicked) out += HitButton(rn + "H", a.left, ry + 3, width, ListRow - 6, !row.command.empty() ? row.command : "a.r" + id + ":" + std::to_string(r), row.tooltip);
-			if (!row.icon.empty()) out += Icon(rn + "I", a.left + 34, ry + (ListRow - 40) / 2, 40, row.icon, row.iconTip);
-			const int textW = a.right - gear - textX - (row.button.empty() && row.value.empty() ? 20 : 270);
-			const auto tip  = clicked ? std::string() : row.tooltip;
+			if (row.expander >= 0) out += ArrowButton(rn + "E", textX - 10, ry + (ListRow - 48) / 2, row.expander == 0, 48, row.expandCommand, row.expander ? "Close" : "Open"), textX += 50;
+			if (row.check >= 0) {
+				const Frames frames = row.check == 1 ? Frames { 4, 5, 7 } : row.check == 2 ? Frames { 6, 5, 7 } : Frames { 0, 1, 3 }; // partly: the greyed tick
+				out += Button(rn + "C", textX - 6, ry + (ListRow - 79) / 2, Kit::Native::CheckBox, frames, row.checkCommand, row.checkTip);
+				textX += 80;
+			}
+			if (!row.icon.empty()) out += Icon(rn + "I", textX, ry + (ListRow - 40) / 2, 40, row.icon, row.iconTip), textX += 58;
+			if (!row.gear.empty()) out += GearButton(rn + "G", right - 64 - 10, ry + (ListRow - 64) / 2, 64, row.gear, row.gearTip), right -= 74;
+			for (int b = 0; b < static_cast<int>(row.buttons.size()); ++b) {
+				const auto&       button = row.buttons[static_cast<std::size_t>(b)];
+				const std::string cmd    = "a.w" + id + ":" + std::to_string(r) + ":" + std::to_string(b);
+				const bool        armed  = button.confirm && s.armedCommand == cmd && GetTickCount64() < s.armedUntil;
+				if (!button.sprite.empty()) {
+					const int size = button.width > 0 ? button.width : 56;
+					out += Button(rn + "W" + std::to_string(b), right - size - 6, ry + (ListRow - size) / 2, button.sprite, { 0, 1, 3 }, cmd, armed ? "Click again to confirm" : button.tooltip, size, size);
+					right -= size + 8;
+				} else {
+					const int bw = button.width > 0 ? button.width : 160;
+					out += TextButton(rn + "W" + std::to_string(b), right - bw - 6, ry + (ListRow - BoxHeight) / 2, bw, BoxHeight, armed ? "Sure?" : button.text, cmd,
+					                  armed ? "Click again to confirm" : button.tooltip, armed ? "$FontColorLightRed" : "$FontColorLightGold");
+					right -= bw + 8;
+				}
+			}
+			const bool side  = !row.button.empty() || !row.value.empty();
+			const int  textW = right - textX - (side ? 250 : 20);
+			const auto tip   = clicked ? std::string() : row.tooltip;
 			if (row.sub.empty()) out += D2RGui::Text(rn + "T", textX, ry, textW, ListRow, row.text, Style::LabelOneLine, tip);
 			else {
 				out += D2RGui::Text(rn + "T", textX, ry + 4, textW, 40, row.text, Style::LabelOneLine, tip);
 				out += D2RGui::Text(rn + "S", textX, ry + 40, textW, 30, row.sub, Style::SmallLeft);
 			}
-			if (!row.button.empty()) out += TextButton(rn + "U", a.right - gear - 250, ry + (ListRow - BoxHeight) / 2, 240, BoxHeight, row.button, row.buttonCommand, row.buttonTip);
-			else if (!row.value.empty()) out += D2RGui::Text(rn + "V", a.right - gear - 250, ry, 230, ListRow, row.value, Style::SmallRight);
-			if (!row.gear.empty()) out += GearButton(rn + "G", a.right - 64 - 10, ry + (ListRow - 64) / 2, 64, row.gear, row.gearTip);
+			if (!row.button.empty()) out += TextButton(rn + "U", right - 250, ry + (ListRow - BoxHeight) / 2, 240, BoxHeight, row.button, row.buttonCommand, row.buttonTip);
+			else if (!row.value.empty()) out += D2RGui::Text(rn + "V", right - 250, ry, 230, ListRow, row.value, Style::SmallRight);
 		}
 		break;
 	}
@@ -664,6 +823,68 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 		break;
 	}
 	case Item::Kind::HostGrid: break; // Build draws it
+	case Item::Kind::Tiles: {
+		if (!item.tileRows) break;
+		const auto rows   = item.tileRows();
+		int        height = 0, k = 0;
+		for (const auto& p : PlaceTiles(rows, item.cellSize, width, height)) {
+			const int ty = y + p.y;
+			if (ty + p.h < 0 || ty - TileLabel > room) continue; // outside the room: not drawn
+			const auto tn = n + "T" + std::to_string(k++);
+			const int  tx = a.left + p.x;
+			if (p.tile < 0) {
+				out += D2RGui::Text(tn, tx, ty, p.w, TileHeader - 14, rows[static_cast<std::size_t>(p.row)].header, Style::Axis);
+				out += Image(tn + "R", tx, ty + TileHeader - 14, StashKit::Divider(p.w));
+				continue;
+			}
+			const auto& tile = rows[static_cast<std::size_t>(p.row)].tiles[static_cast<std::size_t>(p.tile)];
+			if (tile.slot) out += Image(tn + "S", tx, ty, StashKit::Slot(p.w, p.h));
+			if (tile.draw) out += tile.draw({ .name = tn + "D", .x = tx, .y = ty, .width = p.w, .height = p.h });
+			else if (!tile.sprite.empty()) out += Image(tn + "A", tx, ty, tile.sprite);
+			if (!tile.label.empty()) out += D2RGui::Text(tn + "N", tx - 30, ty - TileLabel, p.w + 60, TileLabel, tile.label, Style::SmallValue);
+			const std::string cmd = tile.click ? "a.k" + id + ":" + std::to_string(p.row) + ":" + std::to_string(p.tile) : std::string();
+			out += QuietButton(tn + "H", tx, ty, p.w, p.h, cmd, tile.tooltip);
+			if (tile.rightClick || tile.middleClick || tile.hover) {
+				const int top = std::max(origin + ty, origin), bottom = std::min(origin + ty + p.h, origin + room);
+				if (bottom > top) {
+					std::lock_guard guard(s.hitLock);
+					s.hits.push_back({ tx, top, tx + p.w, bottom, i, p.row, p.tile });
+				}
+			}
+		}
+		break;
+	}
+	case Item::Kind::Chart: {
+		std::vector<std::pair<int, Rgb>> parts;
+		std::string                      tip;
+		for (const auto& slice : item.slices) {
+			parts.push_back({ slice.count, slice.color });
+			if (!slice.name.empty()) tip += (tip.empty() ? "" : "\n") + slice.name + ": " + std::to_string(slice.count);
+		}
+		const int x = a.left + (width - item.size) / 2;
+		out += Image(n, x, y, StashKit::Chart(parts, item.size, 58, false, Rgb { 50, 50, 50 }));
+		if (!item.big.empty()) out += D2RGui::Text(n + "B", x, y + item.size / 2 - 52, item.size, 60, item.big, Style::Name);
+		if (!item.small.empty()) out += D2RGui::Text(n + "S", x, y + item.size / 2 + 8, item.size, 44, item.small, Style::Note);
+		if (!tip.empty()) out += D2RGui::Text(n + "T", x, y, item.size, item.size, "", Style::Note, tip);
+		break;
+	}
+	case Item::Kind::Squares: {
+		const int size = item.size, gap = 36, count = static_cast<int>(item.squares.size()), per = std::max(1, (width + gap) / (size + gap));
+		for (int k = 0; k < count; ++k) {
+			const auto& square = item.squares[static_cast<std::size_t>(k)];
+			const int   row = k / per, col = k % per, inRow = std::min(per, count - row * per);
+			const int   sx = a.left + (width - (inRow * size + (inRow - 1) * gap)) / 2 + col * (size + gap), sy = y + row * (size + gap);
+			const auto  qn = n + "Q" + std::to_string(k);
+			out += Button(qn, sx, sy, StashKit::SlotButton(size, size), { 0, 2, 1 }, !square.command.empty() ? square.command : "a.q" + id + ":" + std::to_string(k), square.tooltip, size, size);
+			if (!square.ring.empty()) {
+				std::vector<std::pair<int, Rgb>> parts;
+				for (const auto& slice : square.ring) parts.push_back({ slice.count, slice.color });
+				out += Image(qn + "R", sx + 9, sy + 9, StashKit::Chart(parts, size - 18, 62, true, Rgb { 50, 50, 50 }));
+			}
+			if (!square.icon.empty()) out += Image(qn + "I", sx + (size - 70) / 2, sy + (size - 70) / 2, square.icon);
+		}
+		break;
+	}
 	case Item::Kind::Custom:
 		if (item.custom) out += item.custom({ .name = n, .x = a.left, .y = y, .width = width, .height = item.height });
 		break;
@@ -736,6 +957,10 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 		fixed += s.nav.Layout(look);
 	}
 	s.cellsWanted = false;
+	{
+		std::lock_guard guard(s.hitLock);
+		s.hits.clear();
+	}
 	a.top         = DrawFixed(v.header, HeaderBase, a.top, a, fixed);
 	// the footer from the bottom: the notice line, its components over it
 	const std::string notice = !s.notice.empty() ? s.notice : (AnyRestart(v) ? s.window.restartNote : std::string());
@@ -751,6 +976,20 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 	for (const auto& item : v.content)
 		if (Visible(item)) total += HeightOf(item, width);
 	int& scroll = Scroll();
+	if (!s.reveal.empty()) { // App::Reveal: the tile a third of the way down
+		int at = 0;
+		for (const auto& item : v.content) {
+			if (!Visible(item)) continue;
+			if (item.kind == Item::Kind::Tiles && item.tileRows) {
+				const auto rows   = item.tileRows();
+				int        height = 0;
+				for (const auto& p : PlaceTiles(rows, item.cellSize, width, height))
+					if (p.tile >= 0 && rows[static_cast<std::size_t>(p.row)].tiles[static_cast<std::size_t>(p.tile)].id == s.reveal) scroll = at + p.y - room / 3, s.reveal.clear();
+			}
+			at += HeightOf(item, width);
+		}
+		s.reveal.clear();
+	}
 	scroll      = std::clamp(scroll, 0, std::max(0, total - room));
 	std::string inside;
 	int         y = 0;
@@ -787,6 +1026,21 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 			const int height = static_cast<int>(choices.size()) * LineHeight;
 			const int ly     = s.dropY + BoxHeight + height > PanelH - 40 ? s.dropY - height : s.dropY + BoxHeight;
 			c += DropDown::List("Drop", s.dropX, ly, s.dropW, LineHeight, choices, cur, pick, "a.dclose", PanelW, PanelH);
+		}
+	}
+	// the icon picker, over everything
+	if (s.picker) {
+		const int count = static_cast<int>(s.picker->sprites.size()), per = 6, size = 84, gap = 14;
+		const int rowsN = (count + per - 1) / per, w = per * (size + gap) + gap + 40, h = rowsN * (size + gap) + gap + 110;
+		const int px = (PanelW - w) / 2, py = std::max(200, (PanelH - h) / 2);
+		c += HitButton("PickCatch", 0, 0, PanelW, PanelH, "a.ipx");
+		c += Image("PickBack", px, py, Kit::Box(w, h));
+		c += D2RGui::Text("PickTitle", px, py + 10, w, 70, s.picker->title.empty() ? "Pick an icon" : s.picker->title, Style::Axis);
+		for (int k = 0; k < count; ++k) {
+			const int x = px + 20 + gap + (k % per) * (size + gap), y = py + 90 + (k / per) * (size + gap);
+			c += Button("Pick" + std::to_string(k), x, y, StashKit::SlotButton(size, size), { 0, 2, 1 }, "a.ip" + std::to_string(k),
+			            k < static_cast<int>(s.picker->tips.size()) ? s.picker->tips[static_cast<std::size_t>(k)] : std::string(), size, size);
+			c += Image("PickIcon" + std::to_string(k), x + 17, y + 17, s.picker->sprites[static_cast<std::size_t>(k)]);
 		}
 	}
 	const auto title = Title();
@@ -870,12 +1124,63 @@ inline void Wheel(int notches) {
 	Show();
 }
 
+// A tile's callback (UI thread), found again from its indices.
+inline void TileCall(int item, int row, int tile, char what) {
+	const View  v     = Current();
+	const Item* found = ItemAt(v, item);
+	if (!found || found->kind != Item::Kind::Tiles || !found->tileRows) return;
+	const auto rows = found->tileRows();
+	if (row < 0 || row >= static_cast<int>(rows.size()) || tile < 0 || tile >= static_cast<int>(rows[static_cast<std::size_t>(row)].tiles.size())) return;
+	const auto& t = rows[static_cast<std::size_t>(row)].tiles[static_cast<std::size_t>(tile)];
+	if (what == 'r' && t.rightClick) t.rightClick();
+	else if (what == 'm' && t.middleClick) t.middleClick();
+	else if ((what == 'h' || what == 'l') && t.hover) t.hover(what == 'h');
+	else return;
+	if (Get().open && what != 'h' && what != 'l') Show(); // a hover shows nothing new by itself (App::Refresh when it should)
+}
+
+// Window thread: right and middle clicks on tiles, the mouse coming over a
+// tile and leaving it; then window.mouse.
+inline bool Mouse(UINT message, WPARAM wParam, LPARAM lParam) {
+	auto& s = Get();
+	if (s.window.mouse && s.window.mouse(message, wParam, lParam)) return true;
+	if (!s.open || (message != WM_MOUSEMOVE && message != WM_RBUTTONDOWN && message != WM_RBUTTONUP && message != WM_MBUTTONDOWN && message != WM_MBUTTONUP)) return false;
+	const double scale = WindowHook::UiScale();
+	if (scale <= 0) return false;
+	const auto [ox, oy] = WindowHook::LeftAnchorOffset(StashWindow::X, StashWindow::Y);
+	const int  x = static_cast<int>((static_cast<short>(LOWORD(lParam)) - ox) / scale), y = static_cast<int>((static_cast<short>(HIWORD(lParam)) - oy) / scale);
+	int        at = -1;
+	State::Hit hit {};
+	{
+		std::lock_guard guard(s.hitLock);
+		for (int k = 0; k < static_cast<int>(s.hits.size()); ++k)
+			if (const auto& h = s.hits[static_cast<std::size_t>(k)]; x >= h.left && x < h.right && y >= h.top && y < h.bottom) at = k, hit = h;
+	}
+	if (message == WM_MOUSEMOVE) {
+		const int was = s.hovered.exchange(at);
+		if (was == at) return false;
+		State::Hit old {};
+		bool       hadOld = false;
+		{
+			std::lock_guard guard(s.hitLock);
+			if (was >= 0 && was < static_cast<int>(s.hits.size())) old = s.hits[static_cast<std::size_t>(was)], hadOld = true;
+		}
+		if (hadOld) RunOnUi([old] { TileCall(old.item, old.row, old.tile, 'l'); });
+		if (at >= 0) RunOnUi([hit] { TileCall(hit.item, hit.row, hit.tile, 'h'); });
+		return false;
+	}
+	if (at < 0) return false;
+	if (message == WM_RBUTTONUP) RunOnUi([hit] { TileCall(hit.item, hit.row, hit.tile, 'r'); });
+	if (message == WM_MBUTTONUP) RunOnUi([hit] { TileCall(hit.item, hit.row, hit.tile, 'm'); });
+	return true; // kept from the game (no skill cast over the window)
+}
+
 // The mouse hook (wheel, scroll bar drag, clicks off a text box, window.mouse). UI thread, once.
 inline void Hook() {
 	auto& s = Get();
 	if (s.hooked || Hosted()) return;
 	s.hooked = true;
-	WindowHook::Start({ .active = [] { return Get().open.load(); }, .wheel = Wheel, .extra = s.window.mouse });
+	WindowHook::Start({ .active = [] { return Get().open.load(); }, .wheel = Wheel, .extra = Mouse });
 	s.bar->Attach();
 }
 
@@ -914,8 +1219,8 @@ inline void Tick() {
 		else if (s.onOver && (s.stashClosing.exchange(false) || !Hud::StashShown())) Close(); // the stash closed: the window with it
 		else if (!Hosted() && !s.onOver && LeftPanel::Watch(Pool().IsOpen(), Pool().Busy())) Close();
 	}
-	if (s.armed >= 0 && GetTickCount64() >= s.armedUntil) {
-		s.armed = -1;
+	if ((s.armed >= 0 || !s.armedCommand.empty()) && GetTickCount64() >= s.armedUntil) {
+		s.armed = -1, s.armedCommand.clear();
 		if (s.open) Show();
 	}
 	if (s.hasCells) ItemCells::Tick();
@@ -971,6 +1276,15 @@ inline void OnCommand(const std::string& command) {
 		Leave();
 		return Show();
 	}
+	if (command == "a.ipx") return s.picker.reset(), Show();
+	if (command.rfind("a.ip", 0) == 0 && s.picker) {
+		int        k    = 0;
+		const auto pick = s.picker->pick;
+		const bool ok   = ParseInt(command.substr(4), k);
+		s.picker.reset();
+		if (ok && pick) pick(k);
+		return Show();
+	}
 	const View v = Current();
 	if (command == "a.dclose") {
 		s.drop = -1;
@@ -1003,6 +1317,12 @@ inline void OnCommand(const std::string& command) {
 	const auto rest = command.substr(3 + std::to_string(i).size());
 	if (TextInput::Active() && TextInput::Key() != "a.lf") TextInput::Stop();
 	if (kind != 'b') s.armed = -1;
+	if (kind != 'w') s.armedCommand.clear();
+	// "<row>:<n>" after the component's index
+	const auto two = [&rest](int& first, int& second) {
+		const auto colon = rest.find(':', 1);
+		return rest.size() > 1 && colon != std::string::npos && ParseInt(rest.substr(1), first) && ParseInt(rest.substr(colon + 1), second);
+	};
 	switch (kind) {
 	case 'c':
 		if (item.flag) Took(item, item.flag.Set(!item.flag.Get()));
@@ -1069,6 +1389,37 @@ inline void OnCommand(const std::string& command) {
 		if (item.pick && rest.size() > 1 && ParseInt(rest.substr(1), r)) item.pick(r);
 		break;
 	}
+	case 'w': { // a row's button
+		int r = 0, b = 0;
+		if (!item.rows || !two(r, b)) break;
+		const auto rows = item.rows();
+		if (r >= static_cast<int>(rows.size()) || b >= static_cast<int>(rows[static_cast<std::size_t>(r)].buttons.size())) break;
+		const auto& button = rows[static_cast<std::size_t>(r)].buttons[static_cast<std::size_t>(b)];
+		if (button.confirm && !(s.armedCommand == command && GetTickCount64() < s.armedUntil)) {
+			s.armedCommand = command, s.armedUntil = GetTickCount64() + 10000;
+			break;
+		}
+		s.armedCommand.clear();
+		if (!button.command.empty() && s.window.command) s.window.command(button.command);
+		break;
+	}
+	case 'k': { // a tile
+		int r = 0, t = 0;
+		if (!item.tileRows || !two(r, t)) break;
+		const auto rows = item.tileRows();
+		if (r < static_cast<int>(rows.size()) && t < static_cast<int>(rows[static_cast<std::size_t>(r)].tiles.size()))
+			if (const auto& click = rows[static_cast<std::size_t>(r)].tiles[static_cast<std::size_t>(t)].click) click();
+		break;
+	}
+	case 'q': { // a square
+		int k = 0;
+		if (rest.size() > 1 && ParseInt(rest.substr(1), k) && k < static_cast<int>(item.squares.size()))
+			if (const auto& click = item.squares[static_cast<std::size_t>(k)].click) click();
+		break;
+	}
+	case 'i':
+		if (item.iconClick) item.iconClick();
+		break;
 	default: return;
 	}
 	Show();
@@ -1151,6 +1502,7 @@ inline bool Start(const D2RL::PluginContext* context, const char* pluginId, Wind
 	Commands::Watch(OnUiMessage);
 	Commands::Listen(OnCommand);
 	if (s.window.cells) s.hasCells = ItemCells::Register(*s.window.cells);
+	if (s.window.inventory && !RegisterSprite("mold", { MoldPicture() })) Log(true, "d2r-gui: the inventory button's mold could not be registered");
 	if (s.window.inventory)
 		s.hasButton = s.button.Register("OpenButton", { .buttonSprite = s.window.inventory->sprite, .tooltip = s.window.inventory->tooltip, .command = "a.toggle" }, s.window.inventory->x,
 		                                s.window.inventory->y);
@@ -1247,6 +1599,19 @@ inline void OpenOn(Page page) {
 inline void SetMenus(std::vector<Menu> menus) {
 	Detail::Get().window.menus = std::move(menus);
 	Detail::SetNav();
+	Refresh();
+}
+
+// UI thread: scrolls the Tiles page to tile `id` (Tile::id).
+inline void Reveal(std::string id) {
+	Detail::Get().reveal = std::move(id);
+	Refresh();
+}
+
+// UI thread: a grid of icons over the window (sprites about 50 square);
+// `pick` gets the one clicked. A click elsewhere closes it.
+inline void PickIcon(std::vector<std::string> sprites, std::function<void(int)> pick, std::vector<std::string> tips = {}, std::string title = {}) {
+	Detail::Get().picker = Detail::State::Picker { std::move(sprites), std::move(tips), std::move(pick), std::move(title) };
 	Refresh();
 }
 
