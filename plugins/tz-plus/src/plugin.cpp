@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.89";
+constexpr const char* PluginVersion = "0.0.90";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2510,12 +2510,19 @@ alignas(8) std::int32_t RoranRecord[7] { 534, 0, 0x40000, 0, 0, 0, -1 };
 
 std::atomic<int> NpcRecordLogs { 0 };
 
+// Diagnostics: each (caller, class) once, to compare a talk with Larzuk to a click on Roran.
+SRWLOCK                                        NpcSeenLock = SRWLOCK_INIT;
+std::vector<std::pair<std::uint64_t, int>>     NpcSeen;
+
 void* __cdecl HookNpcRecord(std::uint8_t, int monster) noexcept {
-	if (monster == static_cast<int>(RoranMenuClass)) {
-		if (NpcRecordLogs.fetch_add(1) < 40)
-			Log(false, "Roran: NPC record asked from D2R+0x%llX", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)) - Base));
-		return RoranRecord;
-	}
+	const auto caller = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)) - Base);
+	bool       fresh  = false;
+	AcquireSRWLockExclusive(&NpcSeenLock);
+	if (NpcSeen.size() < 200 && std::none_of(NpcSeen.begin(), NpcSeen.end(), [&](const auto& e) { return e.first == caller && e.second == monster; }))
+		NpcSeen.push_back({ caller, monster }), fresh = true;
+	ReleaseSRWLockExclusive(&NpcSeenLock);
+	if (fresh && NpcRecordLogs.fetch_add(1) < 200) Log(false, "NPC record of class %d asked from D2R+0x%llX", monster, static_cast<unsigned long long>(caller));
+	if (monster == static_cast<int>(RoranMenuClass)) return RoranRecord;
 	auto* table = reinterpret_cast<std::uint8_t*>(Base + NpcTableRva);
 	for (int i = 0; i < NpcTableRows; ++i)
 		if (Field<std::int16_t>(table + i * 28, 0) == monster) return table + i * 28;
