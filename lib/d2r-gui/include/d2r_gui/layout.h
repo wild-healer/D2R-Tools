@@ -22,6 +22,10 @@ namespace D2RGui {
 // its texts as they are (Services::plainText).
 inline std::string ShownText(const std::string& text) { return Api().plainText ? text : GameText(text); }
 
+// A tooltip's text: shown as the game shows text, in lines of about 46
+// characters, so a long tooltip stays inside the open panel and the screen.
+inline std::string TipText(const std::string& text) { return WrapLines(ShownText(text)); }
+
 // The game's text styles (layout units; colours and sizes from the profile).
 namespace Style {
 inline constexpr const char* Label =
@@ -66,7 +70,7 @@ inline std::string Children(const std::string& fragments) { return fragments.emp
 
 // A tooltip on any widget: added as its child (multi-line text kept).
 inline std::string TooltipChild(const std::string& tooltip) {
-	return R"(, "children": [{"type": "FocusableWidget", "name": "Tooltip", "fields": {"fitToParent": true, "tooltipString": )" + Json(ShownText(tooltip))
+	return R"(, "children": [{"type": "FocusableWidget", "name": "Tooltip", "fields": {"fitToParent": true, "tooltipString": )" + Json(TipText(tooltip))
 	     + R"(, "tooltipStyle": {"fontStyle": {"options": {"newlineHandling": "standard"}}}}}])";
 }
 
@@ -102,7 +106,7 @@ inline std::string Button(const std::string& name, int x, int y, const std::stri
 	char head[160] {};
 	std::snprintf(head, sizeof(head), R"(, "normalFrame": %d, "pressedFrame": %d, "hoveredFrame": %d, "sound": "%s")", frames.normal, frames.pressed, frames.hovered, sound);
 	std::string out = R"(, {"type": "ButtonWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height) + R"(, "filename": ")" + file + "\"" + head;
-	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(ShownText(tooltip));
+	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(TipText(tooltip));
 	if (!command.empty()) out += R"(, "onClickMessage": )" + Command(command);
 	return out + "}}";
 }
@@ -113,7 +117,7 @@ inline std::string TextButton(const std::string& name, int x, int y, int width, 
 	std::string out = R"(, {"type": "ButtonWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height) + R"(, "filename": ")" + Kit::Button(width, height)
 	                + R"(", "normalFrame": 0, "hoveredFrame": 3, "pressedFrame": 1, "textString": )" + Json(ShownText(text)) + R"(, "textColor": ")" + color + R"(", "text/style": {"pointSize": )"
 	                + pointSize + R"(, "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "center", "v": "center"}})";
-	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(ShownText(tooltip));
+	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(TipText(tooltip));
 	return out + R"(, "sound": "cursor_button_click_hd", "onClickMessage": )" + Command(command) + "}}";
 }
 
@@ -121,7 +125,7 @@ inline std::string TextButton(const std::string& name, int x, int y, int width, 
 inline std::string HitButton(const std::string& name, int x, int y, int width, int height, const std::string& command, const std::string& tooltip = {}) {
 	std::string out = R"(, {"type": "ButtonWidget", "name": )" + Json(name) + R"(, "fields": {)" + Rect(x, y, width, height) + R"(, "filename": ")" + Kit::Hover()
 	                + R"(", "normalFrame": 0, "hoveredFrame": 1, "pressedFrame": 1)";
-	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(ShownText(tooltip));
+	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(TipText(tooltip));
 	if (!command.empty()) out += R"(, "sound": "cursor_menu_select_hd", "onClickMessage": )" + Command(command);
 	return out + "}}";
 }
@@ -253,7 +257,7 @@ inline std::string SpriteButton(const std::string& name, int x, int y, int width
 	if (!text.text.empty())
 		out += R"(, "textString": )" + Json(ShownText(text.text)) + R"(, "textColor": ")" + text.color + R"(", "text/style": {"pointSize": )" + std::to_string(text.size)
 		     + R"(, "dropShadow": "$DefaultDropShadow", "spacing": "$ReducedSpacing", "alignment": {"h": "center", "v": "center"}})";
-	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(ShownText(tooltip));
+	if (!tooltip.empty()) out += R"(, "tooltipString": )" + Json(TipText(tooltip));
 	out += extra;
 	if (!command.empty()) {
 		if (sound) out += std::string(R"(, "sound": ")") + sound + "\"";
