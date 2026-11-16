@@ -60,6 +60,8 @@
 //                                       above, left/right/middle clicks, hover; App::Reveal)
 //   Chart(slices, size, big, small)     a ring chart with text in it
 //   Squares(squares)                    square buttons with a ring around their icon
+//   Legend({sprite, word}...)           icons with a word each, in a line
+//   Buttons(left, fn, right, fn)        a text button at each end of a row
 //   Custom(height, fn)                  the plugin's own widgets in a row
 // Each takes .Tip(), .Note() (text under it), .Restart() (" *" and the
 // footer's restart line), .OnChange(fn), .When(fn: shown while true), and
@@ -168,7 +170,7 @@ struct Row {
 	std::string checkCommand, checkTip;
 	std::vector<RowButton> buttons;               // right to left, before the gear
 	std::string sub;                              // a smaller second line under it
-	std::string value;                            // text on the right
+	std::string value, valueTip;                  // text on the right, its tooltip
 	std::string icon, iconTip;                    // a sprite on the left, 40 square (Kit::Gem, an Icons::Sprite)
 	std::string button, buttonCommand, buttonTip; // a text button on the right (sends buttonCommand)
 	std::string gear, gearTip;                    // a gear button at the far right (sends `gear`)
@@ -210,10 +212,14 @@ struct Square {
 };
 
 struct Item {
-	enum class Kind { Section, Text, Check, Choice, Number, Position, Table, Field, Value, Action, Adder, List, Cells, HostGrid, Tiles, Chart, Squares, Custom };
+	enum class Kind { Section, Text, Check, Choice, Number, Position, Table, Field, Value, Action, Adder, List, Cells, HostGrid, Tiles, Chart, Squares, Legend, Buttons, Custom };
 	Kind        kind = Kind::Text;
 	std::string label, tooltip, note, button, hint, value;
-	bool        restart = false, confirm = false, arrow = false, draft = false, clearable = false, filter = false;
+	bool        restart = false, confirm = false, arrow = false, draft = false, clearable = false, filter = false, warn = false, above = false;
+	std::string id;                                // its name for App::Focus
+	std::vector<std::pair<std::string, std::string>> legend; // Legend: sprite and word
+	std::string button2;                           // Buttons: the right one (button: the left one)
+	std::function<void()>                          click2;
 
 	Bind<bool>                         flag;
 	Bind<int>                          index;
@@ -263,6 +269,9 @@ struct Item {
 	Item Remove(std::function<void()> fn) const { auto c = *this; c.remove = std::move(fn); return c; } // a remove button at the row's end
 	Item Draft(bool on = true) const { auto c = *this; c.draft = on; return c; }         // Field: Enter saves, Esc cancels (else every key saves, Esc puts the old text back)
 	Item Clearable(bool on = true) const { auto c = *this; c.clearable = on; return c; } // Field: a clear button while not empty
+	Item Warn(bool on = true) const { auto c = *this; c.warn = on; return c; }   // Text: in red
+	Item Above(bool on = true) const { auto c = *this; c.above = on; return c; } // its label on a line of its own above the control (also when it doesn't fit beside it)
+	Item Id(std::string name) const { auto c = *this; c.id = std::move(name); return c; } // App::Focus
 	Item Hint(std::string h) const { auto c = *this; c.hint = std::move(h); return c; }
 	Item Confirm(bool on = true) const { auto c = *this; c.confirm = on; return c; } // Action: a second click within 10 s runs it
 	Item Arrow(bool on = true) const { auto c = *this; c.arrow = on; return c; }     // Action: the right arrow beside the label instead of a text button
@@ -303,6 +312,14 @@ inline Item Adder(std::string label, std::string count, std::function<void()> ad
 inline Item List(std::function<std::vector<Row>()> rows, std::function<void(int row)> pick = {}) { return { .kind = Item::Kind::List, .rows = std::move(rows), .pick = std::move(pick) }; }
 inline Item Cells(std::function<std::string(int cell)> text = {}) { return { .kind = Item::Kind::Cells, .cellText = std::move(text) }; }
 inline Item HostGrid(int* columns, int* rows) { return { .kind = Item::Kind::HostGrid, .gridColumns = columns, .gridRows = rows }; }
+// Icons with a word each, in one centred line (a footer's legend).
+inline Item Legend(std::vector<std::pair<std::string, std::string>> parts) { return { .kind = Item::Kind::Legend, .legend = std::move(parts) }; }
+// Two text buttons in one row, one at the left and one at the right (empty text: none).
+inline Item Buttons(std::string left, std::function<void()> leftClick, std::string right, std::function<void()> rightClick) {
+	Item item { .kind = Item::Kind::Buttons, .button = std::move(left), .button2 = std::move(right), .click2 = std::move(rightClick) };
+	item.click = std::move(leftClick);
+	return item;
+}
 // Rows of item tiles (a grail page); `cell` the cell's size.
 inline Item Tiles(std::function<std::vector<TileRow>()> rows, int cell = 98) { return { .kind = Item::Kind::Tiles, .tileRows = std::move(rows), .cellSize = cell }; }
 // A ring chart `size` across, `big` in it, `small` under that.
@@ -325,6 +342,7 @@ struct Page {
 	Content           content;         // instead of items
 	Content           header, footer;  // fixed, above and under the scrolled part
 	std::string       backTip = "Back"; // a pushed page's back arrow
+	std::function<bool()> canLeave;     // a pushed page: false keeps it on Back (say why with App::Notice; a second Back can then return true)
 };
 
 struct Menu {
@@ -360,6 +378,7 @@ struct Window {
 	Content                           content;
 	Content                           header, footer; // on every page
 	std::string                       console;        // a console command that opens and closes it
+	std::function<bool(const D2RL::ConsoleCommandContext*)> onConsole; // called first on that command (any thread; false: the window stays as it is)
 	std::string                       keybind;        // a key binding's name in the Controls menu
 	std::string                       keyCategory;    // its group there (default: the title)
 	std::optional<InventoryLink>      inventory;      // a button on the inventory that opens it
@@ -440,6 +459,8 @@ struct State {
 	std::vector<Hit>           hits;      // the tiles on screen (panel units), for right and middle clicks and hovering
 	std::atomic<int>           hovered { -1 }; // index in hits
 	std::string                reveal;    // a tile to scroll into view at the next view
+	std::string                focus;     // a component (Item::id) to scroll into view and type into
+	std::string                focusKey;  // then the field to type into, once that view is built
 	struct Picker {
 		std::vector<std::string> sprites, tips;
 		std::function<void(int)> pick;
@@ -575,8 +596,13 @@ inline int TilesHeight(const Item& item, int width) {
 	return height;
 }
 
+inline bool AboveOf(const Item& item, int width);
+constexpr int AboveLine = 46;
+
 inline int HeightOf(const Item& item, int width) {
+	if (AboveOf(item, width)) return AboveLine + HeightOf([&] { auto c = item; c.label.clear(), c.restart = false; return c; }(), width);
 	switch (item.kind) {
+	case Item::Kind::Legend: return 60;
 	case Item::Kind::Section: return 100;
 	case Item::Kind::Text: return Lines(item.label, width) * NoteLine() + 16;
 	case Item::Kind::Table: return (item.label.empty() ? 0 : TableTitle) + TableHead + static_cast<int>(item.rowNames.size()) * TableLine + NoteHeight(item, width) + 8;
@@ -595,6 +621,29 @@ inline int HeightOf(const Item& item, int width) {
 	case Item::Kind::Custom: return item.height;
 	default: return RowHeight + NoteHeight(item, width);
 	}
+}
+
+// The room a row's label has beside its control.
+inline int LabelRoom(const Item& item, int width) {
+	const int w = item.remove ? width - 70 : width;
+	switch (item.kind) {
+	case Item::Kind::Check: return w - 80;
+	case Item::Kind::Choice: return w - std::min(520, w / 2 + 60) - 20;
+	case Item::Kind::Number: return w - 420 - (item.reset ? 70 : 0);
+	case Item::Kind::Field: return std::max(0, 300 - 20 - (item.icon.empty() ? 0 : 70));
+	case Item::Kind::Value: return w / 2;
+	case Item::Kind::Action: return w - (item.arrow ? 50 : 420) - 20;
+	case Item::Kind::Adder: return w - 400;
+	case Item::Kind::Position: return w - 2 * (32 + 56 + 96 + 56 + 14) - (item.reset ? 56 : 0) - 20;
+	default: return -1;
+	}
+}
+
+inline bool AboveOf(const Item& item, int width) {
+	if (item.label.empty()) return false;
+	const int room = LabelRoom(item, width);
+	if (room < 0) return false;
+	return item.above || Font::TextWidth(item.label, false) > room;
 }
 
 inline bool Visible(const Item& item) { return !item.shown || item.shown(); }
@@ -626,6 +675,9 @@ inline std::string Shown(const Item& item) {
 	return k >= 0 && k < static_cast<int>(item.entries.size()) ? item.entries[static_cast<std::size_t>(k)].text : std::string();
 }
 
+inline constexpr const char* WarnLeft =
+    R"({"fontColor": "$FontColorLightRed", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "top"}, "options": {"lineWrap": true, "newlineHandling": "standard"}})";
+
 inline std::string LabelText(const Item& item) { return item.restart && !item.label.empty() ? item.label + " *" : item.label; }
 
 // A row's label, small when it would not fit.
@@ -648,10 +700,31 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 	const int         width = a.right - a.left;
 	const int         end   = item.remove ? a.right - 70 : a.right; // a remove button takes the row's end
 	std::string       out;
+	if (AboveOf(item, width)) { // the label on its own line, the control under it
+		auto rest = item;
+		rest.label.clear(), rest.restart = false;
+		return D2RGui::Text(n + "A", a.left, y, width, AboveLine, LabelText(item), Style::SmallLeft, item.tooltip) + Draw(rest, i, y + AboveLine, origin, room, a);
+	}
 	if (item.remove) out += RemoveButton(n + "X", a.right - 52, y + 9, 52, "a.x" + id, "Remove");
 	switch (item.kind) {
 	case Item::Kind::Section: out += SectionTitle(n, a.left, y, width, item.label, item.tooltip); break;
-	case Item::Kind::Text: out += D2RGui::Text(n, a.left, y, width, HeightOf(item, width) - 8, item.label, Style::Comment, item.tooltip); break;
+	case Item::Kind::Text: out += D2RGui::Text(n, a.left, y, width, HeightOf(item, width) - 8, item.label, item.warn ? WarnLeft : Style::Comment, item.tooltip); break;
+	case Item::Kind::Legend: {
+		int total = 0;
+		for (const auto& [sprite, word] : item.legend) total += 50 + std::min(260, Font::TextWidth(word, false) + 40);
+		int x = a.left + std::max(0, (width - total) / 2), k = 0;
+		for (const auto& [sprite, word] : item.legend) {
+			const int w = std::min(260, Font::TextWidth(word, false) + 40);
+			out += Image(n + "I" + std::to_string(k), x, y + 10, sprite);
+			out += D2RGui::Text(n + "W" + std::to_string(k++), x + 50, y, w, 60, word, Style::SmallLeft);
+			x += 50 + w;
+		}
+		break;
+	}
+	case Item::Kind::Buttons:
+		if (!item.button.empty()) out += TextButton(n + "L", a.left, y + 7, 300, BoxHeight, item.button, "a.b" + id, item.tooltip);
+		if (!item.button2.empty()) out += TextButton(n + "R", a.right - 300, y + 7, 300, BoxHeight, item.button2, "a.y" + id, item.tooltip);
+		break;
 	case Item::Kind::Check:
 		out += Label(n + "L", item, a.left, y, end - a.left - 80);
 		out += D2RGui::Check(n, end - 60, y + 7, item.flag.Get(), "a.c" + id, item.tooltip);
@@ -807,7 +880,7 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 				out += D2RGui::Text(rn + "S", textX, ry + 40, textW, 30, row.sub, Style::SmallLeft);
 			}
 			if (!row.button.empty()) out += TextButton(rn + "U", right - 250, ry + (ListRow - BoxHeight) / 2, 240, BoxHeight, row.button, row.buttonCommand, row.buttonTip);
-			else if (!row.value.empty()) out += D2RGui::Text(rn + "V", right - 250, ry, 230, ListRow, row.value, Style::SmallRight);
+			else if (!row.value.empty()) out += D2RGui::Text(rn + "V", right - 250, ry, 230, ListRow, row.value, Style::SmallRight, row.valueTip);
 		}
 		break;
 	}
@@ -990,6 +1063,21 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 		}
 		s.reveal.clear();
 	}
+	if (!s.focus.empty()) { // App::Focus: the component in view, typing into it
+		int at = 0;
+		for (int k = 0; k < static_cast<int>(v.content.size()); ++k) {
+			const auto& item = v.content[static_cast<std::size_t>(k)];
+			if (!Visible(item)) continue;
+			const int h = HeightOf(item, width);
+			if (item.id == s.focus) {
+				if (at < scroll || at + h > scroll + room) scroll = at + h - room / 2;
+				if (item.kind == Item::Kind::Field && item.text) s.focusKey = "a.f" + std::to_string(k);
+				break;
+			}
+			at += h;
+		}
+		s.focus.clear();
+	}
 	scroll      = std::clamp(scroll, 0, std::max(0, total - room));
 	std::string inside;
 	int         y = 0;
@@ -1067,6 +1155,19 @@ inline void Show() {
 		return;
 	}
 	Pool().Show();
+}
+
+inline void Type(const std::string& key, const Item& item);
+
+// After a view: App::Focus's field starts typing.
+inline void TypeFocus() {
+	auto& s = Get();
+	if (s.focusKey.empty()) return;
+	const auto key = std::move(s.focusKey);
+	s.focusKey.clear();
+	int i = 0;
+	const View v = Current();
+	if (const Item* item = std::isdigit(static_cast<unsigned char>(key[3])) && (i = std::atoi(key.c_str() + 3), true) ? ItemAt(v, i) : nullptr; item && item->text) Type(key, *item);
 }
 
 inline void Notice(std::string text, bool warn) {
@@ -1272,6 +1373,7 @@ inline void OnCommand(const std::string& command) {
 	if (!s.open) return;
 	if (command == "a.close") return Close();
 	if (command == "a.back") {
+		if (!s.stack.empty() && s.stack.back().page.canLeave && !s.stack.back().page.canLeave()) return Show();
 		if (!s.stack.empty()) s.stack.pop_back();
 		Leave();
 		return Show();
@@ -1420,6 +1522,9 @@ inline void OnCommand(const std::string& command) {
 	case 'i':
 		if (item.iconClick) item.iconClick();
 		break;
+	case 'y':
+		if (item.click2) item.click2();
+		break;
 	default: return;
 	}
 	Show();
@@ -1474,6 +1579,7 @@ inline auto OnAction(const D2RL::PluginContext*, const D2RL::Input::ActionEvent*
 
 inline auto OnConsole(D2R::Game::Client*, const D2RL::ConsoleCommandContext* command, void*) noexcept -> D2RL::ConsoleCommandResult {
 	if (!command || !command->plugin) return D2RL::ConsoleCommandResult::Failed;
+	if (Get().window.onConsole && !Get().window.onConsole(command)) return D2RL::ConsoleCommandResult::Handled;
 	Commands::Post("a.toggle");
 	return D2RL::ConsoleCommandResult::Handled;
 }
@@ -1493,9 +1599,9 @@ inline bool Start(const D2RL::PluginContext* context, const char* pluginId, Wind
 	SetNav();
 	if (!Hosted()) {
 		if (!s.pool.Register(Build, "View", std::max(2, s.window.views))) return false;
-		s.pool.OnShown(SyncCells);
+		s.pool.OnShown([] { SyncCells(), TypeFocus(); });
 		if (s.window.overStash) {
-			if (s.over.Register(Build, "Over", 4)) s.over.OnShown(SyncCells);
+			if (s.over.Register(Build, "Over", 4)) s.over.OnShown([] { SyncCells(), TypeFocus(); });
 			else Log(true, "d2r-gui: no panels for the window over the stash; it closes the stash instead");
 		}
 	}
@@ -1599,6 +1705,19 @@ inline void OpenOn(Page page) {
 inline void SetMenus(std::vector<Menu> menus) {
 	Detail::Get().window.menus = std::move(menus);
 	Detail::SetNav();
+	Refresh();
+}
+
+// UI thread: scrolls to the component named `id` (Item::Id) and, for a
+// field, starts typing in it (after an Adder's new item, say).
+inline void Focus(std::string id) {
+	Detail::Get().focus = std::move(id);
+	Refresh();
+}
+
+// UI thread: the scrolled part to `y` (0: the top; a search typed, say).
+inline void ScrollTo(int y) {
+	Detail::Scroll() = std::max(0, y);
 	Refresh();
 }
 
