@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.91";
+constexpr const char* PluginVersion = "0.0.92";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2437,7 +2437,18 @@ bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 	const std::uint32_t cls = Field<std::uint32_t>(unit, 4);
 	if (cls != 534) return false; // act5pow: Roran Stronghammer
 	RoranUnitId = Field<std::uint32_t>(unit, 8);
-	if (!MenuHooked) Gui::Commands::Post("roran"); // no NPC: his click opens the window (else the game talks to him)
+	if (!MenuHooked) Gui::Commands::Post("roran"); // no NPC: his click opens the window
+	else {
+		// The client never asks the server to talk to him (its click on a monster picks an interaction from data he is not in):
+		// the talk request is sent here, as the client does for an NPC (packet 0x2F + unit id, D2R+0xFA809). The server checks
+		// range and the rest, then starts the talk and the client opens its NPC menu.
+		static ULONGLONG last = 0;
+		if (const ULONGLONG now = GetTickCount64(); now - last > 400) {
+			last = now;
+			At<SendPacket5Fn>(SendPacket5Rva)(0x2F, RoranUnitId.load());
+			if (TalkLogs < 40) ++TalkLogs, Log(false, "Roran: talk asked (unit %u)", RoranUnitId.load());
+		}
+	}
 	return false; // the click goes on: you walk to him
 }
 
