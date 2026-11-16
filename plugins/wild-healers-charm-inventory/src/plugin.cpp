@@ -35,7 +35,7 @@ namespace Comm = D2RL::PluginCommunication;
 namespace Gui  = D2RGui;
 
 constexpr const char* PluginId      = "wild-healers-charm-inventory";
-constexpr const char* PluginVersion = "1.1.2-dev-1";
+constexpr const char* PluginVersion = "1.1.2-dev-2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -148,7 +148,78 @@ bool IsLocalPlayer(void* unit) noexcept {
 	return id == localId;
 }
 
-std::int32_t HookCharm(void* item, void* unit) noexcept {
+// ---- diagnostic (1.1.2-dev-2): the charm check's answers where the game
+// adds or removes a charm's stats ----
+// The game adds a charm's stats when the check says yes as the charm arrives
+// (item add, call at exe+0x475102), takes them off when it says yes as the
+// charm leaves (removals, 0x46E931 and 0x46EAAB), and the server's refresh
+// (0x470D9A) attaches the charms that say yes. Each answer from those sites is
+// logged with the item, its page and cell; "unbalanced" marks a removal of
+// stats this log never saw added (or an add of stats already added). At most
+// 20 lines a second and 400 in all.
+constexpr std::uint64_t StatSites[] { 0x475102, 0x46E931, 0x46EAAB, 0x470D9A };
+constexpr const char*   StatSiteNames[] { "add", "remove", "remove", "refresh" };
+constexpr std::size_t   UnitClass = 0x04, UnitPath = 0x38, PathX = 0x10, PathY = 0x14;
+constexpr int           DiagMaxLines = 400, DiagPerSecond = 20, DiagItems = 256;
+struct DiagItem {
+	const void* item;
+	int         attached; // adds minus removals seen with a yes
+};
+SRWLOCK  DiagLock = SRWLOCK_INIT;
+DiagItem DiagTable[DiagItems] {};
+int      DiagLines = 0, DiagSecondLines = 0;
+ULONGLONG DiagSecond = 0;
+
+void Diagnose(void* item, void* unit, std::int32_t answer, const void* returnAddress) noexcept {
+	if (!Base || !item) return;
+	const auto rva  = reinterpret_cast<std::uintptr_t>(returnAddress) - Base;
+	int        site = -1;
+	for (int k = 0; k < 4; ++k)
+		if (rva >= StatSites[k] && rva <= StatSites[k] + 8) site = k;
+	if (site < 0) return;
+	const auto*   bytes = static_cast<const std::uint8_t*>(item);
+	const auto*   data  = *reinterpret_cast<const std::uint8_t* const*>(bytes + UnitData);
+	const auto*   path  = *reinterpret_cast<const std::uint8_t* const*>(bytes + UnitPath);
+	std::uint32_t id = 0, classId = 0, owner = 0;
+	std::memcpy(&id, bytes + UnitId, 4), std::memcpy(&classId, bytes + UnitClass, 4);
+	if (unit) std::memcpy(&owner, static_cast<const std::uint8_t*>(unit) + UnitId, 4);
+	const int page = data ? data[DataPage] : -1;
+	int       x = -1, y = -1;
+	if (path) std::memcpy(&x, path + PathX, 4), std::memcpy(&y, path + PathY, 4);
+	AcquireSRWLockExclusive(&DiagLock);
+	DiagItem* slot = nullptr;
+	for (auto& d : DiagTable)
+		if (d.item == item) slot = &d;
+	if (!slot)
+		for (auto& d : DiagTable)
+			if (!d.item) {
+				slot = &d, *slot = { item, 0 };
+				break;
+			}
+	const char* mark = "";
+	if (slot && site == 3) slot->attached = answer ? 1 : 0;
+	else if (slot && answer) {
+		if (site == 0) {
+			if (slot->attached > 0) mark = " UNBALANCED (added twice)";
+			slot->attached += 1;
+		} else {
+			if (slot->attached <= 0) mark = " UNBALANCED (removed, never added)";
+			slot->attached -= 1;
+		}
+	}
+	const ULONGLONG now = GetTickCount64() / 1000;
+	if (now != DiagSecond) DiagSecond = now, DiagSecondLines = 0;
+	const bool write = DiagLines < DiagMaxLines && DiagSecondLines < DiagPerSecond && (site != 3 || page == CustomPage);
+	if (write) ++DiagLines, ++DiagSecondLines;
+	const int lines = DiagLines;
+	ReleaseSRWLockExclusive(&DiagLock);
+	if (!write) return;
+	Log(*mark != 0, "diag: %s (exe+0x%llX) item %u class %u at %p of player %u%s: page %d cell %d,%d -> %s%s", StatSiteNames[site], static_cast<unsigned long long>(rva), id, classId, item, owner,
+	    IsLocalPlayer(unit) ? " (local)" : "", page, x, y, answer ? "counts" : "doesn't count", mark);
+	if (lines == DiagMaxLines) Log(false, "diag: %d lines logged, no more this session", DiagMaxLines);
+}
+
+std::int32_t DecideCharm(void* item, void* unit) noexcept {
 	const auto* data = item ? *reinterpret_cast<std::uint8_t* const*>(static_cast<const std::uint8_t*>(item) + UnitData) : nullptr;
 	if (data && data[DataPage] != CustomPage && Enabled.load(std::memory_order_relaxed) && !InventoryCharms.load(std::memory_order_relaxed) && IsLocalPlayer(unit)) return 0;
 	return NextCharm(item, unit);
@@ -187,11 +258,23 @@ void ModuleOf(const void* address, char* name, DWORD size) noexcept {
 std::uint64_t* Wrapped {};
 CharmFn        SlotCharm {};
 
-std::int32_t HookCharmAfterThunk(void* item, void* unit) noexcept {
+std::int32_t DecideCharmAfterThunk(void* item, void* unit) noexcept {
 	const auto* data = item ? *reinterpret_cast<std::uint8_t* const*>(static_cast<const std::uint8_t*>(item) + UnitData) : nullptr;
 	if (data && data[DataPage] != CustomPage && Enabled.load(std::memory_order_relaxed) && !InventoryCharms.load(std::memory_order_relaxed) && IsLocalPlayer(unit)) return 0;
 	if (data && data[DataPage] == CustomPage && SlotCharm && !SlotCharm(item, unit)) return 0;
 	return NextCharm(item, unit);
+}
+
+std::int32_t HookCharm(void* item, void* unit) noexcept {
+	const std::int32_t answer = DecideCharm(item, unit);
+	Diagnose(item, unit, answer, __builtin_return_address(0));
+	return answer;
+}
+
+std::int32_t HookCharmAfterThunk(void* item, void* unit) noexcept {
+	const std::int32_t answer = DecideCharmAfterThunk(item, unit);
+	Diagnose(item, unit, answer, __builtin_return_address(0));
+	return answer;
 }
 
 void WrapCharmSlot() noexcept {
@@ -250,6 +333,7 @@ void WrapCharmSlot() noexcept {
 	char next[MAX_PATH + 32] {};
 	ModuleOf(reinterpret_cast<const void*>(current), next, sizeof(next));
 	Log(false, "charm check wrapped (previous target %s): inventory charms give no bonus", next);
+	Log(false, "diag: 1.1.2-dev-2 logs the charm check where the game adds or removes charm stats (at most %d lines a second, %d in all)", DiagPerSecond, DiagMaxLines);
 }
 
 void UnwrapCharmSlot() noexcept {
