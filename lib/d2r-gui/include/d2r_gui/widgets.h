@@ -1,6 +1,9 @@
 // D2R GUI: composite controls built from layout.h pieces (the settings
 // controls of I Hate TOMLs and Grail On!).
 #pragma once
+#include <cstdlib>
+#include <cctype>
+#include <algorithm>
 #include "font.h"
 #include "kit.h"
 #include "layout.h"
@@ -57,6 +60,93 @@ inline std::string List(const std::string& name, int x, int y, int width, int li
 	std::string out = HitButton(name + "Catch", 0, 0, catchWidth, catchHeight, closeCommand);
 	for (int k = 0; k < static_cast<int>(choices.size()); ++k)
 		out += Line(name + "Item" + std::to_string(k), x, y + k * lineHeight, width, lineHeight, choices[static_cast<std::size_t>(k)], k == current, command + std::to_string(k));
+	return out;
+}
+
+// ---- a long list: scrolled, filtered, with section headers ----
+// For lists too long to show at once (a few hundred monsters): `visible`
+// lines from `first`, a scroll track at the right (a click on it jumps
+// there: "<stepCommand><i>"), the mouse wheel through Scroll::Wheel (route
+// WindowHook's wheel to it while the list is open), and optionally a filter
+// box on top (TypedBox with key `filterKey`: start TextInput on "type<key>",
+// keep the typed text and pass it as `filter`). Headers can't be picked and
+// show only when a line under them matches the filter.
+struct Entry {
+	std::string text;
+	bool        header = false;
+};
+
+// The entries shown with `filter` (case-insensitive part of the text), as indices.
+inline std::vector<int> Filtered(const std::vector<Entry>& entries, const std::string& filter) {
+	const auto lower = [](std::string text) {
+		for (auto& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return text;
+	};
+	const std::string want = lower(filter);
+	std::vector<int>  out;
+	int               header = -1;
+	for (int k = 0; k < static_cast<int>(entries.size()); ++k) {
+		const auto& entry = entries[static_cast<std::size_t>(k)];
+		if (entry.header) {
+			header = k;
+			continue;
+		}
+		if (!want.empty() && lower(entry.text).find(want) == std::string::npos) continue;
+		if (header >= 0) out.push_back(header), header = -1;
+		out.push_back(k);
+	}
+	return out;
+}
+
+// Where a scrolled list starts. Keep one per open list.
+struct Scroll {
+	int first = 0;
+	void Clamp(int lines, int visible) { first = std::clamp(first, 0, std::max(0, lines - visible)); }
+	void Wheel(int notches, int lines, int visible) { first += notches * 3, Clamp(lines, visible); }
+	// A click on the track ("<stepCommand><i>"): true when it was one.
+	bool Handle(const std::string& command, const std::string& stepCommand, int lines, int visible) {
+		if (command.rfind(stepCommand, 0) != 0 || command.size() == stepCommand.size() || !std::isdigit(static_cast<unsigned char>(command[stepCommand.size()]))) return false;
+		const int step = std::atoi(command.c_str() + stepCommand.size());
+		first          = visible > 1 ? step * std::max(0, lines - visible) / (visible - 1) : 0;
+		Clamp(lines, visible);
+		return true;
+	}
+};
+
+// The open list at x, y (under its box): a catcher over catchWidth x
+// catchHeight sending `closeCommand`, the filter box when `filterKey` is
+// given, then `visible` lines from `first` of the filtered entries; a line
+// sends "<command><index in entries>"; `current` (an index in entries) in gold.
+inline std::string ScrollList(const std::string& name, int x, int y, int width, int lineHeight, int visible, const std::vector<Entry>& entries, int current, const std::string& command,
+                              const std::string& closeCommand, int catchWidth, int catchHeight, int first, const std::string& filter = {}, const std::string& filterKey = {},
+                              const std::string& stepCommand = "liststep") {
+	std::string out = HitButton(name + "Catch", 0, 0, catchWidth, catchHeight, closeCommand);
+	if (!filterKey.empty()) {
+		out += TypedBox(name + "Filter", filterKey, x, y, width, lineHeight, filter, "Type to filter");
+		y += lineHeight;
+	}
+	const auto shown = Filtered(entries, filter);
+	const int  lines = static_cast<int>(shown.size());
+	visible          = std::max(1, visible);
+	first            = std::clamp(first, 0, std::max(0, lines - visible));
+	const int bar    = lines > visible ? 30 : 0;
+	const int rows   = std::min(visible, lines);
+	for (int r = 0; r < rows; ++r) {
+		const int   k     = shown[static_cast<std::size_t>(first + r)];
+		const auto& entry = entries[static_cast<std::size_t>(k)];
+		const auto  n     = name + "Line" + std::to_string(r);
+		if (entry.header)
+			out += Image(n + "Back", x, y + r * lineHeight, Kit::DropTile(width - bar, lineHeight)) + Text(n, x, y + r * lineHeight, width - bar, lineHeight, entry.text, Style::Axis);
+		else out += Line(n, x, y + r * lineHeight, width - bar, lineHeight, entry.text, k == current, command + std::to_string(k));
+	}
+	if (!rows) out += Image(name + "EmptyBack", x, y, Kit::DropTile(width, lineHeight)) + Text(name + "Empty", x, y, width, lineHeight, "Nothing matches", Style::Note);
+	if (bar) {
+		const int height = rows * lineHeight, thumb = std::max(40, height * visible / lines);
+		const int top    = y + (height - thumb) * first / std::max(1, lines - visible);
+		out += Image(name + "Track", x + width - bar, y, Kit::Track(bar, height));
+		out += Image(name + "Thumb", x + width - bar, top, Kit::Thumb(bar, thumb));
+		for (int r = 0; r < rows; ++r) out += HitButton(name + "Step" + std::to_string(r), x + width - bar, y + r * lineHeight, bar, lineHeight, stepCommand + std::to_string(r));
+	}
 	return out;
 }
 

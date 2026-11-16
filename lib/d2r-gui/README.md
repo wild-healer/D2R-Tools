@@ -25,9 +25,66 @@ x86_64-w64-mingw32-g++ -std=c++20 ... -I"$sdk/include" -I"$gui" src/plugin.cpp .
 
 The D2RLoader SDK is the same one the plugins use (PluginSDK 03a5af9).
 
-`plugins/d2r-gui-demo` is a small plugin built only from the library: a window
-with a search box, a check box, a drop-down, a number with arrows, a reset
-button and a long scrolling list. Console command `guidemo`.
+## The standard: declare the window, fill the data
+
+A plugin describes its window and the library does everything else. This is
+how every plugin integrates:
+
+```cpp
+#include <d2r_gui.h>
+#include <d2r_gui/icons.h>
+#include <d2r_gui/app.h>
+namespace App = D2RGui::App;
+
+bool ShowOdd = true; int Mode = 0, Count = 10; std::string Name;
+
+App::Window window {
+    .title = "My Plugin",
+    .menus = {
+        { .tab = {"scroll-unfurled", "Rules"}, .items = { App::Text("How it works...") } },
+        { .tab = {"cog", "Settings"}, .pages = {
+            { .tab = {"eyeball", "Display"}, .items = {
+                App::Section("Display"),
+                App::Check("Show odd rows", &ShowOdd).Tip("Shows or hides them"),
+                App::Choice("Mode", &Mode, {"Fast", "Safe"}),
+                App::Number("Count", &Count, 0, 99),
+                App::Field("Name", &Name, "Type a name") } } } } },
+    .console = "myplugin",
+    .keybind = "Open My Plugin",
+    .changed = [] { SaveSettings(); },
+};
+
+// D2RLoaderLoadPlugin:   App::Start(context, "my-plugin", std::move(window));
+// D2RLoaderUnloadPlugin: App::Stop();
+// data changed elsewhere: App::Refresh();
+```
+
+- **Frame**: `.frame = App::Frame::Stash` (default) or `App::Frame::Character`.
+- **Menus and pages**: a row of icon tabs for the menus, a row for the current
+  menu's pages. A menu without pages is a page. Each menu remembers its last page.
+  A window without menus takes `.items` (or `.content`) directly.
+- **Components**: `Section`, `Text`, `Check`, `Choice` (long lists over 12
+  entries, or `.Filter()`, scroll and get a filter box; `Entries` adds section
+  headers), `Number`, `Field`, `Action`, `List` (rows, clickable), `Cells`
+  (the window's `.cells`, item cells of item_cells.h), `Custom` (the plugin's
+  own widgets in a row). Each takes `.Tip()`, `.OnChange()`, `.When()`.
+- **Data**: components point at the plugin's variables. A page whose
+  components depend on the data gives `.content`, a function called at every view.
+- **Handled by the library**: the views (panel pool), clicks, typing, open
+  drop-downs, scrolling (bar, drag, wheel), the game's left-panel behaviour,
+  `Kit::Read` and `Font::Measure` once the tables load, the console command,
+  the key binding, an inventory button (`.inventory`), and a tick about 4 times
+  a second (`.tick`).
+- **Hooks for the rest**: `.command` (a Custom component's buttons), `.opened`,
+  `.loaded`, `.inGame`, `.mouse`. `App::Go(menu, page)`, `App::SetMenus`,
+  `App::Button()` (the inventory button).
+
+The parts below stay available for windows App can't describe, but a plugin
+asks this library for a missing component instead of building it.
+
+`plugins/d2r-gui-demo` is the example: its whole window is one `App::Window`
+(an About page, settings pages with each component, a long filtered list with
+headers, a searchable clickable list). Console command `guidemo`.
 
 ## Parts
 
@@ -61,6 +118,8 @@ button and a long scrolling list. Console command `guidemo`.
 | `icons.h` (opt-in) | 120 game-icons.net icons at any size and colour, as pictures or sprites ([preview](docs/icons.png), [credits](ICONS-CREDITS.txt)) | Grail On! |
 | `stash_window.h` (opt-in) | a window in the stash's look (frame, gold title, close button), as Charm Inventory's | Charm Inventory |
 | `tabs.h` (opt-in) | a row or column of icon tabs, as Grail On!'s menus | Grail On! |
+| `menus.h` (opt-in) | a window's menus and pages as rows of icon tabs, each menu remembering its page | Grail On! |
+| `app.h` (opt-in) | the declared window: frame, menus, pages and components bound to the plugin's data | new |
 | `item_cells.h` (opt-in) | single item cells that each take one item code (an offering), on Player Page Host's page or the plugin's own | new |
 | `page_host_api.h` | Player Page Host's client header (used by item_cells.h) | Player Page Host |
 

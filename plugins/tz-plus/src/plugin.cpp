@@ -56,15 +56,15 @@
 
 #include <d2r_gui.h>
 #include <d2r_gui/stash_window.h>
-#include <d2r_gui/tabs.h>
-#include <d2r_gui/item_cells.h>
+#include <d2r_gui/icons.h>
+#include <d2r_gui/app.h>
 
 #include "i_hate_tomls_client.h"
 
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.75";
+constexpr const char* PluginVersion = "0.0.76";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1723,10 +1723,9 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 	if (!D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) return;
 	switch (event->kind) {
 	case EventKind::GameJoined: InGame = true, CurrentLevel = -1; break;
-	case EventKind::LocalPlayerReady: D2RGui::LeftPanel::InGame(true), StartWindowHook(); break;
+	case EventKind::LocalPlayerReady: StartWindowHook(); break;
 	case EventKind::GameLeft: {
 		InGame = false, CurrentLevel = -1, ZonePortalOpen = false;
-		D2RGui::LeftPanel::InGame(false);
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
 		for (GameMods* g : Games)
 			if (g->zoneId) WriteZoneStats(*g, false); // a zone left open: its counts (its floor is gone with the game)
@@ -2001,18 +2000,11 @@ void StartDisplay(const D2RL::PluginContext* context) noexcept {
 	}
 }
 
-// ---- the TZ Plus window (D2R GUI): this game's mods and rewards, and the settings ----
-// Console "tzplus" or the Controls menu (TZ Plus > Open TZ Plus). Built like the game's left panels.
+// ---- the TZ Plus window (D2R GUI App): Rules (this game, the rules, every mod with its numbers) and Offering ----
+// Console "tzplus", the Controls menu (TZ Plus > Open TZ Plus) or Roran's menu.
 
 namespace Gui = D2RGui;
-
-constexpr int PanelX = 236, PanelY = -651, PanelWidth = 1162, PanelHeight = 1507;
-constexpr int Left = 105, Right = 1044, BarLeft = 1054, LineHeight = 56, RowHeight = 70, WheelStep = 120;
-
-Gui::PanelPool    Window;
-Gui::ScrollBar    Bar("mods", BarLeft, 30, 30, PanelX, PanelY);
-std::atomic<bool> WindowOpen {};
-int               Scroll = 0;
+namespace App = D2RGui::App;
 
 // This game, as lines (UI thread).
 std::vector<std::string> GameLines() {
@@ -2024,43 +2016,14 @@ std::vector<std::string> GameLines() {
 		else std::snprintf(head, sizeof(head), "Nightmare act %d, terror zone level %d", g->act.load(), g->zoneLevel);
 		lines.push_back(head);
 		for (int i = 0; i < g->count; ++i) lines.push_back(std::string(Mods[g->mods[i].mod].name) + " " + Roman(g->mods[i].tier));
-		char line[64];
-		std::snprintf(line, sizeof(line), "+%d%% Gold Find", g->gold), lines.push_back(line);
-		std::snprintf(line, sizeof(line), "+%d%% Magic Find", g->magic), lines.push_back(line);
-		std::snprintf(line, sizeof(line), "+%d%% Experience", g->xp), lines.push_back(line);
+		char line[96];
+		std::snprintf(line, sizeof(line), "+%d%% Gold Find, +%d%% Magic Find, +%d%% Experience", g->gold, g->magic, g->xp), lines.push_back(line);
 	} else lines.push_back(InGame ? "No TZ Plus mods in this game" : "Not in a game");
 	ReleaseSRWLockShared(&Lock);
 	return lines;
 }
 
-std::atomic<bool> TalkMode { false };
-extern std::atomic<bool> PortalRequested, CloseRequested; // the window is the fire barbarian's menu
-
-std::string BuildTalk(const std::string& panelName, std::string c) {
-	int y = Gui::StashWindow::InnerY + 40;
-	c += Gui::Text("TalkLine0", Left, y, Right - Left, LineHeight, "The fire shows me places full of terror.", Gui::Style::Label);
-	y += LineHeight;
-	c += Gui::Text("TalkLine1", Left, y, Right - Left, LineHeight, "I can open the way to one of them.", Gui::Style::Label);
-	y += LineHeight + 40;
-	const int width = Right - Left - 200;
-	if (ZonePortalOpen.load())
-		c += Gui::TextButton("TalkClose", Left + 100, y, width, 80, "Close the portal", "zone-close", "Closes the portal to this game's terror zone");
-	else
-		c += Gui::TextButton("TalkOpen", Left + 100, y, width, 80, "Open a portal to a terror zone", "zone-open",
-		                     "A random dungeon with monsters from every act. The game's mods roll again");
-	y += 110;
-	c += Gui::TextButton("TalkLeave", Left + 100, y, width, 80, "Leave", "close");
-	return Gui::StashWindow::Layout(panelName, "Barbarian", "close", c);
-}
-
-// ---- the window's tabs: Rules (this game, the rules, every mod with its numbers) and Offering (runes that ban) ----
-int CurrentTab = 0; // 0 rules, 1 offering
-
-struct RuleLine {
-	std::string text;
-	const char* style;
-	int         indent;
-};
+extern std::atomic<bool> PortalRequested, CloseRequested;
 
 std::string TierText(const int (&v)[3], const char* unit) {
 	char line[64];
@@ -2068,44 +2031,43 @@ std::string TierText(const int (&v)[3], const char* unit) {
 	return line;
 }
 
-std::vector<RuleLine> RuleLines() {
-	std::vector<RuleLine> out;
-	const auto section = [&](const char* t) { out.push_back({ t, Gui::Style::Section, 0 }); };
-	const auto line    = [&](const std::string& t) { out.push_back({ t, Gui::Style::Label, 20 }); };
-	const auto small   = [&](const std::string& t) { out.push_back({ t, Gui::Style::SmallLabel, 40 }); };
-	section("This game");
-	for (const auto& l : GameLines()) line(l);
-	section("Terror zones");
-	line("Normal: the game's own terror zone, untouched.");
-	char text[256];
-	std::snprintf(text, sizeof(text), "Nightmare: one whole act is terrorized, the act changing every 30 minutes. Zone level %d to %d, %d to %d mods, tier I to %s.",
-	              Ranges[1].minLevel, Ranges[1].maxLevel, 1, Ranges[1].maxMods, Roman(Ranges[1].maxTier).c_str());
-	line(text);
-	std::snprintf(text, sizeof(text), "Hell: every level is terrorized for the whole game (no rotation). Zone level %d to %d, %d to %d mods, tier I to %s.",
-	              Ranges[2].minLevel, Ranges[2].maxLevel, 1, Ranges[2].maxMods, Roman(Ranges[2].maxTier).c_str());
-	line(text);
-	line("The mods roll once per game. The higher the zone level, the more mods and the higher their tiers: a level 99 zone has 3 tier III mods.");
-	line("Champions, uniques, minions and bosses get every mod one tier higher. No monster goes over level 99.");
-	section("Rewards");
-	std::snprintf(text, sizeof(text), "Each mod gives points: tier I 1 gold find point, tier II 2 gold find and 1 magic find, tier III 3 gold find, 2 magic find and 1 experience.");
-	line(text);
-	std::snprintf(text, sizeof(text), "A point is +%d%% gold find, +%d%% magic find or +%d%% experience. Three tier III mods: +%d%% gold find, +%d%% magic find, +%d%% experience.",
+std::vector<App::Item> RuleItems() {
+	std::vector<App::Item> out;
+	out.push_back(App::Section("This game"));
+	std::string game;
+	for (const auto& l : GameLines()) game += (game.empty() ? "" : "\n") + l;
+	out.push_back(App::Text(game));
+	out.push_back(App::Section("Terror zones"));
+	char text[320];
+	std::snprintf(text, sizeof(text),
+	              "Normal: the game's own terror zone, untouched.\nNightmare: one whole act is terrorized, the act changing every 30 minutes. Zone level %d to %d, 1 to %d mods, tier I to %s.\n"
+	              "Hell: every level is terrorized for the whole game (no rotation). Zone level %d to %d, 1 to %d mods, tier I to %s.",
+	              Ranges[1].minLevel, Ranges[1].maxLevel, Ranges[1].maxMods, Roman(Ranges[1].maxTier).c_str(), Ranges[2].minLevel, Ranges[2].maxLevel, Ranges[2].maxMods,
+	              Roman(Ranges[2].maxTier).c_str());
+	out.push_back(App::Text(text));
+	out.push_back(App::Text("The mods roll once per game. The higher the zone level, the more mods and the higher their tiers: a level 99 zone has 3 tier III mods. "
+	                        "Champions, uniques, minions and bosses get every mod one tier higher. No monster goes over level 99."));
+	out.push_back(App::Section("Rewards"));
+	std::snprintf(text, sizeof(text),
+	              "Each mod gives points: tier I 1 gold find point; tier II 2 gold find and 1 magic find; tier III 3 gold find, 2 magic find and 1 experience. "
+	              "A point is +%d%% gold find, +%d%% magic find or +%d%% experience: three tier III mods give +%d%% gold find, +%d%% magic find, +%d%% experience.",
 	              GoldPerPoint, MagicPerPoint, XpPerPoint, 9 * GoldPerPoint, 6 * MagicPerPoint, 3 * XpPerPoint);
-	line(text);
-	section("Roran Stronghammer");
-	std::snprintf(text, sizeof(text), "At the fire in Harrogath, Roran opens portals to TZ Plus zones in Nightmare and Hell, %d per game.", ZoneSlots / ZoneParts);
-	line(text);
-	line("A zone: an outdoor area (twice the monsters, elite packs x1.5) and its dungeon (x1.5 the density, elite packs x2), 8 monster types from every act.");
-	line("The exit area holds 3 golden chests. The dungeon's stairs lead back to Harrogath.");
-	section("Mods (tier I / II / III)");
-	const auto mod = [&](const char* name, const std::string& what) { line(name), small(what); };
+	out.push_back(App::Text(text));
+	out.push_back(App::Section("Roran Stronghammer"));
+	out.push_back(App::Text("At the fire in Harrogath, Roran opens portals to TZ Plus zones in Nightmare and Hell, " + std::to_string(ZoneSlots / ZoneParts)
+	                        + " per game. A zone: an outdoor area (twice the monsters, elite packs x1.5) and its dungeon (x1.5 the density, elite packs x2), "
+	                          "8 monster types from every act. The exit area holds 3 golden chests; the dungeon's stairs lead back to Harrogath."));
+	out.push_back(App::Section("Mods (tier I / II / III)"));
+	const auto mod = [&](const std::string& name, const std::string& what) { out.push_back(App::Text(name + ": " + what)); };
 	mod("Extra Strong", "+49% / +75% / +100% damage, +33% / +50% / +75% attack rating");
 	mod("Extra Fast", "the game's Extra Fast, then +" + TierText(FastMove, "%") + " run speed and +" + TierText(FastAttack, "%") + " attack speed");
 	mod("Cursed", "Amplify Damage at " + TierText(CurseLevelPct, "%") + " of the game's curse level");
 	mod("Magic Resistant", "+" + TierText(MagicRes, "") + " fire, cold and lightning resistance");
-	for (const char* e : { "Fire", "Lightning", "Cold" })
-		mod((std::string(e) + " Enchanted").c_str(), "+" + TierText(OwnResist, "") + " " + std::string(e == std::string("Fire") ? "fire" : e == std::string("Cold") ? "cold" : "lightning")
-		                                              + " resistance, 33-50% / 50-75% / 66-100% of the attack's damage added");
+	for (const char* e : { "Fire", "Lightning", "Cold" }) {
+		std::string lower = e;
+		lower[0]          = static_cast<char>(std::tolower(static_cast<unsigned char>(lower[0])));
+		mod(std::string(e) + " Enchanted", "+" + TierText(OwnResist, "") + " " + lower + " resistance, 33-50% / 50-75% / 66-100% of the attack's damage added as " + lower);
+	}
 	mod("Poison Enchanted", "poison of " + TierText(PoisonPerLevel, "") + " x the monster's level over 3 seconds (a third on ranged attacks)");
 	mod("Mana Burn", "the game's Mana Burn, then +" + TierText(ManaBurnRes, "") + " magic resistance");
 	mod("Teleportation", TierText(TeleportChance, "%") + " chance to teleport away when hit (not on bosses)");
@@ -2118,129 +2080,35 @@ std::vector<RuleLine> RuleLines() {
 	std::string auras;
 	for (const Mod& m : Mods)
 		if (m.kind == Kind::Aura) auras += (auras.empty() ? "" : ", ") + std::string(m.name);
-	mod("Auras", auras + ": one per game at most, at " + TierText(AuraPct, "%") + " of the aura level the game gives elites");
-	section("Offering");
-	line("Offer one rune of each, Vex to Zod, to ban one mod (from the next game) or one monster (from the next zone). Take a rune back to lift its ban.");
-	small("Advanced settings (which mods can roll, Nightmare and Hell on or off): the TOML config or I Hate TOMLs.");
+	mod("Auras", auras + ". One per game at most, at " + TierText(AuraPct, "%") + " of the aura level the game gives elites");
+	out.push_back(App::Section("Settings"));
+	out.push_back(App::Text("Which mods can roll, and Nightmare and Hell on or off: the TOML config or I Hate TOMLs."));
 	return out;
 }
 
-// A text's height when it wraps in `width` (Medium or Small font).
-int WrappedHeight(const std::string& text, int width, bool smallFont) {
-	const int measured = Gui::Font::TextWidth(text) * (smallFont ? 8 : 10) / 10;
-	const int lines    = std::max(1, (measured + width - 1) / std::max(1, width));
-	return lines * (smallFont ? 44 : LineHeight) + 8;
-}
-
-constexpr int TabTop = Gui::StashWindow::InnerY + 8, ContentTop = TabTop + 84 + 24;
-
-// Offering: the runes, their choices and what they ban.
+// Offering: the runes, what each bans, the bans. The choices: "Nothing", then the mods, then every monster name of the zones' pool.
 constexpr int RuneCount = 8;
 const char* const RuneCodes[RuneCount] { "r26", "r27", "r28", "r29", "r30", "r31", "r32", "r33" };
 const char* const RuneNames[RuneCount] { "Vex", "Ohm", "Lo", "Sur", "Ber", "Jah", "Cham", "Zod" };
-struct Choice {
-	std::string id, name; // id: "mod:<key>" or "mon:<name>"
-};
-std::vector<Choice> Choices;        // UI thread: every mod, then every monster name of the zones' pool (built when the tab first shows)
-std::string         OfferTarget[RuneCount];
-bool                OfferHeld[RuneCount] {};
-std::string         OfferCharacter; // whose choices these are
-bool                CellsReady = false;
+std::vector<Gui::DropDown::Entry> OfferEntries; // UI thread
+std::vector<std::string>          EntryIds;     // per entry: "", "mod:<key>", "mon:<name>"
+std::string                       OfferTarget[RuneCount];
+int                               OfferPick[RuneCount] {};
+bool                              OfferHeld[RuneCount] {};
+std::string                       OfferCharacter; // whose choices these are
 
 void BuildChoices(); // after the zones' tables (needs their monster pool)
 void ApplyBans();
 void SaveOfferings();
+void LoadOfferings(const std::string& character);
 std::string CharacterName();
 
-int ChoiceIndex(const std::string& id) {
-	for (std::size_t i = 0; i < Choices.size(); ++i)
-		if (Choices[i].id == id) return static_cast<int>(i);
-	return -1;
-}
-
 std::string ChoiceName(const std::string& id) {
-	if (id.empty()) return "Nothing chosen";
-	if (const int i = ChoiceIndex(id); i >= 0) return Choices[static_cast<std::size_t>(i)].name;
-	return id.substr(id.find(':') + 1);
-}
-
-std::string BuildOffering(std::string c) {
-	if (Choices.empty()) BuildChoices();
-	int y = ContentTop;
-	c += Gui::Text("OfferText", Left, y, Right - Left, 110,
-	               "Offer one of each rune. Each one bans what you choose beside it: a mod from the next game, a monster from the next zone. Take a rune back to lift its ban.",
-	               Gui::Style::SmallLabel);
-	y += 130;
-	if (CellsReady) Gui::ItemCells::Place(Gui::StashWindow::X + Left, Gui::StashWindow::Y + y);
-	const int pickX = Left + 300, arrow = 44, boxX = pickX + arrow + 12, boxW = Right - boxX - arrow - 12;
-	for (int i = 0; i < RuneCount; ++i) {
-		const int         top = y + i * Gui::ItemCells::Cell;
-		const std::string n   = "Offer" + std::to_string(i);
-		if (!CellsReady) c += Gui::Image(n + "Cell", Left, top, Gui::Kit::Row(Gui::ItemCells::Cell - 4, Gui::ItemCells::Cell - 4));
-		c += Gui::Text(n + "Rune", Left + 115, top, 180, Gui::ItemCells::Cell, std::string(RuneNames[i]) + " Rune", Gui::Style::Label);
-		c += Gui::ArrowButton(n + "Prev", pickX, top + (Gui::ItemCells::Cell - arrow) / 2, true, arrow, "prev" + std::to_string(i), "Previous choice");
-		const bool        held = OfferHeld[i] && !OfferTarget[i].empty();
-		const std::string what = (held ? "Banned: " : "") + ChoiceName(OfferTarget[i]);
-		c += Gui::Image(n + "Back", boxX, top + 10, Gui::Kit::Row(boxW, Gui::ItemCells::Cell - 20));
-		c += Gui::Text(n + "Choice", boxX + 20, top, boxW - 40, Gui::ItemCells::Cell, what, held ? Gui::Style::Label : Gui::Style::SmallLabel,
-		               held ? "Banned while the rune is offered" : "Offer the rune to ban it");
-		c += Gui::ArrowButton(n + "Next", boxX + boxW + 12, top + (Gui::ItemCells::Cell - arrow) / 2, false, arrow, "next" + std::to_string(i), "Next choice");
-	}
-	y += RuneCount * Gui::ItemCells::Cell + 20;
-	if (!CellsReady) c += Gui::Text("OfferNoCells", Left, y, Right - Left, 100, "The rune cells are off: no custom page for TZ Plus (see the log).", Gui::Style::SmallLabel);
-	return c;
-}
-
-std::string BuildRules(std::string c) {
-	const int   listTop = ContentTop, listRoom = PanelHeight - 150 - listTop;
-	const auto  lines   = RuleLines();
-	std::string inside;
-	int         total = 0;
-	for (std::size_t i = 0; i < lines.size(); ++i) {
-		const RuleLine& l      = lines[i];
-		const bool      smallF = l.style == Gui::Style::SmallLabel;
-		const int       width  = Right - Left - l.indent - 10;
-		const int       height = l.style == Gui::Style::Section ? LineHeight + 14 : WrappedHeight(l.text, width, smallF);
-		const int       top    = total - Scroll;
-		if (top + height > 0 && top < listRoom)
-			inside += Gui::Text("Rule" + std::to_string(i), Left + l.indent, top + (l.style == Gui::Style::Section && i ? 14 : 0), width, height - (l.style == Gui::Style::Section && i ? 14 : 0), l.text, l.style);
-		total += height;
-	}
-	Scroll = std::clamp(Scroll, 0, std::max(0, total - listRoom));
-	c += Gui::Clip("Rules", 0, listTop, BarLeft - 6, listRoom, inside);
-	c += Bar.Layout(listTop, listRoom, total, Scroll);
-	return c;
-}
-
-std::string BuildWindow(const std::string& panelName, const std::string& probe) {
-	std::string c = Gui::Probe(probe);
-	if (TalkMode.load()) return BuildTalk(panelName, c);
-	const std::vector<Gui::Tabs::Tab> tabs { { "scroll-unfurled", "Rules", "tab0" }, { "rune-stone", "Offering", "tab1" } };
-	c += Gui::Tabs::Bar("Tab", Left, TabTop, tabs, CurrentTab);
-	c += Gui::Text("TabName", Left + Gui::Tabs::Length(tabs.size()) + 30, TabTop, 500, 84, CurrentTab == 0 ? "Rules" : "Offering", Gui::Style::Section);
-	c = CurrentTab == 1 ? BuildOffering(c) : BuildRules(c);
-	return Gui::StashWindow::Layout(panelName, "TZ Plus", "close", c);
-}
-
-void LoadOfferings(const std::string& character);
-
-void CloseWindow() {
-	if (CellsReady) Gui::ItemCells::Show(false);
-	Window.Close();
-	WindowOpen = false;
-	Gui::LeftPanel::Closed();
-}
-
-void WatchWindow() {
-	const bool open = Window.IsOpen();
-	WindowOpen      = open;
-	if (Gui::LeftPanel::Watch(open, Window.Busy())) return CloseWindow();
-	if (!CellsReady) return;
-	if (InGame.load()) {
-		if (const std::string name = CharacterName(); !name.empty() && name != OfferCharacter) LoadOfferings(name);
-		Gui::ItemCells::Show(open && CurrentTab == 1 && !TalkMode.load());
-		Gui::ItemCells::Tick();
-	} else if (Gui::ItemCells::Shown()) Gui::ItemCells::Show(false);
+	if (id.empty()) return "nothing";
+	const auto at = id.find(':');
+	return id.compare(0, 4, "mod:") == 0
+	         ? [&] { for (const Mod& m : Mods) if (id.compare(4, std::string::npos, m.key) == 0) return std::string(m.name); return id.substr(at + 1); }()
+	         : id.substr(at + 1);
 }
 
 void OnOfferChanged(int cell, bool held) {
@@ -2249,24 +2117,38 @@ void OnOfferChanged(int cell, bool held) {
 	Log(false, "offering: %s Rune %s (%s)", RuneNames[cell], held ? "offered" : "taken back", OfferTarget[cell].empty() ? "nothing chosen" : OfferTarget[cell].c_str());
 	ApplyBans();
 	SaveOfferings();
-	if (Window.IsOpen()) Window.Show();
+	App::Refresh();
 }
 
-void StepChoice(int cell, int step) {
-	if (cell < 0 || cell >= RuneCount) return;
-	if (Choices.empty()) BuildChoices();
-	if (Choices.empty()) return;
-	const int count = static_cast<int>(Choices.size());
-	int       at    = ChoiceIndex(OfferTarget[cell]);
-	for (int guard = 0; guard < count; ++guard) {
-		at = at < 0 ? (step > 0 ? 0 : count - 1) : (at + step + count) % count;
-		bool used = false; // one rune a choice
-		for (int i = 0; i < RuneCount; ++i) used = used || (i != cell && OfferTarget[i] == Choices[static_cast<std::size_t>(at)].id);
-		if (!used) break;
+std::vector<App::Item> OfferingItems() {
+	if (OfferEntries.size() < 3 && InGame.load()) BuildChoices();
+	for (int i = 0; i < RuneCount; ++i) { // the choices as saved (they can change on loading another character)
+		OfferPick[i] = 0;
+		for (std::size_t k = 0; k < EntryIds.size(); ++k)
+			if (!OfferTarget[i].empty() && EntryIds[k] == OfferTarget[i]) OfferPick[i] = static_cast<int>(k);
 	}
-	OfferTarget[cell] = Choices[static_cast<std::size_t>(at)].id;
-	ApplyBans();
-	SaveOfferings();
+	std::vector<App::Item> out;
+	out.push_back(App::Text("Offer one of each rune, Vex to Zod. Each bans what you choose for it: a mod from the next game, a monster from the next zone. "
+	                        "Take a rune back to lift its ban."));
+	out.push_back(App::Cells([](int c) {
+		if (c < 0 || c >= RuneCount) return std::string();
+		const std::string what = ChoiceName(OfferTarget[c]);
+		return std::string(RuneNames[c]) + " Rune: " + (OfferHeld[c] && !OfferTarget[c].empty() ? "bans " + what : OfferTarget[c].empty() ? "choose what it bans below" : "would ban " + what);
+	}));
+	out.push_back(App::Section("What each rune bans"));
+	for (int i = 0; i < RuneCount; ++i)
+		out.push_back(App::Entries(std::string(RuneNames[i]) + " Rune", &OfferPick[i], OfferEntries)
+		                  .Filter()
+		                  .Tip("Banned while the rune is offered")
+		                  .OnChange([i] {
+			                  const int k       = OfferPick[i];
+			                  OfferTarget[i]    = k >= 0 && k < static_cast<int>(EntryIds.size()) ? EntryIds[static_cast<std::size_t>(k)] : std::string();
+			                  for (int j = 0; j < RuneCount; ++j) // one rune a choice
+				                  if (j != i && !OfferTarget[i].empty() && OfferTarget[j] == OfferTarget[i]) OfferTarget[j].clear();
+			                  ApplyBans();
+			                  SaveOfferings();
+		                  }));
+	return out;
 }
 
 // ---- the fire barbarian (an Act 5 Combatant in Harrogath): a click on him opens his menu ----
@@ -2392,7 +2274,7 @@ bool __cdecl RoranPortal(std::uint8_t a) noexcept {
 
 bool __cdecl RoranRules(std::uint8_t a) noexcept {
 	const bool result = At<MenuCallbackFn>(NpcCancelRva)(a);
-	Gui::Commands::Post("toggle");
+	Gui::Commands::Post("a.toggle");
 	return result;
 }
 
@@ -2469,99 +2351,38 @@ bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 	return false; // the click goes on: you walk to him
 }
 
+// The game window's messages, from the first game on (Roran's clicks), with the window's wheel.
 void StartWindowHook() noexcept {
-	static std::atomic<bool> once { false };
-	if (!once.exchange(true)) Log(false, "window hook started (clicks on the fire barbarians watched)");
-	Gui::WindowHook::Start({
-	    .active = [] { return WindowOpen.load(); },
-	    .wheel  = [](int notches) {
-            Scroll = std::clamp(Scroll + notches * WheelStep, 0, std::max(0, Bar.Max()));
-            Window.Show();
-	    },
-	    .extra = OnGameMessage,
-	    .watch = WatchWindow,
-	});
+	Gui::WindowHook::Start({ .active = [] { return App::IsOpen(); }, .wheel = App::Detail::Wheel, .extra = OnGameMessage });
 }
 
-void OpenWindow(bool talk) {
-	TalkMode = talk;
-	Gui::Font::Refresh();
-	StartWindowHook();
-	static bool attached = false;
-	if (!attached) Bar.Attach(), attached = true;
-	if (!Window.IsOpen()) Gui::LeftPanel::Opening();
-	Window.Show();
-	WindowOpen = true;
-}
-
-void ToggleWindow() {
-	if (Window.IsOpen() && !TalkMode.load()) return CloseWindow();
-	OpenWindow(false);
-}
-
-void OnWindowCommand(const std::string& command) {
-	if (command == "toggle") return ToggleWindow();
-	if (command == "talk") return OpenWindow(true);
+bool OnWindowCommand(const std::string& command) {
 	if (command == "roran") {
-		if (OpenRoranMenu(RoranUnitId.load())) return;
-		return OpenWindow(true); // his old menu: the TZ Plus window
+		if (!OpenRoranMenu(RoranUnitId.load())) App::Go(0), App::Open(); // his old menu: the TZ Plus window
+		return true;
 	}
-	if (command == "zone-open" || command == "zone-close") {
-		if (command == "zone-open") ApplyBans(), PortalRequested = true; // the monster bans need the game's texts: resolved here
-		else CloseRequested = true;
-		return Window.IsOpen() ? CloseWindow() : void();
-	}
-	if (!Window.IsOpen() && command != "close") return;
-	if (Bar.Handle(command)) return;
-	if (command == "close") return CloseWindow();
-	if (command == "tab0" || command == "tab1") CurrentTab = command[3] - '0', Scroll = 0;
-	else if (command.rfind("prev", 0) == 0 || command.rfind("next", 0) == 0) StepChoice(std::atoi(command.c_str() + 4), command[0] == 'n' ? 1 : -1);
-	if (CellsReady) Gui::ItemCells::Show(CurrentTab == 1 && !TalkMode.load());
-	Window.Show();
-}
-
-void __cdecl WindowDataLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
-	static bool done = false;
-	if (done) return;
-	done = true;
-	Gui::Kit::Read();
-	Gui::Font::Measure();
-}
-
-auto OnOpenAction(const D2RL::PluginContext*, const D2RL::Input::ActionEvent* event, void*) noexcept -> D2RL::Input::ActionResult {
-	if (!D2RL::Input::HasActionEventField(event, D2RL::Input::ActionEventRequiredSize) || event->kind != D2RL::Input::ActionEventKind::Pressed)
-		return D2RL::Input::ActionResult::Ignored;
-	Gui::Commands::Post("toggle");
-	return D2RL::Input::ActionResult::Handled;
+	if (command == "zone-open") return ApplyBans(), PortalRequested = true, true; // the monster bans need the game's texts: resolved here
+	if (command == "zone-close") return CloseRequested = true, true;
+	return false;
 }
 
 void StartWindow(const D2RL::PluginContext* context) noexcept {
-	if (!Gui::Init(context, PluginId)) return Log(true, "the TZ Plus window is off: a service it needs is missing");
-	Window.Register(BuildWindow, "TZPlus", 16);
-	Bar.OnScroll([](int scroll) { Scroll = scroll, Window.Show(); });
-	Gui::Commands::Listen(OnWindowCommand);
-	CellsReady = Gui::ItemCells::Register({ .id = "offering", .label = "TZ Plus offering",
-	                                        .codes = { RuneCodes, RuneCodes + RuneCount }, .vertical = true, .changed = OnOfferChanged,
-	                                        .problem = [](const char* what) { Log(true, "offering: %s", what); } });
+	App::Window window {
+		.title    = "TZ Plus",
+		.menus    = { { .tab = { "scroll-unfurled", "Rules" }, .title = "TZ Plus", .content = RuleItems },
+		              { .tab = { "rune-stone", "Offering" }, .title = "Offering", .content = OfferingItems } },
+		.keybind  = "Open TZ Plus",
+		.cells    = Gui::ItemCells::Options { .id = "offering", .label = "TZ Plus offering", .codes = { RuneCodes, RuneCodes + RuneCount }, .vertical = true,
+		                                      .changed = OnOfferChanged, .problem = [](const char* what) { Log(true, "offering: %s", what); } },
+		.command  = OnWindowCommand,
+		.tick     = [] {
+            if (!InGame.load()) return;
+            if (const std::string name = CharacterName(); !name.empty() && name != OfferCharacter) LoadOfferings(name), App::Refresh();
+		},
+		.mouse = OnGameMessage,
+	};
+	if (!App::Start(context, PluginId, std::move(window))) return Log(true, "the TZ Plus window is off: a service it needs is missing");
 	LoadOfferings({});
-	if (Lifecycle) {
-		D2RL::Lifecycle::ListenerHandle                 handle {};
-		const D2RL::Lifecycle::DataTablesLoadedListener loaded { .structSize = sizeof(D2RL::Lifecycle::DataTablesLoadedListener), .callback = WindowDataLoaded };
-		(void)Lifecycle->registerDataTablesLoadedListener(context, &loaded, &handle);
-	}
-	if (const auto* input = Gui::Detail::Query<D2RL::InputService>(context, "input"); input && D2RL::HasInputServiceField(input, D2RL::InputServiceRequiredSize)) {
-		const D2RL::Input::ActionRegistration action {
-			.structSize       = D2RL::Input::ActionRegistrationSize,
-			.logicalId        = "open-tz-plus",
-			.displayName      = "Open TZ Plus",
-			.category         = "TZ Plus",
-			.defaultPrimary   = { .key = D2RL::Input::Key::None },
-			.defaultSecondary = { .key = D2RL::Input::Key::None },
-			.callback         = OnOpenAction,
-		};
-		D2RL::Input::ActionHandle handle = D2RL::Input::InvalidHandle;
-		(void)input->registerAction(context, &action, &handle);
-	}
 }
 
 // ---- TZ Plus zones: hidden act 5 levels added to the game's level tables ----
@@ -2950,14 +2771,17 @@ std::vector<std::pair<std::int16_t, std::string>> PoolNames() {
 }
 
 void BuildChoices() {
-	Choices.clear();
-	for (const Mod& m : Mods) Choices.push_back({ std::string("mod:") + m.key, std::string("Mod: ") + m.name + (m.kind == Kind::Aura ? " aura" : "") });
+	OfferEntries.clear(), EntryIds.clear();
+	OfferEntries.push_back({ "Nothing" }), EntryIds.push_back({});
+	OfferEntries.push_back({ "Mods", true }), EntryIds.push_back({});
+	for (const Mod& m : Mods) OfferEntries.push_back({ std::string(m.name) + (m.kind == Kind::Aura ? " aura" : "") }), EntryIds.push_back(std::string("mod:") + m.key);
 	std::vector<std::string> names;
 	for (const auto& [m, name] : PoolNames())
 		if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
 	std::sort(names.begin(), names.end());
-	for (const auto& name : names) Choices.push_back({ "mon:" + name, name });
-	Log(false, "offering: %zu choices (%d mods, %zu monster names)", Choices.size(), ModCount, names.size());
+	OfferEntries.push_back({ "Monsters", true }), EntryIds.push_back({});
+	for (const auto& name : names) OfferEntries.push_back({ name }), EntryIds.push_back("mon:" + name);
+	Log(false, "offering: %zu choices (%d mods, %zu monster names)", OfferEntries.size(), ModCount, names.size());
 }
 
 bool MonstersResolved = false;
@@ -4300,7 +4124,7 @@ D2RL::ConsoleCommandResult __cdecl Command(D2R::Game::Client*, const D2RL::Conso
 	}
 	ReleaseSRWLockShared(&Lock);
 	Context->WriteConsoleMessage(text.c_str());
-	Gui::Commands::Post("toggle");
+	Gui::Commands::Post("a.toggle");
 	const int index = At<LocalIndexFn>(0x8B2D0)();
 	if (void* player = index >= 0 && index < 8 ? At<PlayerByIndexFn>(0x9A480)(index) : nullptr) {
 		char line[160];
