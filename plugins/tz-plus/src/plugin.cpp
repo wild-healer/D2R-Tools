@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.72";
+constexpr const char* PluginVersion = "0.0.73";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2306,6 +2306,7 @@ constexpr int            ZoneDensity = 3000; // fallback density (a template wit
 // game gives them more spawn tries for the same monsters per room) x DensityScale %, then scaled by the picks' group sizes.
 constexpr int            DensityScale = 125;
 constexpr int            DungeonDensity = 150; // a zone's dungeon vs its outdoor area
+constexpr int            OutdoorDensity = 200; // the outdoor area: twice the monsters
 constexpr int            OutdoorElites = 150, DungeonElites = 200; // elite packs vs the template level's own (%)
 constexpr int            GroupRef = 25;      // x10: the average group (with minions) ZoneDensity is tuned for; zones of bigger groups get fewer of them
 constexpr std::uintptr_t MonStatsVec = 0xF58; // MonStats {rows, count}: row 0x1FC, minion1 word +0x5A, PartyMin/Max +0x62/+0x63, MinGrp/MaxGrp +0x65/+0x66
@@ -2928,6 +2929,11 @@ void RebuildRegion(std::uint8_t* game, std::uint8_t mode, int id, std::uint64_t&
 	region[0x10] = 0, region[0x11] = 0;
 	const std::uint8_t* row = Banks[mode].levels + id * LevelRow;
 	At<RegionFillFn>(0x509940)(mode, row, region, seed, Field<std::uint8_t>(game, GameDifficulty) > 0 ? 1 : 0);
+	// The density too: the game took it from the level row at game creation (D2R+0x508921), before this zone's row was written.
+	const int difficulty = std::min<int>(Field<std::uint8_t>(game, GameDifficulty), 2);
+	const std::int32_t density = Field<std::int32_t>(row, LvDen + difficulty * 4), oldDensity = Field<std::int32_t>(region, 0x2B8);
+	if (density > 0) SetField<std::int32_t>(region, 0x2B8, density);
+	Log(false, "zones: level %d density %d -> %d", id, oldDensity, Field<std::int32_t>(region, 0x2B8));
 	std::string after;
 	for (int i = 0; i < region[0x10] && i < 13; ++i) {
 		At<RegionEntryFn>(0x4195E0)(mode, seed, region + 0x14 + i * 0x34, 3);
@@ -3014,6 +3020,12 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 				for (int i = 0; i < 3; ++i)
 					SetField<std::int32_t>(Banks[bank].levels + (id + 1) * LevelRow, LvDen + i * 4,
 					                       Field<std::int32_t>(Banks[bank].levels + id * LevelRow, LvDen + i * 4) * DungeonDensity / 100);
+			// The outdoor area: OutdoorDensity % (after the dungeon took its share, so the dungeon keeps its own).
+			if (Banks[bank].levels)
+				for (int i = 0; i < 3; ++i) {
+					std::uint8_t* row = Banks[bank].levels + id * LevelRow;
+					SetField<std::int32_t>(row, LvDen + i * 4, Field<std::int32_t>(row, LvDen + i * 4) * OutdoorDensity / 100);
+				}
 		}
 	}
 	ForcedCount = 0;
