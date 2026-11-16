@@ -12,4 +12,5 @@
 * Inventory button, item grid with half-cell tiles, view panel cache, item and stash art, strings tables, HUD life number (from Grail On!).
 * An icon set: 120 game-icons.net icons at any size and colour (opt-in icons.h).
 * A window in the stash's look (opt-in stash_window.h), and showing or hiding the inventory button live.
+* Icon tabs (opt-in tabs.h), and item cells that take one item code each, on Player Page Host's page or the plugin's own (opt-in item_cells.h).
 * D2R GUI Demo plugin 0.0.1 to try it (console command guidemo).

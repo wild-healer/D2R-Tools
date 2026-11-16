@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.73";
+constexpr const char* PluginVersion = "0.0.74";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -164,6 +164,20 @@ struct Settings {
 		for (auto& on : allowed) on = true;
 	}
 } Config;
+
+// ---- rune offerings (the window's Offering tab): each offered rune bans one mod or one monster ----
+// The UI thread sets these from the runes in the cells; the game's thread reads them (mods when a game's mods roll,
+// monsters when a zone's monsters are picked).
+std::atomic<bool>         ModBanned[ModCount] {};
+SRWLOCK                   BanLock = SRWLOCK_INIT;
+std::vector<std::int16_t> BannedMonsters; // monstats ids (every class with a banned monster's name)
+
+bool MonsterBanned(std::int16_t monster) noexcept {
+	AcquireSRWLockShared(&BanLock);
+	const bool banned = std::find(BannedMonsters.begin(), BannedMonsters.end(), monster) != BannedMonsters.end();
+	ReleaseSRWLockShared(&BanLock);
+	return banned;
+}
 
 // ---- native layout ----
 
@@ -389,12 +403,12 @@ void Roll(GameMods& g) noexcept {
 	while (g.count < want) {
 		int total = 0;
 		for (int m = 0; m < ModCount; ++m)
-			if (!taken[m] && Config.allowed[m] && !(aura && Mods[m].kind == Kind::Aura)) total += Mods[m].weight;
+			if (!taken[m] && Config.allowed[m] && !ModBanned[m] && !(aura && Mods[m].kind == Kind::Aura)) total += Mods[m].weight;
 		if (total <= 0) break;
 		int pick = static_cast<int>(Mix(state) % static_cast<std::uint64_t>(total));
 		int chosen = -1;
 		for (int m = 0; m < ModCount; ++m) {
-			if (taken[m] || !Config.allowed[m] || (aura && Mods[m].kind == Kind::Aura)) continue;
+			if (taken[m] || !Config.allowed[m] || ModBanned[m] || (aura && Mods[m].kind == Kind::Aura)) continue;
 			if (pick < Mods[m].weight) {
 				chosen = m;
 				break;
@@ -2434,6 +2448,7 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state, int vis0 = 0
 		else
 			for (int tries = 0; count < ZoneMonsters && count < static_cast<int>(b.pool.size()) && tries < 200; ++tries) {
 				const std::int16_t m = b.pool[Mix(state) % b.pool.size()];
+				if (MonsterBanned(m)) continue; // offered away (a rune in the Offering tab)
 				if (std::find(picks, picks + count, m) == picks + count) picks[count++] = m;
 			}
 		for (const std::uintptr_t list : { LvMon, LvNMon, LvUMon })
@@ -2454,7 +2469,7 @@ void SetupZone(ZoneBank& b, int id, int tmpl, std::uint64_t& state, int vis0 = 0
 		}
 		if (counted) {
 			for (int i = 0; i < 3; ++i)
-				SetField<std::int32_t>(row, LvDen + i * 4, std::clamp(baseDen[i] * GroupRef * counted / sum, baseDen[i] / 2, baseDen[i] * 2));
+				SetField<std::int32_t>(row, LvDen + i * 4, std::clamp(baseDen[i] * GroupRef * counted / sum, baseDen[i], baseDen[i] * 2));
 		}
 	}
 	std::uint8_t* def = b.defs + id * DefRow;
@@ -2976,6 +2991,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	if (const auto& pool = Banks[mode].pool; !pool.empty())
 		for (int tries = 0; ForcedCount < ZoneMonsters && ForcedCount < static_cast<int>(pool.size()) && tries < 200; ++tries) {
 			const std::int16_t m = pool[Mix(state) % pool.size()];
+			if (MonsterBanned(m)) continue; // offered away (a rune in the Offering tab)
 			if (std::find(ForcedPicks, ForcedPicks + ForcedCount, m) == ForcedPicks + ForcedCount) ForcedPicks[ForcedCount++] = m;
 		}
 	{

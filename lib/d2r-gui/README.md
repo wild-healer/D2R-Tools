@@ -60,6 +60,9 @@ button and a long scrolling list. Console command `guidemo`.
 | `panels.h` | `SinglePanel` (one panel, a new layout per show) and `ViewCache` (many panels that each keep a view) | Grail On! |
 | `icons.h` (opt-in) | 120 game-icons.net icons at any size and colour, as pictures or sprites ([preview](docs/icons.png), [credits](ICONS-CREDITS.txt)) | Grail On! |
 | `stash_window.h` (opt-in) | a window in the stash's look (frame, gold title, close button), as Charm Inventory's | Charm Inventory |
+| `tabs.h` (opt-in) | a row or column of icon tabs, as Grail On!'s menus | Grail On! |
+| `item_cells.h` (opt-in) | single item cells that each take one item code (an offering), on Player Page Host's page or the plugin's own | new |
+| `page_host_api.h` | Player Page Host's client header (used by item_cells.h) | Player Page Host |
 
 ## Rules the library follows
 
