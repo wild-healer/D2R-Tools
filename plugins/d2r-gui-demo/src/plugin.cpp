@@ -78,6 +78,14 @@ App::Window Describe() {
 	              App::Text("This window is declared, not drawn: the plugin lists its menus, pages and components, "
 	                        "binds each component to one of its variables, and the library makes the window, "
 	                        "the clicks, typing, drop-downs and scrolling."),
+	              App::Card("Rules"),
+	              App::Bullet("Text can have " + App::Red("red") + ", " + App::Gold("gold") + " and " + App::Blue("blue") + " parts, and wraps over as many lines as it takes.",
+	                          Gui::Icons::Sprite("scroll-unfurled", 36, { 215, 200, 150 })),
+	              App::Bullet("A bullet without an icon gets a dot."),
+	              App::CardEnd(),
+	              App::Grid("A table", { { "Affix", 0 }, { "Level", 180 }, { "Effect", 0 } },
+	                        { { { .text = "Extra fast", .icon = Gui::Icons::Sprite("hourglass", 36, { 215, 200, 150 }) }, { .text = "1" }, { .text = "Moves and attacks faster", .color = "$FontColorGreen" } },
+	                          { { .text = "Cursed", .icon = Gui::Icons::Sprite("death-skull", 36, { 215, 200, 150 }) }, { .text = "2" }, { .text = "Amplifies damage", .color = "$FontColorRed" } } }),
 	          } },
 	        { .tab = { "cog", "Settings" }, .title = "Settings", .pages = {
 	              { .tab = { "eyeball", "Display" }, .items = {

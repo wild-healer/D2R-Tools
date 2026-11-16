@@ -197,6 +197,16 @@ struct TileRow {
 	std::vector<Tile> tiles;
 };
 
+// A read-only table's cell: text (colour codes allowed: App::Red...), an
+// icon before it, its colour (a profile colour such as "$FontColorGoldYellow"; default light gold).
+struct GridCell {
+	std::string text, icon, color, tooltip;
+};
+struct GridColumn {
+	std::string title;
+	int         width = 0; // 0: the room left, shared
+};
+
 // A part of a ring chart.
 struct Slice {
 	int         count = 0;
@@ -212,7 +222,7 @@ struct Square {
 };
 
 struct Item {
-	enum class Kind { Section, Text, Check, Choice, Number, Position, Table, Field, Value, Action, Adder, List, Cells, HostGrid, Tiles, Chart, Squares, Legend, Buttons, Custom };
+	enum class Kind { Section, Text, Check, Choice, Number, Position, Table, Field, Value, Action, Adder, List, Cells, HostGrid, Tiles, Chart, Squares, Legend, Buttons, Grid, Bullet, CardStart, CardEnd, Custom };
 	Kind        kind = Kind::Text;
 	std::string label, tooltip, note, button, hint, value;
 	bool        restart = false, confirm = false, arrow = false, draft = false, clearable = false, filter = false, warn = false, above = false;
@@ -220,6 +230,8 @@ struct Item {
 	std::vector<std::pair<std::string, std::string>> legend; // Legend: sprite and word
 	std::string button2;                           // Buttons: the right one (button: the left one)
 	std::function<void()>                          click2;
+	std::vector<GridColumn>                        gridColumns2;
+	std::vector<std::vector<GridCell>>             gridCells;
 
 	Bind<bool>                         flag;
 	Bind<int>                          index;
@@ -312,6 +324,29 @@ inline Item Adder(std::string label, std::string count, std::function<void()> ad
 inline Item List(std::function<std::vector<Row>()> rows, std::function<void(int row)> pick = {}) { return { .kind = Item::Kind::List, .rows = std::move(rows), .pick = std::move(pick) }; }
 inline Item Cells(std::function<std::string(int cell)> text = {}) { return { .kind = Item::Kind::Cells, .cellText = std::move(text) }; }
 inline Item HostGrid(int* columns, int* rows) { return { .kind = Item::Kind::HostGrid, .gridColumns = columns, .gridRows = rows }; }
+// A read-only table: a title, column headers, rows of text cells.
+inline Item Grid(std::string title, std::vector<GridColumn> columns, std::vector<std::vector<GridCell>> rows) {
+	Item item { .kind = Item::Kind::Grid, .label = std::move(title) };
+	item.gridColumns2 = std::move(columns), item.gridCells = std::move(rows);
+	return item;
+}
+// A list entry: an icon (or a dot) and text wrapped over as many lines as it takes.
+inline Item Bullet(std::string text, std::string icon = {}) { return { .kind = Item::Kind::Bullet, .label = std::move(text), .icon = std::move(icon) }; }
+// A framed box with a heading around the components up to CardEnd().
+inline Item Card(std::string heading) { return { .kind = Item::Kind::CardStart, .label = std::move(heading) }; }
+inline Item CardEnd() { return { .kind = Item::Kind::CardEnd }; }
+
+// Colour codes for text in any component (the game's own: Text, labels, rows, cells).
+inline std::string Colored(const std::string& text, char code) { return std::string("\xC3\xBF" "c") + code + text + "\xC3\xBF" "c0"; }
+inline std::string Red(const std::string& text) { return Colored(text, '1'); }
+inline std::string Green(const std::string& text) { return Colored(text, '2'); }
+inline std::string Blue(const std::string& text) { return Colored(text, '3'); }
+inline std::string Gold(const std::string& text) { return Colored(text, '4'); }
+inline std::string Gray(const std::string& text) { return Colored(text, '5'); }
+inline std::string Orange(const std::string& text) { return Colored(text, '8'); }
+inline std::string Yellow(const std::string& text) { return Colored(text, '9'); }
+inline std::string Purple(const std::string& text) { return Colored(text, ';'); }
+
 // Icons with a word each, in one centred line (a footer's legend).
 inline Item Legend(std::vector<std::pair<std::string, std::string>> parts) { return { .kind = Item::Kind::Legend, .legend = std::move(parts) }; }
 // Two text buttons in one row, one at the left and one at the right (empty text: none).
@@ -597,18 +632,31 @@ inline int TilesHeight(const Item& item, int width) {
 }
 
 inline bool AboveOf(const Item& item, int width);
-constexpr int AboveLine = 46;
+constexpr int AboveLine = 46, GridLine = 56;
+
+// A list row's height: its sub-text wraps.
+inline int RowHeightOf(const Row& row, int width) {
+	if (row.sub.empty()) return 80;
+	const int lines = std::max(1, Font::WrappedLines(row.sub, std::max(200, width - 380), std::max(20, (width - 380) / 14), false));
+	return std::max(80, 50 + lines * 32 + 8);
+}
 
 inline int HeightOf(const Item& item, int width) {
 	if (AboveOf(item, width)) return AboveLine + HeightOf([&] { auto c = item; c.label.clear(), c.restart = false; return c; }(), width);
 	switch (item.kind) {
 	case Item::Kind::Legend: return 60;
+	case Item::Kind::Grid: return (item.label.empty() ? 0 : 64) + 56 + static_cast<int>(item.gridCells.size()) * GridLine + 10;
+	case Item::Kind::Bullet: return Lines(item.label, width - 60) * NoteLine() + 14;
+	case Item::Kind::CardStart: return item.label.empty() ? 30 : 84;
+	case Item::Kind::CardEnd: return 34;
 	case Item::Kind::Section: return 100;
 	case Item::Kind::Text: return Lines(item.label, width) * NoteLine() + 16;
 	case Item::Kind::Table: return (item.label.empty() ? 0 : TableTitle) + TableHead + static_cast<int>(item.rowNames.size()) * TableLine + NoteHeight(item, width) + 8;
 	case Item::Kind::List: {
-		const int rows = item.rows ? static_cast<int>(item.rows().size()) : 0;
-		return rows ? rows * ListRow : (item.empty.empty() ? 0 : 200);
+		const auto rows = item.rows ? item.rows() : std::vector<Row> {};
+		int        h    = 0;
+		for (const auto& row : rows) h += RowHeightOf(row, width);
+		return !rows.empty() ? h : (item.empty.empty() ? 0 : 200);
 	}
 	case Item::Kind::Cells: return Get().hasCells ? (Get().window.cells->vertical ? ItemCells::Count() * ItemCells::Cell : ItemCells::Cell) + 20 : 0;
 	case Item::Kind::HostGrid: return 0; // drawn outside the scrolled part
@@ -675,6 +723,8 @@ inline std::string Shown(const Item& item) {
 	return k >= 0 && k < static_cast<int>(item.entries.size()) ? item.entries[static_cast<std::size_t>(k)].text : std::string();
 }
 
+inline constexpr const char* SmallWrap =
+    R"({"fontColor": "$FontColorLightGold", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "top"}, "options": {"lineWrap": true}})";
 inline constexpr const char* WarnLeft =
     R"({"fontColor": "$FontColorLightRed", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "top"}, "options": {"lineWrap": true, "newlineHandling": "standard"}})";
 
@@ -721,6 +771,48 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 		}
 		break;
 	}
+	case Item::Kind::Grid: {
+		int at = y;
+		if (!item.label.empty()) out += D2RGui::Text(n + "T", a.left, at, width, 60, item.label, Style::Label, item.tooltip), at += 64;
+		// widths: fixed ones, the rest shared
+		std::vector<int> widths;
+		int              fixedW = 0, flexible = 0;
+		for (const auto& column : item.gridColumns2) fixedW += column.width, flexible += column.width ? 0 : 1;
+		for (const auto& column : item.gridColumns2) widths.push_back(column.width ? column.width : std::max(60, (width - fixedW) / std::max(1, flexible)));
+		int x = a.left;
+		for (int c = 0; c < static_cast<int>(widths.size()); ++c) {
+			out += D2RGui::Text(n + "H" + std::to_string(c), x + 10, at, widths[static_cast<std::size_t>(c)] - 20, 52, item.gridColumns2[static_cast<std::size_t>(c)].title, Style::Axis);
+			x += widths[static_cast<std::size_t>(c)];
+		}
+		out += Image(n + "HR", a.left, at + 50, StashKit::Divider(width));
+		at += 56;
+		for (int r = 0; r < static_cast<int>(item.gridCells.size()); ++r, at += GridLine) {
+			const auto rn = n + "R" + std::to_string(r);
+			if (r % 2 == 0) out += Image(rn + "B", a.left, at + 2, Kit::Row(width, GridLine - 4));
+			x = a.left;
+			const auto& cells = item.gridCells[static_cast<std::size_t>(r)];
+			for (int c = 0; c < static_cast<int>(widths.size()) && c < static_cast<int>(cells.size()); ++c) {
+				const auto& cell = cells[static_cast<std::size_t>(c)];
+				const int   w    = widths[static_cast<std::size_t>(c)];
+				int         tx   = x + 14;
+				if (!cell.icon.empty()) out += Image(rn + "I" + std::to_string(c), tx, at + 8, cell.icon), tx += 48;
+				const std::string style = std::string(R"({"fontColor": ")") + (cell.color.empty() ? "$FontColorLightGold" : cell.color)
+				                        + R"(", "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}})";
+				out += D2RGui::Text(rn + "C" + std::to_string(c), tx, at, x + w - tx - 8, GridLine, cell.text, style.c_str(), cell.tooltip);
+				x += w;
+			}
+		}
+		break;
+	}
+	case Item::Kind::Bullet:
+		if (!item.icon.empty()) out += Image(n + "I", a.left + 6, y + 4, item.icon);
+		else out += D2RGui::Text(n + "D", a.left, y, 40, NoteLine(), "*", Style::Axis);
+		out += D2RGui::Text(n, a.left + 56, y, width - 60, HeightOf(item, width) - 8, item.label, Style::Comment, item.tooltip);
+		break;
+	case Item::Kind::CardStart:
+		if (!item.label.empty()) out += D2RGui::Text(n, a.left + 30, y + 14, width - 60, 60, item.label, Style::Section, item.tooltip);
+		break;
+	case Item::Kind::CardEnd: break; // Build draws the frame
 	case Item::Kind::Buttons:
 		if (!item.button.empty()) out += TextButton(n + "L", a.left, y + 7, 300, BoxHeight, item.button, "a.b" + id, item.tooltip);
 		if (!item.button2.empty()) out += TextButton(n + "R", a.right - 300, y + 7, 300, BoxHeight, item.button2, "a.y" + id, item.tooltip);
@@ -838,10 +930,12 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 	case Item::Kind::List: {
 		const auto rows = item.rows ? item.rows() : std::vector<Row> {};
 		if (rows.empty() && !item.empty.empty()) out += D2RGui::Text(n + "E", a.left, y, width, 200, item.empty, Style::Note);
+		int next = y;
 		for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
-			const int ry = y + r * ListRow;
-			if (ry + ListRow < 0 || ry > room) continue; // outside the room: not drawn
 			const auto& row     = rows[static_cast<std::size_t>(r)];
+			const int   ry      = next, ListRow = RowHeightOf(row, width);
+			next += ListRow;
+			if (ry + ListRow < 0 || ry > room) continue; // outside the room: not drawn
 			const auto  rn      = n + "R" + std::to_string(r);
 			const bool  clicked = !row.command.empty() || item.pick;
 			int         right   = a.right; // the row's right end, taken by its buttons from the right
@@ -877,7 +971,7 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 			if (row.sub.empty()) out += D2RGui::Text(rn + "T", textX, ry, textW, ListRow, row.text, Style::LabelOneLine, tip);
 			else {
 				out += D2RGui::Text(rn + "T", textX, ry + 4, textW, 40, row.text, Style::LabelOneLine, tip);
-				out += D2RGui::Text(rn + "S", textX, ry + 40, textW, 30, row.sub, Style::SmallLeft);
+				out += D2RGui::Text(rn + "S", textX, ry + 44, textW, ListRow - 50, row.sub, SmallWrap);
 			}
 			if (!row.button.empty()) out += TextButton(rn + "U", right - 250, ry + (ListRow - BoxHeight) / 2, 240, BoxHeight, row.button, row.buttonCommand, row.buttonTip);
 			else if (!row.value.empty()) out += D2RGui::Text(rn + "V", right - 250, ry, 230, ListRow, row.value, Style::SmallRight, row.valueTip);
@@ -1081,9 +1175,18 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 	scroll      = std::clamp(scroll, 0, std::max(0, total - room));
 	std::string inside;
 	int         y = 0;
+	std::vector<std::pair<std::size_t, int>> cards; // open cards: where their frame goes in `inside`, their top
 	for (int i = 0; i < static_cast<int>(v.content.size()); ++i) {
 		const auto& item = v.content[static_cast<std::size_t>(i)];
 		if (!Visible(item)) continue;
+		if (item.kind == Item::Kind::CardStart) cards.push_back({ inside.size(), y - scroll });
+		if (item.kind == Item::Kind::CardEnd && !cards.empty()) {
+			const auto [at, top] = cards.back();
+			cards.pop_back();
+			const int bottom = y - scroll + HeightOf(item, width) - 10;
+			if (bottom > 0 && top < room && bottom - top > 20)
+				inside.insert(at, Image("Card" + std::to_string(i), a.left - 14, top, Kit::Box(width + 28, bottom - top)));
+		}
 		if (item.kind == Item::Kind::HostGrid) {
 			fixed += GridLayout(item);
 			continue;

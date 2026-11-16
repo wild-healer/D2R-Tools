@@ -222,7 +222,7 @@ inline void Place(int x, int y) {
 	if (s.x == x && s.y == y && s.placed) return;
 	s.x = x, s.y = y, s.placed = true;
 	if (Hosted()) {
-		const std::string             layout = Layout("@PANEL@", "@GRID@");
+		const std::string             layout = Layout("@PANEL@", ", @GRID@"); // the token is a children-list entry
 		const PageHost::LayoutRequest request { .structSize = sizeof(request), .flags = PageHost::LayoutApplyNow, .layout = layout.c_str(), .gridX = 0, .gridY = 0 };
 		if (s.host->setAreaLayout(s.area, &request) != PageHost::Result::Success) Problem("item cells: Player Page Host refused the cells' layout");
 	} else if (s.shown) (void)s.panel.Show(Layout(s.panel.Name(), ItemGrid(GridName(), 0, 0, Columns(), Rows(), TileGrid::MarkerFields)));
