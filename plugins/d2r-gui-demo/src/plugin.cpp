@@ -42,6 +42,10 @@ std::string Search;
 std::string Picked = "Click a row";
 double      Scale  = 1.0;
 int         PosX = 0, PosY = 0;
+std::string Hovered;
+std::string Objective;
+int         ObjectiveIcon = 0;
+const char* ObjectiveIcons[] { "target-arrows", "skull-crossed-bones", "crown", "trophy-cup", "gem-pendant", "castle" };
 
 std::vector<Gui::DropDown::Entry> Monsters() {
 	std::vector<Gui::DropDown::Entry> entries { { "Mods", true } };
@@ -60,7 +64,7 @@ std::vector<App::Row> Rows() {
 		if (!ShowOdd && i % 2) continue;
 		const std::string name = "Row " + std::to_string(i);
 		if (!query.empty() && name.find(query) == std::string::npos && ("row " + std::to_string(i)).find(query) == std::string::npos) continue;
-		rows.push_back({ name, i % 7 == 0 ? "seven" : "", "Click to pick it" });
+		rows.push_back({ .text = name, .tooltip = "Click to open it", .value = i % 7 == 0 ? "seven" : "" });
 	}
 	return rows;
 }
@@ -87,6 +91,42 @@ App::Window Describe() {
 	                    App::Section("A long list"),
 	                    App::Entries("Monster", &Monster, Monsters()).Filter().Tip("Scroll it, or type to filter it"),
 	                    App::Check("Louder", &Loud).When([] { return Monster >= 12; }),
+	                } },
+	          } },
+	        { .tab = { "crossed-swords", "Tiles" }, .title = "Tiles and charts", .pages = {
+	              { .tab = { "crossed-swords", "Tiles" }, .content = [] {
+	                    return std::vector<App::Item> {
+	                        App::Text(Hovered.empty() ? "Right or middle click a tile, or hover it." : Hovered),
+	                        App::Tiles([] {
+	                            std::vector<App::TileRow> rows;
+	                            const char* icons[] { "broadsword", "battle-axe", "pocket-bow", "visored-helm", "breastplate", "ring", "gem-pendant", "boots" };
+	                            for (int r = 0; r < 6; ++r) {
+	                                App::TileRow row { .header = "Row " + std::to_string(r + 1) };
+	                                for (int t = 0; t < 8; ++t) {
+	                                    const std::string name = std::string(icons[t]) + " " + std::to_string(r + 1);
+	                                    row.tiles.push_back({ .id = name, .width = t < 3 ? 2 : 1, .height = t < 5 ? 3 : 1,
+	                                                          .sprite = Gui::Icons::Sprite(icons[t], 80, { 215, 200, 150 }), .label = icons[t], .tooltip = name,
+	                                                          .click = [name] { Hovered = "Clicked " + name; },
+	                                                          .rightClick = [name] { Hovered = "Right clicked " + name; },
+	                                                          .middleClick = [name] { Hovered = "Middle clicked " + name; },
+	                                                          .hover = [name](bool over) { if (over) Hovered = "Over " + name; } });
+	                                }
+	                                rows.push_back(std::move(row));
+	                            }
+	                            return rows;
+	                        }),
+	                    };
+	                } },
+	              { .tab = { "pie-chart", "Charts" }, .items = {
+	                    App::Chart({ { 12, { 230, 190, 80 }, "Found" }, { 5, { 120, 180, 90 }, "Perfect" }, { 30, { 70, 70, 70 }, "Missing" } }, 420, "36%", "17 / 47"),
+	                    App::Squares({ { .icon = Gui::Icons::Sprite("broadsword", 70, { 215, 200, 150 }), .tooltip = "Weapons", .ring = { { 3, { 230, 190, 80 } }, { 7, { 70, 70, 70 } } }, .click = [] { App::Notice("Weapons"); } },
+	                                   { .icon = Gui::Icons::Sprite("visored-helm", 70, { 215, 200, 150 }), .tooltip = "Armor", .ring = { { 6, { 230, 190, 80 } }, { 2, { 70, 70, 70 } } }, .click = [] { App::Notice("Armor"); } },
+	                                   { .icon = Gui::Icons::Sprite("ring", 70, { 215, 200, 150 }), .tooltip = "Jewelry", .ring = { { 1, { 230, 190, 80 } }, { 9, { 70, 70, 70 } } }, .click = [] { App::Reveal("ring 5"), App::Go(2, 0); } } }),
+	                    App::Field("Objective", &Objective, "Type an objective").Icon(Gui::Icons::Sprite(ObjectiveIcons[ObjectiveIcon], 40, { 215, 200, 150 }), [] {
+	                        std::vector<std::string> sprites;
+	                        for (const char* icon : ObjectiveIcons) sprites.push_back(Gui::Icons::Sprite(icon, 50, { 215, 200, 150 }));
+	                        App::PickIcon(sprites, [](int k) { ObjectiveIcon = k; }, {}, "The objective's icon");
+	                    }),
 	                } },
 	          } },
 	        { .tab = { "checklist", "List" }, .title = "A list", .content = [] {

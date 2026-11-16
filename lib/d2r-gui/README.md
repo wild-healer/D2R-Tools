@@ -71,7 +71,12 @@ App::Window window {
   (`.Draft`: Enter saves, Esc cancels; `.Clearable`), `Value` (read-only),
   `Action` (`.Arrow`, `.Confirm`), `Adder`, `List` (rows with an icon, two
   lines, a value or a button, a gear; `.Empty`), `Cells` (the window's
-  `.cells`), `HostGrid` (a Player Page Host area's grid), `Custom`. Each takes
+  `.cells`), `HostGrid` (a Player Page Host area's grid), `Tiles` (rows of item tiles
+  with labels, left, right and middle clicks, hover, `App::Reveal`), `Chart`
+  (a ring chart), `Squares` (square buttons with rings), `Custom`. List rows
+  can form a tree (indent, open arrow, a check box partly ticked) and carry
+  buttons with confirm. `Field(...).Icon()` and `App::PickIcon` for an icon
+  picker. Each takes
   `.Tip()`, `.Note()`, `.Restart()`, `.Remove()`, `.OnChange()`, `.When()`.
 - **Data**: components point at the plugin's variables, or take
   `App::Bound(get, set)` when the value lives elsewhere. A set can refuse a
@@ -82,6 +87,8 @@ App::Window window {
   stay outside the scrolled part. `App::Push(page)` opens a page with a back
   arrow, a title and a subtitle; `App::Back()`, `App::OpenOn(page)`. Each
   level keeps its scroll.
+- **Over the stash**: `.overStash` opens the window over the open stash (the
+  stash stays open) and closes it with the stash.
 - **On a Player Page Host area**: `.host = {layout, open, close, isOpen}` makes
   the window the area's panel (one view, `@PANEL@`, `@GRID@`).
 - **Handled by the library**: the views (panel pool), clicks, typing, open
@@ -135,7 +142,7 @@ headers, a searchable clickable list). Console command `guidemo`.
 | `menus.h` (opt-in) | a window's menus and pages as rows of icon tabs, each menu remembering its page | Grail On! |
 | `app.h` (opt-in) | the declared window: frame, menus, pages and components bound to the plugin's data | new |
 | `item_cells.h` (opt-in) | single item cells that each take one item code (an offering), on Player Page Host's page or the plugin's own | new |
-| `page_host_api.h` | Player Page Host's client header (used by item_cells.h) | Player Page Host |
+| `page_host_api.h` | Player Page Host's client header (used by item_cells.h and app.h). A plugin that talks to the host includes this copy, not one of its own: two copies collide | Player Page Host |
 
 ## Rules the library follows
 

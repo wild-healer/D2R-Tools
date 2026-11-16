@@ -10,25 +10,19 @@
 //     its values in check boxes and text boxes, saved by Apply (read by the
 //     plugin at the next start).
 //
-// The window is the character screen's: its background (read from the game's
-// files) with the stat boxes covered by plain stone made from the same art,
-// its hinge, title and close button. Rows use the game's art: the loot filter
-// list's rows and check box, the options arrows, the drop-down box frame for
-// text boxes and buttons, the stash slot for the gear buttons (Grail On!'s
-// Config button) and the scroll bar. Every view scrolls (wheel, bar); the
-// list has a search bar; text boxes take keys through a keyboard hook.
-//
-// D2R keeps a panel's widgets from the first time it loads it, and plugins can
-// only register panels while they load, so each view is a new layout in one of
-// 60 panels registered at load: two take turns, each unloaded before it opens
-// again (Run Counter's method). Buttons send PanelManager:ClosePanel:
-// i-hate-tomls/Cmd-..., which the plugin catches.
+// The window is declared with the D2R GUI library's App (lib/d2r-gui app.h):
+// the list as the base page, a joined plugin's settings and a TOML file as
+// pages pushed over it (Back returns), each value bound to the plugin's get
+// and set callbacks or to the TOML text. The library draws it in the
+// character screen's frame and does the clicks, typing, scrolling and the
+// game's left-panel behaviour.
 //
 // Opened from the Controls menu (I Hate TOMLs > Open I Hate TOMLs) or the
 // console command "pluginmenu".
 
 #include "../include/i_hate_tomls_client.h"
 #include <d2r_gui.h>
+#include <d2r_gui/app.h>
 #include "toml_edit.h"
 #include <D2RLPlugin/api.h>
 #include <windows.h>
@@ -51,7 +45,7 @@
 namespace {
 
 constexpr const char* PluginId      = "i-hate-tomls";
-constexpr const char* PluginVersion = "1.1.1-dev-3";
+constexpr const char* PluginVersion = "1.1.1-dev-4";
 constexpr const char* CommandPrefix = "i-hate-tomls/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -67,53 +61,11 @@ const D2RL::PluginInfo Info {
 
 const D2RL::PluginContext*      Context {};
 const D2RL::ThreadService*      Threads {};
-const D2RL::PanelService*       PanelApi {};
-const D2RL::WidgetService*      WidgetApi {};
-const D2RL::ResourceService*    ResourceApi {};
-const D2RL::SharedEventService* EventApi {};
 
-// ---- window geometry (the character screen's, HD layout units) ----
+// ---- the window: declared with D2R GUI's App (lib/d2r-gui app.h) ----
 
 namespace Gui = D2RGui;
-constexpr int PanelX = Gui::CharacterWindow::X, PanelY = Gui::CharacterWindow::Y, PanelWidth = Gui::CharacterWindow::Width, PanelHeight = Gui::CharacterWindow::Height;
-constexpr int ContentLeft = 105, ContentRight = 1044;       // the scroll bar is right of the content
-constexpr int HeaderY = 165;  // plugin name and its back arrow, in the header box
-constexpr int RowsTop = 318;  // first row
-constexpr int RowHeight = 96; // a joined plugin's settings rows
-constexpr int ViewBottom = 1278;                       // rows end here
-constexpr int ViewHeight = ViewBottom - RowsTop;
-constexpr int NoteY   = ViewBottom + 4;                // inside the cover
-constexpr int FooterY = 1364;                          // the bottom strip
-constexpr int ControlLeft = 690;                       // where a joined plugin's control starts
-constexpr int ListRowHeight = 80;                      // the plugin list
-constexpr int ListRowWidth = ContentRight - ContentLeft, ListRowBack = 74;
-constexpr int SearchY = RowsTop + 2;                   // the search bar, under the count
-constexpr int TomlControl = 500;                       // where a TOML value's box starts
-constexpr int BoxHeight = 56;
-constexpr int ListTop = SearchY + BoxHeight + 18;      // the plugin list's first row
-constexpr int TextBoxWidth = ContentRight - TomlControl;   // a value's text box
-constexpr int ItemBoxWidth = TextBoxWidth - 70;            // a list item's, beside its remove button
-constexpr int FieldHeight = 76, ItemHeight = 66;
-// Text metrics, set from the game's font (RefreshText): comment line height
-// and characters per line, a key's width per character and the height of a
-// key stacked on its own line. The defaults fit the game's own font (a wide
-// small caps font, about 17 px a character); a font mod with taller or wider
-// letters raises them, never lowers them.
-int NoteLine = 34, NoteChars = 50;
-int LabelLine = 50; // (without the font, a character is taken as 20 units: D2R GUI Font::fallbackChar)
-constexpr int WheelStep = 120;                         // pixels per wheel notch
-constexpr int DropWidth = ContentRight - ControlLeft, TileHeight = 52; // a choice's drop-down box and its list's lines
-constexpr int ArrowSize = 56;                          // the up/down arrows of a position's X and Y
-constexpr int PositionLeft = ContentRight - ArrowSize - 20 - 2 * (32 + 2 * ArrowSize + 96 + 14); // a position's X
-constexpr int ButtonWidth = 240;                       // Apply, Reload
-constexpr int IconSize = 40;
-constexpr int GearSize = 64;                           // the square button that opens a plugin's settings
-constexpr int CharWidth = 17;                          // a text box's characters (estimate)
-// The scroll bar, on the cover's right edge: a track cut into steps of
-// StepHeight, each an invisible button scrolling to its share of the rows.
-constexpr int BarLeft = 1054, ScrollWidth = 30, StepHeight = 30;
-constexpr int PoolSize = 60;     // panels registered at load (64 allowed)
-
+namespace App = D2RGui::App;
 
 // ---- log ----
 
@@ -1016,16 +968,12 @@ void Try() {
 	if (count > 0 && Hub::Wanted("chat_updates")) Print(std::to_string(count) + (count == 1 ? " plugin can be updated" : " plugins can be updated"));
 }
 
-void __cdecl OnPlayerReady(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent*, void*) noexcept {
+// A game joined (the player ready) or left.
+void InGameChanged(bool in) {
+	InGame = in;
+	if (!in) return;
 	PlayerReady = true;
-	InGame      = true;
-	D2RGui::LeftPanel::InGame(true);
 	Try();
-}
-
-void __cdecl OnGameLeft(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent*, void*) noexcept {
-	InGame = false;
-	D2RGui::LeftPanel::InGame(false);
 }
 } // namespace Chat
 
@@ -1038,45 +986,14 @@ int Chat::UpdateCount() {
 
 // ---- the window's state ----
 
-enum class View { List, Client, Toml };
+std::string SearchText; // the list's search bar
 
-View        Current  = View::List;
-int         ListScroll   = 0; // first row shown of the plugin list
-int         Shown        = 0; // index of the joined plugin shown
-int         ClientScroll = 0; // first row shown of its settings
-std::string SearchText;       // the list's search bar
-int         ConfirmRow = -1;  // action row waiting for its second click
-ULONGLONG   ConfirmUntil {};
-std::string Notice;           // one line under the rows
-bool        NoticeWarn {};
-
-void SetNotice(std::string text, bool warn = false) {
-	Notice     = std::move(text);
-	NoticeWarn = warn;
-}
-
-void ShowView();
-bool MenuOpen();
-
-// Typing: the game's own text boxes don't get the keys in a plugin's panel
-// (they go to the game's key bindings), so, as Grail On! does, a keyboard
-// hook takes them while a box is active (see "typing" below). The box being
-// typed in: "search", "f<field>" (a TOML value), "i<field>.<item>" (a TOML
-// list item) or "s<setting>" (a joined plugin's text).
-std::string       TypingKey;    // UI thread
-std::string       TypingBefore; // its text when typing began (Esc puts it back)
-std::string       ClientDraft;  // a joined plugin's text being typed
-
-std::atomic<bool> MenuVisible {}; // the menu is open, as last seen on the UI thread
-void              WatchMouse();
-
-void __cdecl RefreshTask(const D2RL::PluginContext*, void*) noexcept {
-	if (MenuOpen()) ShowView();
-}
-
+// Any thread: the window again with the data as it is now.
 void QueueRefresh() {
-	if (Threads) (void)Threads->runOnUiThread(Context, RefreshTask, nullptr);
+	(void)Gui::RunOnUi([] { App::Refresh(); });
 }
+
+App::Page ClientPage(const std::string& plugin);
 
 // ---- the service ----
 
@@ -1179,23 +1096,18 @@ uint64_t __cdecl RegisterInterface(const D2RL::PluginContext* caller, const Plug
 void __cdecl UnregisterClient(uint64_t handle) noexcept {
 	std::erase_if(Clients, [&](const Client& c) { return c.handle == handle; });
 	std::erase_if(Windows, [&](const OwnWindow& w) { return w.handle == handle; });
-	Shown = std::clamp(Shown, 0, std::max(0, static_cast<int>(Clients.size()) - 1));
-	if (Current == View::Client && Clients.empty()) Current = View::List;
+	QueueRefresh();
 }
 
 void __cdecl ValueChanged(uint64_t, const char*) noexcept { QueueRefresh(); }
 
+// Another plugin's Menu.Open(): the window straight on its page.
 void __cdecl OpenFor(uint64_t handle) noexcept {
-	for (std::size_t i = 0; i < Clients.size(); ++i)
-		if (Clients[i].handle == handle) Shown = static_cast<int>(i), ClientScroll = 0, Current = View::Client;
-	if (Threads)
-		(void)Threads->runOnUiThread(
-		    Context,
-		    [](const D2RL::PluginContext*, void*) noexcept {
-			    if (!MenuOpen()) WatchMouse(), D2RGui::LeftPanel::Opening();
-			    ShowView();
-		    },
-		    nullptr);
+	std::string plugin;
+	for (const auto& c : Clients)
+		if (c.handle == handle) plugin = c.plugin;
+	if (plugin.empty()) return;
+	(void)Gui::RunOnUi([plugin] { App::OpenOn(ClientPage(plugin)); });
 }
 
 const PluginMenu::Service Service {
@@ -1209,20 +1121,27 @@ const PluginMenu::Service Service {
 };
 
 // ---- joined plugins' values ----
+// A joined plugin's values live behind its get and set callbacks (TOML text);
+// the window reads and writes them through App bindings. A set the plugin
+// refuses returns why, which the window shows in red.
 
-std::string GetValue(const Client& client, const Setting& setting) {
-	char out[512] {};
-	if (!client.get(setting.key.c_str(), out, sizeof(out), client.user)) return {};
+std::string Read(const std::string& plugin, const std::string& key) {
+	const int i = ClientIndex(plugin);
+	if (i < 0) return {};
+	const Client& client = Clients[static_cast<std::size_t>(i)];
+	char          out[512] {};
+	if (!client.get(key.c_str(), out, sizeof(out), client.user)) return {};
 	return Trim(out);
 }
 
-bool SetValue(Client& client, const Setting& setting, const std::string& value) {
-	char error[256] {};
-	const bool ok = client.set(setting.key.c_str(), value.c_str(), error, sizeof(error), client.user);
-	Log(!ok, "%s: %s set to %s%s%s", client.plugin.c_str(), setting.key.c_str(), value.c_str(), ok ? "" : " REFUSED: ", ok ? "" : error);
-	if (ok) SetNotice(setting.restart ? setting.label + " applies after a restart." : std::string());
-	else SetNotice(setting.label + ": " + (error[0] ? error : "not changed"), true);
-	return ok;
+std::string Write(const std::string& plugin, const std::string& key, const std::string& label, const std::string& value) {
+	const int i = ClientIndex(plugin);
+	if (i < 0) return "This plugin left the menu.";
+	const Client client = Clients[static_cast<std::size_t>(i)]; // its set may register again
+	char         error[256] {};
+	const bool   ok = client.set(key.c_str(), value.c_str(), error, sizeof(error), client.user);
+	Log(!ok, "%s: %s set to %s%s%s", plugin.c_str(), key.c_str(), value.c_str(), ok ? "" : " REFUSED: ", ok ? "" : error);
+	return ok ? std::string() : label + ": " + (error[0] ? error : "not changed");
 }
 
 // The index of a value among an enum's values (TOML text compared unquoted).
@@ -1238,93 +1157,113 @@ std::string EnumLabel(const Setting& setting, int index) {
 	return index < static_cast<int>(setting.labels.size()) ? setting.labels[static_cast<std::size_t>(index)] : setting.values[static_cast<std::size_t>(index)];
 }
 
-// What a row shows as its value.
-std::string ShownValue(const Client& client, const Setting& setting) {
-	const std::string value = GetValue(client, setting);
-	switch (setting.kind) {
-	case Kind::Enum: return EnumLabel(setting, EnumIndex(setting, value));
+// The two numbers of a position ("[x, y]").
+std::pair<double, double> PositionOf(const std::string& value) {
+	const auto items = ArrayItems(value);
+	return { items.size() > 0 ? Number(items[0], 0) : 0, items.size() > 1 ? Number(items[1], 0) : 0 };
+}
+
+// One setting of a joined plugin as a component.
+App::Item SettingItem(const std::string& plugin, const Setting& s) {
+	const auto get = [plugin, key = s.key] { return Read(plugin, key); };
+	const auto put = [plugin, key = s.key, label = s.label](const std::string& value) { return Write(plugin, key, label, value); };
+	App::Item  item;
+	switch (s.kind) {
+	case Kind::Header: return App::Section(s.label).Tip(s.hint);
+	case Kind::Text: return App::Text(s.label).Tip(s.hint);
+	case Kind::Bool:
+		item = App::Check(s.label, App::Bind<bool>([get] { return Unquote(get()) == "true"; }, [put](const bool& on) { return put(on ? "true" : "false"); }));
+		break;
 	case Kind::Int:
-	case Kind::Float: return Decimal(Number(value, setting.min), setting.decimals);
-	case Kind::String: return Unquote(value);
-	default: return value;
+	case Kind::Float:
+		item = App::Number(s.label, App::Bind<double>([get, s] { return Number(get(), s.min); }, [put, s](const double& v) { return put(Decimal(std::clamp(v, s.min, s.max), s.decimals)); }), s.min, s.max)
+		           .Decimals(s.decimals)
+		           .Step(s.step, s.shiftStep, s.ctrlStep);
+		if (!s.defaultValue.empty()) item = item.Reset([put, d = s.defaultValue] { (void)put(d); });
+		break;
+	case Kind::Enum: {
+		std::vector<std::string> names;
+		for (int k = 0; k < static_cast<int>(s.values.size()); ++k) names.push_back(EnumLabel(s, k));
+		item = App::Choice(s.label,
+		                   App::Bind<int>([get, s] { return EnumIndex(s, get()); },
+		                                  [put, s](const int& k) { return k >= 0 && k < static_cast<int>(s.values.size()) ? put(Quote(s.values[static_cast<std::size_t>(k)])) : std::string(); }),
+		                   names);
+		break;
 	}
-}
-
-// The step of a click: Shift and Ctrl held make it bigger.
-double StepSize(const Setting& setting) {
-#ifdef _WIN32
-	if (GetKeyState(VK_CONTROL) & 0x8000) return setting.ctrlStep;
-	if (GetKeyState(VK_SHIFT) & 0x8000) return setting.shiftStep;
-#endif
-	return setting.step;
-}
-
-// Steps a choice or number one way and saves it.
-void Step(Client& client, const Setting& setting, bool up) {
-	const std::string value = GetValue(client, setting);
-	if (setting.kind == Kind::Enum) {
-		const int count = static_cast<int>(setting.values.size());
-		if (!count) return;
-		int index = EnumIndex(setting, value);
-		index     = index < 0 ? 0 : (index + (up ? 1 : count - 1)) % count;
-		(void)SetValue(client, setting, Quote(setting.values[static_cast<std::size_t>(index)]));
-		return;
+	case Kind::String:
+		item = App::Field(s.label, App::Bind<std::string>([get] { return Unquote(get()); }, [put](const std::string& text) { return put(Quote(text)); }), "(empty)").Draft();
+		break;
+	case Kind::Position: {
+		const auto axis = [get, put, s](bool y) {
+			return App::Bind<int>([get, y] { const auto p = PositionOf(get()); return static_cast<int>(std::lround(y ? p.second : p.first)); },
+			                      [get, put, s, y](const int& v) {
+				                      auto p                    = PositionOf(get());
+				                      (y ? p.second : p.first) = std::clamp(static_cast<double>(v), s.min, s.max);
+				                      return put("[" + Decimal(p.first, s.decimals) + ", " + Decimal(p.second, s.decimals) + "]");
+			                      });
+		};
+		item = App::Position(s.label, axis(false), axis(true)).Step(s.step, s.shiftStep, s.ctrlStep);
+		if (!s.defaultValue.empty()) item = item.Reset([put, d = s.defaultValue] { (void)put(d); });
+		break;
 	}
-	const double size   = StepSize(setting);
-	double       number = Number(value, setting.min) + (up ? size : -size);
-	number              = std::clamp(number, setting.min, setting.max);
-	(void)SetValue(client, setting, Decimal(number, setting.decimals));
+	case Kind::Table: {
+		// each cell the bool "<row>.<column>"; a cell whose column needs another one unticked is greyed
+		const auto on = [plugin, s](int r, int c) {
+			if (r < 0 || c < 0 || r >= static_cast<int>(s.rows.size()) || c >= static_cast<int>(s.columns.size())) return false;
+			return Unquote(Read(plugin, s.rows[static_cast<std::size_t>(r)] + "." + s.columns[static_cast<std::size_t>(c)])) == "true";
+		};
+		item = App::Table(s.label, s.columnLabels, s.rowLabels, on,
+		                  [plugin, s](int r, int c, bool tick) {
+			                  if (r < 0 || c < 0 || r >= static_cast<int>(s.rows.size()) || c >= static_cast<int>(s.columns.size())) return std::string();
+			                  const auto rr = static_cast<std::size_t>(r), cc = static_cast<std::size_t>(c);
+			                  return Write(plugin, s.rows[rr] + "." + s.columns[cc], s.rowLabels[rr] + ", " + s.columnLabels[cc], tick ? "true" : "false");
+		                  })
+		           .Disabled([on, s](int r, int c) {
+			           const int need = c >= 0 && c < static_cast<int>(s.needs.size()) ? s.needs[static_cast<std::size_t>(c)] : -1;
+			           return need < 0 || on(r, need) ? std::string() : "Needs " + s.columnLabels[static_cast<std::size_t>(need)];
+		           });
+		break;
+	}
+	case Kind::Action:
+		item = App::Action(s.label, "", [put, label = s.label] {
+			       const auto why = put("\"run\"");
+			       App::Notice(why.empty() ? label + ": done." : why, !why.empty());
+		       })
+		           .Confirm(s.confirm)
+		           .Arrow();
+		break;
+	}
+	return item.Tip(s.hint).Note(s.note).Restart(s.restart);
 }
 
-// Steps one axis of a position ("[x, y]") and saves it.
-void StepPosition(Client& client, const Setting& setting, bool y, bool up) {
-	auto [px, py]     = std::pair<double, double> {};
-	const auto items  = ArrayItems(GetValue(client, setting));
-	px                = items.size() > 0 ? Number(items[0], 0) : 0;
-	py                = items.size() > 1 ? Number(items[1], 0) : 0;
-	const double size = StepSize(setting);
-	double&      v    = y ? py : px;
-	v                 = std::clamp(v + (up ? size : -size), setting.min, setting.max);
-	(void)SetValue(client, setting, "[" + Decimal(px, setting.decimals) + ", " + Decimal(py, setting.decimals) + "]");
+// A joined plugin's page: its settings, read again at each view.
+App::Page ClientPage(const std::string& plugin) {
+	const int i = ClientIndex(plugin);
+	return {
+		.title   = i >= 0 ? Clients[static_cast<std::size_t>(i)].title : plugin,
+		.content = [plugin] {
+			std::vector<App::Item> out;
+			const int              at = ClientIndex(plugin);
+			if (at < 0) return std::vector<App::Item> { App::Text("This plugin left the menu.") };
+			const auto settings = Clients[static_cast<std::size_t>(at)].settings; // a set may change Clients
+			if (settings.empty()) out.push_back(App::Text("This plugin has no settings to show."));
+			for (const auto& s : settings) out.push_back(SettingItem(plugin, s));
+			return out;
+		},
+		.backTip = "All plugins",
+	};
 }
 
 // ---- a plugin's TOML config ----
 
-struct TomlRow {
-	enum class Type { Note, Section, Field, Item } type = Type::Note;
-	int         field = -1, item = -1;
-	int         height {};
-	std::string text;
-	bool        stacked {}; // a field whose key is above its box
-	int         noteLines {}; // a field's own comment
-};
-
-struct TomlPage {
+struct TomlConfig {
 	std::string                  plugin, name;
 	std::wstring                 path;
 	TomlDoc::Document            doc;
 	std::vector<TomlEdit::Field> fields;
-	std::vector<TomlRow>         rows;
-	int                          scroll {}; // first row shown
-	bool                         leaving {}; // Back clicked once with changes not applied
 };
 
-TomlPage Toml;
-
-// A text's width in layout units, Medium (labels, values) or Small (the game's font, see D2R GUI).
-int TextWidth(std::string_view text, bool medium = true) { return Gui::Font::TextWidth(text, medium); }
-
-// Lines comment text takes in the comment box.
-int Lines(const std::string& text) { return Gui::Font::WrappedLines(text, ContentRight - ContentLeft, NoteChars); }
-
-// Sizes text for the profile in use (Low Vision Mode may have changed).
-void RefreshText() {
-	Gui::Font::Refresh();
-	if (!Gui::Font::Measured()) return;
-	NoteLine  = std::max(34, Gui::Font::LineHeight(false) + 1);
-	LabelLine = std::max(50, Gui::Font::LineHeight(true) + 8);
-}
-
+TomlConfig Toml;
 
 bool JoinsPrevious(const std::string& previous, const std::string& line) {
 	if (previous.size() < 50 || line.empty()) return false;
@@ -1335,27 +1274,79 @@ bool JoinsPrevious(const std::string& previous, const std::string& line) {
 	return true;
 }
 
-void BuildTomlRows() {
-	auto& rows = Toml.rows;
-	rows.clear();
+// Reads the file again; false with the reason.
+bool LoadToml(std::string& why) {
+	std::string bytes;
+	if (!ReadWholeFile(Toml.path, bytes)) {
+		Toml.doc       = {};
+		Toml.doc.error = "the file could not be read";
+		Toml.fields.clear();
+		return why = Toml.doc.error, false;
+	}
+	Toml.doc    = TomlDoc::Parse(std::move(bytes));
+	Toml.fields = Toml.doc.error.empty() ? TomlEdit::Fields(Toml.doc) : std::vector<TomlEdit::Field>();
+	if (!Toml.doc.error.empty()) Toml.doc.items.clear();
+	TomlEdit::Mark(Toml.doc, Toml.fields);
+	if (!Toml.doc.error.empty()) return why = "this file is not valid TOML (" + Toml.doc.error + ")", false;
+	return true;
+}
+
+void ApplyToml() {
+	std::string disk;
+	if (!ReadWholeFile(Toml.path, disk)) return App::Notice("The file could not be read.", true);
+	if (disk != Toml.doc.bytes) return App::Notice("The file changed since it was opened: click Reload first.", true);
+	std::string out, why;
+	int         changed = 0;
+	if (!TomlEdit::Apply(Toml.doc, Toml.fields, out, why, changed)) return App::Notice(why, true);
+	if (!changed) return App::Notice("Nothing to apply.");
+	// the file as it was, beside it
+	if (!WriteWholeFile(Toml.path + L".bak", disk)) return App::Notice("Could not write the backup (" + Narrow(FileName(Toml.path)) + ".bak), so nothing was saved.", true);
+	if (!WriteWholeFile(Toml.path, out)) return App::Notice("Could not save the file.", true);
+	Log(false, "%s: %d value(s) saved to %s", Toml.plugin.c_str(), changed, Narrow(Toml.path).c_str());
+	std::string reason;
+	(void)LoadToml(reason);
+	App::Notice("Saved " + std::to_string(changed) + (changed == 1 ? " change" : " changes") + ". Restart the game to apply.");
+}
+
+void ReloadToml() {
+	std::string why;
+	if (LoadToml(why)) App::Notice("Read again from the file.");
+	else App::Notice(why, true);
+}
+
+TomlEdit::Field* FieldAt(int field) { return field >= 0 && field < static_cast<int>(Toml.fields.size()) ? &Toml.fields[static_cast<std::size_t>(field)] : nullptr; }
+
+// A TOML text box's binding: written at every key, Esc puts the old text back.
+App::Bind<std::string> TomlText(int field, int item) {
+	const auto at = [field, item]() -> std::string* {
+		auto* f = FieldAt(field);
+		if (!f) return nullptr;
+		if (item < 0) return &f->text;
+		return item < static_cast<int>(f->list.size()) ? &f->list[static_cast<std::size_t>(item)] : nullptr;
+	};
+	return { [at] { const auto* t = at(); return t ? *t : std::string(); },
+		     [at](const std::string& text) {
+			     if (auto* t = at()) *t = text;
+			     return std::string();
+		     } };
+}
+
+// The file's rows: its comments as text, its tables as sections, its keys with their controls.
+std::vector<App::Item> TomlItems() {
+	std::vector<App::Item>   out;
 	std::vector<std::string> paragraph;
 	const auto               flush = [&] {
-        // a long comment is cut into rows that each fit the window
-        const int   most = (ViewHeight - 12) / NoteLine;
-        std::string text;
-        int         lines = 0;
-        const auto  emit  = [&] {
-            if (!text.empty()) rows.push_back({ .type = TomlRow::Type::Note, .height = lines * NoteLine + 12, .text = text });
-            text.clear();
-            lines = 0;
-        };
+        // a long comment is cut into parts that each fit the window
+        constexpr int most = 18;
+        std::string   text;
+        int           lines = 0;
         for (const auto& line : paragraph) {
-            const int count = Lines(line);
-            if (lines && lines + count > most) emit();
+            const int count = Gui::Font::WrappedLines(line, 939, 55, false);
+            if (lines && lines + count > most) out.push_back(App::Text(text)), text.clear(), lines = 0;
             text += (text.empty() ? "" : "\n") + line;
             lines += count;
         }
-        emit();
+        if (!text.empty()) out.push_back(App::Text(text));
         paragraph.clear();
 	};
 	std::map<std::string, int> seen; // arrays of tables: their number
@@ -1380,269 +1371,76 @@ void BuildTomlRows() {
 			flush();
 			std::string title = item.text;
 			if (item.kind == TomlDoc::Kind::ArrayTable) title += "  #" + std::to_string(++seen[item.text]);
-			rows.push_back({ .type = TomlRow::Type::Section, .height = 96, .text = title });
-			if (!item.comment.empty()) rows.push_back({ .type = TomlRow::Type::Note, .height = Lines(GameText(item.comment)) * NoteLine + 12, .text = GameText(item.comment) });
+			out.push_back(App::Section(title));
+			if (!item.comment.empty()) out.push_back(App::Text(GameText(item.comment)));
 			break;
 		}
 		case TomlDoc::Kind::Key: {
 			flush();
-			const auto& f = Toml.fields[static_cast<std::size_t>(field)];
-			// a check box is at the row's end: its key has the room before it
-			const int  room    = f.editor == TomlEdit::Editor::Check ? ContentRight - ContentLeft - 90 : TomlControl - ContentLeft - 16;
-			const bool stacked = TextWidth(item.text) > room;
-			const std::string note  = GameText(item.comment);
-			const int         notes = note.empty() ? 0 : Lines(note);
-			rows.push_back({ .type = TomlRow::Type::Field, .field = field, .height = FieldHeight + (stacked ? LabelLine : 0) + notes * NoteLine, .text = note, .stacked = stacked, .noteLines = notes });
-			if (f.editor == TomlEdit::Editor::List)
-				for (int k = 0; k < static_cast<int>(f.list.size()); ++k) rows.push_back({ .type = TomlRow::Type::Item, .field = field, .item = k, .height = ItemHeight });
-			++field;
+			const int idx = field++;
+			const auto* f = FieldAt(idx);
+			if (!f) break;
+			std::string tip = f->key + "\nType: " + TomlEdit::TypeName(f->type);
+			if (f->editor == TomlEdit::Editor::List && f->itemTypeKnown) tip += std::string(" of ") + TomlEdit::TypeName(f->itemType) + " items";
+			if (f->escaped) tip += "\nWrite a line break as \\n.";
+			const std::string note = GameText(item.comment);
+			switch (f->editor) {
+			case TomlEdit::Editor::Check:
+				out.push_back(App::Check(f->key, App::Bind<bool>([idx] { const auto* g = FieldAt(idx); return g && g->text == "true"; },
+				                                                 [idx](const bool& on) {
+					                                                 if (auto* g = FieldAt(idx)) g->text = on ? "true" : "false";
+					                                                 return std::string();
+				                                                 }))
+				                  .Tip(tip)
+				                  .Note(note));
+				break;
+			case TomlEdit::Editor::Text:
+			case TomlEdit::Editor::Raw: out.push_back(App::Field(f->key, TomlText(idx, -1), "(empty)").Tip(tip + "\nClick to type; Esc puts the value back").Note(note)); break;
+			case TomlEdit::Editor::ReadOnly: out.push_back(App::Value(f->key, "(on several lines: edit it in the file)").Tip(f->text).Note(note)); break;
+			case TomlEdit::Editor::List: {
+				const auto count = f->list.empty() ? std::string("empty list") : std::to_string(f->list.size()) + (f->list.size() == 1 ? " item" : " items");
+				out.push_back(App::Adder(f->key, count, [idx] {
+					              if (auto* g = FieldAt(idx)) g->list.emplace_back();
+				              }).Note(note));
+				for (int k = 0; k < static_cast<int>(f->list.size()); ++k)
+					out.push_back(App::Field(std::to_string(k + 1), TomlText(idx, k), "(empty)").Tip("Click to type; Esc puts the item back").Remove([idx, k] {
+						if (auto* g = FieldAt(idx); g && k < static_cast<int>(g->list.size())) g->list.erase(g->list.begin() + k);
+					}));
+				break;
+			}
+			}
 			break;
 		}
 		}
 	}
 	flush();
-}
-
-// Reads the file again; false with the reason.
-bool LoadToml(const std::wstring& path, std::string& why) {
-	std::string bytes;
-	if (!ReadWholeFile(path, bytes)) {
-		Toml.doc = {};
-		Toml.doc.error = "the file could not be read";
-		Toml.fields.clear();
-		BuildTomlRows();
-		return why = Toml.doc.error, false;
-	}
-	Toml.doc    = TomlDoc::Parse(std::move(bytes));
-	Toml.fields = Toml.doc.error.empty() ? TomlEdit::Fields(Toml.doc) : std::vector<TomlEdit::Field>();
-	if (!Toml.doc.error.empty()) Toml.doc.items.clear();
-	TomlEdit::Mark(Toml.doc, Toml.fields);
-	Toml.leaving = false;
-	BuildTomlRows();
-	if (!Toml.doc.error.empty()) return why = "this file is not valid TOML (" + Toml.doc.error + ")", false;
-	return true;
-}
-
-// True when the boxes hold something the file does not.
-bool TomlChanged() {
-	if (!Toml.doc.error.empty()) return false;
-	std::string out, why;
-	int         changed = 0;
-	return !TomlEdit::Apply(Toml.doc, Toml.fields, out, why, changed) || changed > 0;
-}
-
-void ApplyToml() {
-	std::string disk;
-	if (!ReadWholeFile(Toml.path, disk)) return SetNotice("The file could not be read.", true);
-	if (disk != Toml.doc.bytes) return SetNotice("The file changed since it was opened: click Reload first.", true);
-	std::string out, why;
-	int         changed = 0;
-	if (!TomlEdit::Apply(Toml.doc, Toml.fields, out, why, changed)) return SetNotice(why, true);
-	if (!changed) return SetNotice("Nothing to apply.");
-	// the file as it was, beside it
-	if (!WriteWholeFile(Toml.path + L".bak", disk)) return SetNotice("Could not write the backup (" + Narrow(FileName(Toml.path)) + ".bak), so nothing was saved.", true);
-	if (!WriteWholeFile(Toml.path, out)) return SetNotice("Could not save the file.", true);
-	Log(false, "%s: %d value(s) saved to %s", Toml.plugin.c_str(), changed, Narrow(Toml.path).c_str());
-	const int   scroll = Toml.scroll;
-	std::string reason;
-	(void)LoadToml(Toml.path, reason);
-	Toml.scroll = scroll; // clamped when shown
-	SetNotice("Saved " + std::to_string(changed) + (changed == 1 ? " change" : " changes") + ". Restart the game to apply.");
-}
-
-// ---- layout (D2R GUI pieces) ----
-
-using Gui::Text;
-using Gui::HitButton;
-using Gui::Check;
-
-// A button on a sprite (written into the JSON as is).
-std::string Button(const std::string& name, int x, int y, const std::string& file, int normal, int pressed, int hovered, const std::string& command, const std::string& tooltip = {}) {
-	return Gui::Button(name, x, y, file, { normal, pressed, hovered }, command, tooltip);
-}
-
-// A button with its text on it.
-std::string TextButton(const std::string& name, int x, int y, const std::string& text, const std::string& command, const std::string& tooltip = {}) {
-	return Gui::TextButton(name, x, y, ButtonWidth, BoxHeight, text, command, tooltip);
-}
-
-// A text box `width` wide.
-std::string TypedBox(const std::string& name, const std::string& key, int x, int y, int width, const std::string& text, const std::string& hint, const std::string& tooltip = {}) {
-	return Gui::TypedBox(name, key, x, y, width, BoxHeight, text, hint, tooltip, CharWidth);
-}
-
-namespace S = Gui::Style;
-constexpr const char* LabelStyle      = S::Label;
-constexpr const char* SmallLabelStyle = S::SmallLabel;
-constexpr const char* ValueStyle      = S::Value;
-constexpr const char* SmallValueStyle = S::SmallValue;
-constexpr const char* AxisStyle       = S::Axis;
-constexpr const char* SectionStyle    = S::Section;
-constexpr const char* NameStyle       = S::Name;
-constexpr const char* NoteStyle       = S::Note;
-constexpr const char* WarnStyle       = S::Warn;
-constexpr const char* CommentStyle    = S::Comment;
-constexpr const char* SmallLeftStyle  = S::SmallLeft;
-constexpr const char* SmallRightStyle = S::SmallRight;
-constexpr const char* PluginNameStyle = S::LabelOneLine;
-
-constexpr const char* LeftArrow  = Gui::Kit::Native::LeftArrow;
-constexpr const char* RightArrow = Gui::Kit::Native::RightArrow;
-constexpr const char* AddButton  = Gui::Kit::Native::AddButton;
-
-// The scroll bar of the view shown (its steps send "step<i>").
-Gui::ScrollBar Bar("", BarLeft, ScrollWidth, StepHeight, PanelX, PanelY);
-
-std::string ScrollBar(int top, int room, int total, int scroll) { return Bar.Layout(top, room, total, scroll); }
-
-// The rows' area: the game's ClipViewWidget cuts what it holds at its edges
-// (drawing and clicks), so rows half scrolled out show their visible part.
-// Its children's rects are relative to it: it starts at x 0, y `top`.
-std::string Clip(int top, int room, const std::string& children) { return Gui::Clip("Rows", 0, top, BarLeft - 6, room, children); }
-
-// The header box: a back arrow to the list, the plugin's name and a line under it.
-std::string Header(const std::string& name, const std::string& under) {
-	std::string out = Button("Back", ContentLeft, HeaderY + 22, LeftArrow, 0, 1, 3, "back", "All plugins");
-	out += Text("PluginName", ContentLeft + 60, HeaderY, ContentRight - ContentLeft - 120, 90, name, NameStyle);
-	if (!under.empty()) out += Text("PluginUnder", ContentLeft + 60, HeaderY + 78, ContentRight - ContentLeft - 120, 36, under, NoteStyle);
+	if (out.empty() && Toml.doc.error.empty()) out.push_back(App::Text("This file is empty."));
+	if (!Toml.doc.error.empty()) out.push_back(App::Text("This file could not be read as TOML:\n" + Toml.doc.error + "\nEdit it in a text editor."));
 	return out;
 }
 
-// The open drop-down: its setting, and where its list goes (drawn last, over the rest).
-int OpenDrop = -1;
-
-struct DropList {
-	int                      x {}, y {}, current {};
-	std::vector<std::string> names;
-} Drop;
-
-// A row's height on a joined plugin's page: a text row as its lines, a
-// setting with a note taller by the note's lines.
-constexpr int TableTitle = 64, TableHead = 72, TableLine = 84, TableCheck = 79; // a table's title, column names, rows; the check box's size
-int TableColumnWidth(const Setting& setting) { return std::min(150, (ContentRight - ContentLeft - 260) / std::max<int>(1, static_cast<int>(setting.columns.size()))); }
-
-int RowHeightOf(const Setting& setting) {
-	if (setting.kind == Kind::Text) return Lines(setting.label) * NoteLine + 12;
-	if (setting.kind == Kind::Table)
-		return (setting.label.empty() ? 0 : TableTitle) + TableHead + static_cast<int>(setting.rows.size()) * TableLine + (setting.note.empty() ? 0 : Lines(setting.note) * NoteLine) + 8;
-	return RowHeight + (setting.note.empty() ? 0 : Lines(setting.note) * NoteLine);
+// A plugin's TOML file as a page over the list, Reload and Apply under it.
+void OpenToml(const std::string& plugin, const std::string& name, const std::wstring& path) {
+	Toml        = {};
+	Toml.plugin = plugin, Toml.name = name, Toml.path = path;
+	std::string why;
+	const bool  ok = LoadToml(why);
+	if (!ok) Log(true, "%s: %s", Narrow(path).c_str(), why.c_str());
+	App::Push({
+	    .title    = name,
+	    .subtitle = Narrow(FileName(path)),
+	    .content  = TomlItems,
+	    .footer   = [] {
+            std::vector<App::Item> out { App::Action("Read the file again", "Reload", ReloadToml).Tip("Drops the changes not applied") };
+            if (Toml.doc.error.empty()) out.push_back(App::Action("Save the changes to the file", "Apply", ApplyToml));
+            return out;
+	    },
+	    .backTip  = "All plugins",
+	});
+	App::Notice(ok ? "Applied changes take effect after a restart." : why, !ok);
 }
 
-// The two numbers of a position ("[x, y]").
-std::pair<double, double> PositionOf(const std::string& value) {
-	const auto items = ArrayItems(value);
-	return { items.size() > 0 ? Number(items[0], 0) : 0, items.size() > 1 ? Number(items[1], 0) : 0 };
-}
-
-std::string StepTip(const Setting& setting) {
-	return "Click: " + Decimal(setting.step, setting.decimals) + ", Shift+click: " + Decimal(setting.shiftStep, setting.decimals) + ", Ctrl+click: " + Decimal(setting.ctrlStep, setting.decimals);
-}
-
-// A small up or down arrow button (the loot filter list's), or the options arrows.
-std::string ArrowButton(const std::string& name, int x, int y, bool up, const std::string& command, const std::string& tooltip) {
-	return Gui::ArrowButton(name, x, y, up, ArrowSize, command, tooltip);
-}
-
-std::string RowWidgets(const Client& client, const Setting& setting, int row, int y) {
-	const std::string id = std::to_string(row);
-	std::string       out;
-	if (setting.kind == Kind::Header) return Gui::SectionTitle(id, ContentLeft, y, ContentRight - ContentLeft, setting.label, setting.hint);
-	if (setting.kind == Kind::Text) return Text("Text" + id, ContentLeft, y + 4, ContentRight - ContentLeft, RowHeightOf(setting) - 8, setting.label, CommentStyle, setting.hint);
-	if (setting.kind == Kind::Table) {
-		// title, note, then the column names over a grid of check boxes
-		int at = y;
-		if (!setting.label.empty()) out += Text("Label" + id, ContentLeft, at, ContentRight - ContentLeft, TableTitle - 4, setting.label, LabelStyle, setting.hint), at += TableTitle;
-		if (!setting.note.empty()) out += Text("Note" + id, ContentLeft, at - 6, ContentRight - ContentLeft, Lines(setting.note) * NoteLine, setting.note, CommentStyle), at += Lines(setting.note) * NoteLine;
-		const int width = TableColumnWidth(setting), left = ContentRight - width * static_cast<int>(setting.columns.size());
-		for (std::size_t c = 0; c < setting.columns.size(); ++c)
-			out += Text("Col" + id + "_" + std::to_string(c), left + static_cast<int>(c) * width, at, width, TableHead - 6, setting.columnLabels[c], SmallValueStyle);
-		at += TableHead;
-		for (std::size_t r = 0; r < setting.rows.size(); ++r, at += TableLine) {
-			const std::string cell = id + "_" + std::to_string(r);
-			out += Text("RowName" + cell, ContentLeft, at, left - ContentLeft - 10, TableLine, setting.rowLabels[r], SmallLabelStyle);
-			std::vector<char> ticked(setting.columns.size());
-			for (std::size_t c = 0; c < setting.columns.size(); ++c) {
-				char value[64] {};
-				const std::string key = setting.rows[r] + "." + setting.columns[c];
-				ticked[c] = client.get(key.c_str(), value, sizeof(value), client.user) && Unquote(Trim(value)) == "true";
-			}
-			for (std::size_t c = 0; c < setting.columns.size(); ++c) {
-				const std::string name    = "Cell" + cell + "_" + std::to_string(c);
-				const int         x       = left + static_cast<int>(c) * width + (width - TableCheck) / 2, cy = at + (TableLine - TableCheck) / 2;
-				const std::string command = "C" + id + ":" + std::to_string(r) + ":" + std::to_string(c);
-				const int         need    = setting.needs.empty() ? -1 : setting.needs[c];
-				// a box whose column needs another one unticked: greyed (frames 2 and 6), its value kept
-				if (need >= 0 && !ticked[static_cast<std::size_t>(need)]) {
-					const int frame = ticked[c] ? 6 : 2;
-					out += Gui::Button(name, x, cy, Gui::Kit::Native::CheckBox, { frame, frame, frame }, command, "Needs " + setting.columnLabels[static_cast<std::size_t>(need)]);
-				} else out += Check(name, x, cy, ticked[c], command);
-			}
-		}
-		return out;
-	}
-	const std::string label = setting.label + (setting.restart ? " *" : "");
-	// a position's controls start further left: its label has less room
-	const int labelWidth = (setting.kind == Kind::Position ? PositionLeft : ControlLeft) - ContentLeft - 20;
-	out += Text("Label" + id, ContentLeft, y, labelWidth, RowHeight - 6, label, TextWidth(label) > labelWidth ? SmallLabelStyle : LabelStyle, setting.hint);
-	if (!setting.note.empty()) out += Text("Note" + id, ContentLeft, y + RowHeight - 10, ContentRight - ContentLeft, Lines(setting.note) * NoteLine, setting.note, CommentStyle);
-	switch (setting.kind) {
-	case Kind::Bool: out += Check("Check" + id, ContentRight - 70, y + 14, Unquote(GetValue(client, setting)) == "true", "T" + id); break;
-	case Kind::Int:
-	case Kind::Float: {
-		out += Gui::Stepper(id, ControlLeft, y, ContentRight - ControlLeft, RowHeight - 6, ShownValue(client, setting), "L" + id, "R" + id, StepTip(setting));
-		break;
-	}
-	case Kind::Enum: {
-		// a drop-down (Grail On!'s): the choice shown, its list while open
-		const int         current = EnumIndex(setting, GetValue(client, setting));
-		const std::string shown   = EnumLabel(setting, current);
-		const int         boxY    = y + (RowHeight - BoxHeight) / 2 - 3;
-		out += Gui::DropDown::Box("Drop" + id, ControlLeft, boxY, DropWidth, BoxHeight, shown, "D" + id);
-		if (OpenDrop == row) {
-			Drop.x = ControlLeft, Drop.y = RowsTop + boxY + BoxHeight, Drop.current = current;
-			Drop.names.clear();
-			for (int k = 0; k < static_cast<int>(setting.values.size()); ++k) Drop.names.push_back(EnumLabel(setting, k));
-			// no room below: the list opens upwards
-			if (Drop.y + static_cast<int>(Drop.names.size()) * TileHeight > FooterY + 60) Drop.y = RowsTop + boxY - static_cast<int>(Drop.names.size()) * TileHeight;
-		}
-		break;
-	}
-	case Kind::Position: {
-		// X and Y, each with a step down and up, and a reset (Grail On!'s button position)
-		const auto [px, py]   = PositionOf(GetValue(client, setting));
-		const std::string tip = StepTip(setting);
-		int               at  = PositionLeft;
-		const int         top = y + (RowHeight - ArrowSize) / 2 - 3;
-		for (const auto& [axis, value] : { std::pair { "X", px }, std::pair { "Y", py } }) {
-			const std::string a = axis;
-			out += Text("Axis" + a + id, at, y, 30, RowHeight - 6, a, AxisStyle);
-			at += 32;
-			out += ArrowButton("Down" + a + id, at, top, false, (a == "X" ? "H" : "K") + id, tip);
-			at += ArrowSize;
-			out += Text("Pos" + a + id, at, y, 96, RowHeight - 6, Decimal(value, setting.decimals), static_cast<int>(Decimal(value, setting.decimals).size()) > 5 ? SmallValueStyle : ValueStyle, tip);
-			at += 96;
-			out += ArrowButton("Up" + a + id, at, top, true, (a == "X" ? "J" : "M") + id, tip);
-			at += ArrowSize + 14;
-		}
-		if (!setting.defaultValue.empty()) out += Gui::ResetButton("Reset" + id, ContentRight - ArrowSize, top, ArrowSize, "Z" + id, "Back to " + setting.defaultValue);
-		break;
-	}
-	case Kind::String: {
-		const std::string key  = "s" + id;
-		const std::string text = Gui::TextInput::Key() == key ? ClientDraft : ShownValue(client, setting);
-		out += TypedBox("Input" + id, key, ControlLeft, y + 20, ContentRight - ControlLeft, text, "(empty)", "Click to type; Enter saves, Esc cancels");
-		break;
-	}
-	case Kind::Action: {
-		const bool armed = ConfirmRow == row && GetTickCount64() < ConfirmUntil;
-		out += Text("Run" + id, ControlLeft, y, ContentRight - ControlLeft - 60, RowHeight - 6, armed ? "Click again to confirm" : "", armed ? WarnStyle : ValueStyle);
-		out += Button("Do" + id, ContentRight - 50, y + 24, RightArrow, 0, 1, 3, "A" + id, setting.confirm ? "Click twice to run" : "Run");
-		break;
-	}
-	default: break;
-	}
-	return out;
-}
+// ---- the plugin list ----
 
 std::string ModeTip(Mode mode) {
 	switch (mode) {
@@ -1656,7 +1454,7 @@ std::string ModeTip(Mode mode) {
 // A round gem: what kind of settings a plugin has.
 std::string ModeIcon(Mode mode) {
 	static constexpr int menu[3] { 60, 200, 70 }, window[3] { 70, 120, 235 }, file[3] { 200, 200, 190 };
-	return mode == Mode::Menu ? Gui::Kit::Gem("menu", menu, IconSize) : mode == Mode::Window ? Gui::Kit::Gem("window", window, IconSize) : Gui::Kit::Gem("toml", file, IconSize);
+	return mode == Mode::Menu ? Gui::Kit::Gem("menu", menu, 40) : mode == Mode::Window ? Gui::Kit::Gem("window", window, 40) : Gui::Kit::Gem("toml", file, 40);
 }
 
 // Lower case, for the search.
@@ -1682,573 +1480,109 @@ std::wstring SearchQuery() {
 	return query;
 }
 
-std::string ListLayout() {
-	const auto         list  = Entries();
-	const std::wstring query = SearchQuery();
-	std::vector<int>   shown; // indexes in `list` of the plugins the search keeps
-	for (int i = 0; i < static_cast<int>(list.size()); ++i)
-		if (Matches(list[static_cast<std::size_t>(i)], query)) shown.push_back(i);
-	std::string out = Text("Count", ContentLeft, HeaderY, ContentRight - ContentLeft, 90, std::to_string(list.size()) + (list.size() == 1 ? " plugin running" : " plugins running"), NameStyle);
-	if (Hub::Now == Hub::State::Checking || Hub::Now == Hub::State::Failed) {
-		const bool failed = Hub::Now == Hub::State::Failed;
-		out += Text("HubState", ContentLeft, HeaderY + 86, ContentRight - ContentLeft, 50, Hub::StateText(), failed ? WarnStyle : NoteStyle,
-		            failed ? "The D2RLoader Hub could not be reached; see i-hate-tomls.log" : "Versions checked on the D2RLoader Hub at launch");
-	}
-
-	// the search bar: a clear button and the count found while something is typed
-	const int barWidth = ContentRight - ContentLeft;
-	out += TypedBox("Search", "search", ContentLeft, SearchY, barWidth, SearchText, "Search", "Type part of a plugin's name");
-	if (!SearchText.empty()) {
-		out += Text("Found", ContentRight - 330, SearchY, 240, BoxHeight, std::to_string(shown.size()) + " found", SmallRightStyle);
-		out += Gui::RemoveButton("SearchClear", ContentRight - 60, SearchY + 2, 52, "searchclear", "Clear the search");
-	}
-
-	const int room  = ViewBottom - ListTop;
-	const int total = static_cast<int>(shown.size()) * ListRowHeight;
-	ListScroll      = std::clamp(ListScroll, 0, std::max(0, total - room));
-	std::string rows;
-	if (list.empty()) out += Text("Empty", ContentLeft, 520, ContentRight - ContentLeft, 300, "No other plugin was found.", NoteStyle);
-	else if (shown.empty()) out += Text("Empty", ContentLeft, 520, ContentRight - ContentLeft, 200, "No plugin matches the search.", NoteStyle);
-	for (int at = ListScroll / ListRowHeight; at < static_cast<int>(shown.size()); ++at) {
-		const int y = at * ListRowHeight - ListScroll; // in the clip
-		if (y >= room) break;
-		const int         index = shown[static_cast<std::size_t>(at)];
-		const auto&       e     = list[static_cast<std::size_t>(index)];
-		const std::string id    = std::to_string(at);
-		std::string&      out   = rows;
-		out += Gui::Image("RowBack" + id, ContentLeft, y, Gui::Kit::Row(ListRowWidth, ListRowBack));
-		if (e.mode != Mode::None) out += Gui::Icon("Icon" + id, ContentLeft + 34, y + (ListRowBack - IconSize) / 2, IconSize, ModeIcon(e.mode), ModeTip(e.mode));
-		std::string under = e.version;
-		if (!e.author.empty()) under += (under.empty() ? "by " : "  by ") + e.author;
-		out += Text("Name" + id, ContentLeft + 92, y + 4, 700, 40, e.name, PluginNameStyle, e.id);
-		out += Text("Under" + id, ContentLeft + 92, y + 40, 700, 30, under, SmallLeftStyle);
+// The rows the search keeps; their commands carry the plugin's index in Entries().
+std::vector<App::Row> ListRows() {
+	const auto            list  = Entries();
+	const auto            query = SearchQuery();
+	std::vector<App::Row> rows;
+	for (int i = 0; i < static_cast<int>(list.size()); ++i) {
+		const auto& e = list[static_cast<std::size_t>(i)];
+		if (!Matches(e, query)) continue;
+		App::Row row;
+		row.text = e.name, row.tooltip = e.id;
+		row.sub = e.version;
+		if (!e.author.empty()) row.sub += (row.sub.empty() ? "by " : "  by ") + e.author;
+		if (e.mode != Mode::None) {
+			row.icon = ModeIcon(e.mode), row.iconTip = ModeTip(e.mode);
+			row.gear = "O" + std::to_string(i), row.gearTip = e.mode == Mode::Window ? "Open its settings window" : "Open its settings";
+		}
 		if (const std::string update = Hub::UpdateFor(e.slug, e.version); !update.empty())
-			out += TextButton("Update" + id, ContentRight - GearSize - 250, y + (ListRowBack - BoxHeight) / 2, update + " out", "U" + std::to_string(index), "A newer version is on the D2RLoader Hub: click to open its page");
-		else if (Hub::UpToDate(e.slug, e.version))
-			out += Text("UpToDate" + id, ContentRight - GearSize - 250, y, 230, ListRowBack, "up to date", SmallRightStyle, "Same version as on the D2RLoader Hub");
-		const std::string open = "O" + std::to_string(index), tip = e.mode == Mode::Window ? "Open its settings window" : "Open its settings";
-		if (e.mode != Mode::None) out += Gui::GearButton("Open" + id, ContentRight - GearSize - 10, y + (ListRowBack - GearSize) / 2, GearSize, open, tip);
+			row.button = update + " out", row.buttonCommand = "U" + std::to_string(i), row.buttonTip = "A newer version is on the D2RLoader Hub: click to open its page";
+		else if (Hub::UpToDate(e.slug, e.version)) row.value = "up to date";
+		rows.push_back(std::move(row));
 	}
-	out += Clip(ListTop, room, rows);
-	out += ScrollBar(ListTop, room, total, ListScroll);
-	// the icons' meaning
-	{
+	return rows;
+}
+
+std::vector<App::Item> ListItems() {
+	return { App::List(ListRows).Empty(Entries().empty() ? "No other plugin was found." : "No plugin matches the search.") };
+}
+
+// Over the list: the count, the Hub check, the search bar.
+std::vector<App::Item> ListHeader() {
+	if (App::Depth() > 0) return {};
+	const auto list  = Entries();
+	const auto query = SearchQuery();
+	const auto found = std::count_if(list.begin(), list.end(), [&](const Entry& e) { return Matches(e, query); });
+	std::vector<App::Item> out { App::Section(std::to_string(list.size()) + (list.size() == 1 ? " plugin running" : " plugins running")) };
+	if (Hub::Now == Hub::State::Checking) out.push_back(App::Text(Hub::StateText()).Tip("Versions checked on the D2RLoader Hub at launch"));
+	else if (Hub::Now == Hub::State::Failed)
+		out.push_back(App::Custom(52, [](const App::Place& p) { return Gui::Text(p.name, p.x, p.y, p.width, 48, Hub::StateText(), Gui::Style::Warn, "The D2RLoader Hub could not be reached; see i-hate-tomls.log"); }));
+	out.push_back(App::Field("", App::Bind<std::string>([] { return SearchText; }, [](const std::string& text) { SearchText = text; return std::string(); }), "Search")
+	                  .Clearable()
+	                  .Tip("Type part of a plugin's name"));
+	if (!SearchText.empty()) out.push_back(App::Text(std::to_string(found) + " found"));
+	return out;
+}
+
+// Under the list: what the gems mean.
+std::vector<App::Item> ListFooter() {
+	if (App::Depth() > 0) return {};
+	return { App::Custom(56, [](const App::Place& p) {
 		const Mode  modes[] { Mode::Menu, Mode::Window, Mode::Toml };
 		const char* names[] { "this menu", "own window", "TOML file" };
+		std::string out;
 		for (int k = 0; k < 3; ++k) {
-			const int x = ContentLeft + 120 + k * 260;
-			out += Gui::Image("Legend" + std::to_string(k), x, NoteY + 8, ModeIcon(modes[k]));
-			out += Text("LegendText" + std::to_string(k), x + IconSize + 10, NoteY + 4, 200, 48, names[k], SmallLeftStyle);
+			const int x = p.x + 120 + k * 260;
+			out += Gui::Image(p.name + "G" + std::to_string(k), x, p.y + 8, ModeIcon(modes[k]));
+			out += Gui::Text(p.name + "T" + std::to_string(k), x + 50, p.y + 4, 200, 48, names[k], Gui::Style::SmallLeft);
 		}
-	}
-	return out;
-}
-
-std::string ClientLayout() {
-	Shown                = std::clamp(Shown, 0, static_cast<int>(Clients.size()) - 1);
-	const Client& client = Clients[static_cast<std::size_t>(Shown)];
-	const int     count  = static_cast<int>(client.settings.size());
-	int           total  = 0;
-	for (const auto& setting : client.settings) total += RowHeightOf(setting);
-	ClientScroll = std::clamp(ClientScroll, 0, std::max(0, total - ViewHeight));
-	Drop         = {};
-	std::string out      = Header(client.title, {});
-	bool        restart  = false;
-	for (const auto& setting : client.settings) restart = restart || setting.restart;
-	std::string rows;
-	for (int index = 0, at = -ClientScroll; index < count && at < ViewHeight; at += RowHeightOf(client.settings[static_cast<std::size_t>(index)]), ++index)
-		if (at + RowHeightOf(client.settings[static_cast<std::size_t>(index)]) > 0) rows += RowWidgets(client, client.settings[static_cast<std::size_t>(index)], index, at);
-	out += Clip(RowsTop, ViewHeight, rows);
-	if (client.settings.empty()) out += Text("NoRows", ContentLeft, 520, ContentRight - ContentLeft, 200, "This plugin has no settings to show.", NoteStyle);
-	out += ScrollBar(RowsTop, ViewHeight, total, ClientScroll);
-	std::string note = Notice;
-	if (note.empty() && restart) note = "* applies after a restart";
-	if (!note.empty()) out += Text("Note", ContentLeft, NoteY, ContentRight - ContentLeft, 56, note, NoticeWarn ? WarnStyle : NoteStyle);
-	// the open drop-down's list, over everything: a click anywhere else closes it
-	if (!Drop.names.empty()) {
-		std::string list = Gui::DropDown::List("Drop", Drop.x, Drop.y, DropWidth, TileHeight, Drop.names, Drop.current, "P" + std::to_string(OpenDrop) + ":", "dropx", PanelWidth, PanelHeight);
-		// the catcher and items keep their names (DropCatch, DropItem<k>)
-		out += list;
-	}
-	return out;
-}
-
-int TomlTotal() {
-	int total = 0;
-	for (const auto& row : Toml.rows) total += row.height;
-	return total;
-}
-
-std::string TomlLayout() {
-	std::string out = Header(Toml.name, Narrow(FileName(Toml.path)));
-	if (!Toml.doc.error.empty() || Toml.rows.empty()) {
-		const std::string why = Toml.doc.error.empty() ? "This file is empty." : "This file could not be read as TOML:\n" + Toml.doc.error + "\nEdit it in a text editor.";
-		out += Text("Error", ContentLeft, 480, ContentRight - ContentLeft, 300, why, Toml.doc.error.empty() ? NoteStyle : WarnStyle);
-		out += TextButton("Reload", ContentLeft + 20, FooterY, "Reload", "reload", "Read the file again");
-		Bar.Clear();
 		return out;
-	}
-	const int total = TomlTotal();
-	Toml.scroll     = std::clamp(Toml.scroll, 0, std::max(0, total - ViewHeight));
-	std::string  rows;
-	std::string& head = out;
-	int          at   = -Toml.scroll; // the row's top in the clip
-	for (int r = 0; r < static_cast<int>(Toml.rows.size()); at += Toml.rows[static_cast<std::size_t>(r)].height, ++r) {
-		const auto&       row = Toml.rows[static_cast<std::size_t>(r)];
-		const std::string id  = std::to_string(r);
-		if (at + row.height <= 0) continue;
-		if (at >= ViewHeight) break;
-		std::string& out = rows;
-		int          y   = at;
-		switch (row.type) {
-		case TomlRow::Type::Note: out += Text("Comment" + id, ContentLeft, y + 4, ContentRight - ContentLeft, row.height - 8, row.text, CommentStyle); break;
-		case TomlRow::Type::Section:
-			out += Gui::SectionTitle(id, ContentLeft, y, ContentRight - ContentLeft, row.text);
-			break;
-		case TomlRow::Type::Field: {
-			const auto& f    = Toml.fields[static_cast<std::size_t>(row.field)];
-			std::string tip  = f.key + "\nType: " + TomlEdit::TypeName(f.type);
-			if (f.editor == TomlEdit::Editor::List && f.itemTypeKnown) tip += std::string(" of ") + TomlEdit::TypeName(f.itemType) + " items";
-			if (f.escaped) tip += "\nWrite a line break as \\n.";
-			// a long key on its own line, the value under it
-			const int labelWidth = row.stacked || f.editor == TomlEdit::Editor::Check ? ContentRight - ContentLeft - (row.stacked ? 0 : 90) : TomlControl - ContentLeft - 16;
-			const int fit        = TextWidth(f.key) <= labelWidth;
-			out += Text("Label" + id, ContentLeft, y + 10, labelWidth, BoxHeight, f.key, fit ? LabelStyle : SmallLabelStyle, tip);
-			if (row.stacked) y += LabelLine;
-			if (!row.text.empty()) out += Text("KeyNote" + id, ContentLeft, y + 10 + BoxHeight + 4, ContentRight - ContentLeft, row.noteLines * NoteLine, row.text, CommentStyle);
-			switch (f.editor) {
-			case TomlEdit::Editor::Check: out += Check("Check" + id, ContentRight - 70, y + 6, f.text == "true", "C" + id); break;
-			case TomlEdit::Editor::Text:
-			case TomlEdit::Editor::Raw: out += TypedBox("In" + id, "f" + std::to_string(row.field), TomlControl, y + 10, TextBoxWidth, f.text, "(empty)", "Click to type; Esc puts the value back"); break;
-			case TomlEdit::Editor::ReadOnly:
-				out += Text("Fixed" + id, TomlControl, y + 10, TextBoxWidth, BoxHeight, "(on several lines: edit it in the file)", SmallLeftStyle, f.text);
-				break;
-			case TomlEdit::Editor::List:
-				out += Text("Count" + id, TomlControl, y + 10, TextBoxWidth - 90, BoxHeight,
-				            f.list.empty() ? "empty list" : std::to_string(f.list.size()) + (f.list.size() == 1 ? " item" : " items"), SmallLeftStyle);
-				out += Button("Add" + id, ContentRight - 76, y + 7, AddButton, 0, 1, 3, "+" + id, "Add an item");
-				break;
-			}
-			break;
-		}
-		case TomlRow::Type::Item: {
-			const auto& f   = Toml.fields[static_cast<std::size_t>(row.field)];
-			const auto  key = "i" + std::to_string(row.field) + "." + std::to_string(row.item);
-			out += Text("ItemNumber" + id, TomlControl - 80, y + 5, 64, BoxHeight, std::to_string(row.item + 1), SmallLeftStyle);
-			out += TypedBox("In" + id, key, TomlControl, y + 5, ItemBoxWidth, f.list[static_cast<std::size_t>(row.item)], "(empty)", "Click to type; Esc puts the item back");
-			out += Gui::RemoveButton("Remove" + id, ContentRight - 58, y + 7, 52, "-" + id, "Remove this item");
-			break;
-		}
-		}
-	}
-	(void)head;
-	out += Clip(RowsTop, ViewHeight, rows);
-	out += ScrollBar(RowsTop, ViewHeight, total, Toml.scroll);
-	out += TextButton("Reload", ContentLeft + 20, FooterY, "Reload", "reload", "Read the file again, dropping the changes not applied");
-	out += TextButton("Apply", ContentRight - 20 - ButtonWidth, FooterY, "Apply", "apply", "Save the changes to the file");
-	const std::string note = Notice.empty() ? "Applied changes take effect after a restart." : Notice;
-	out += Text("Note", ContentLeft, NoteY, ContentRight - ContentLeft, 56, note, NoticeWarn ? WarnStyle : NoteStyle);
-	return out;
-}
-// The whole window for the view shown.
-std::string ViewLayout(const std::string& panelName, const std::string& probe) {
-	if (Current == View::Client && Clients.empty()) Current = View::List;
-	std::string content;
-	if (Current == View::List) content = ListLayout();
-	else if (Current == View::Client) content = ClientLayout();
-	else content = TomlLayout();
-	return Gui::CharacterWindow::Layout(panelName, probe, "Plugins", "close", content);
+	}) };
 }
 
-// ---- the window (D2R GUI: panel pool, typing, mouse, left panel) ----
-
-Gui::PanelPool Window;
-
-bool MenuOpen() { return Window.IsOpen(); }
-
-void ShowView() {
-	if (!Window.Ready()) {
-		Say("I Hate TOMLs is not available (see i-hate-tomls.log)");
-		return;
+// A row's gear ("O<index>") or update button ("U<index>").
+bool RunCommand(const std::string& command) {
+	if (command.size() < 2 || (command[0] != 'O' && command[0] != 'U')) return false;
+	const auto list  = Entries();
+	const int  index = std::atoi(command.c_str() + 1);
+	if (index < 0 || index >= static_cast<int>(list.size())) return false;
+	const auto& e = list[static_cast<std::size_t>(index)];
+	if (command[0] == 'U') {
+		Hub::Open(e.slug);
+		return false;
 	}
-	Window.Show();
-}
-
-void StopTyping(bool keep);
-void RetryReuse() { Window.RetryReuse(); }
-
-void CloseMenu() {
-	StopTyping(true);
-	Window.Close();
-	ConfirmRow = -1;
-	SetNotice({});
-	Gui::LeftPanel::Closed();
+	switch (e.mode) {
+	case Mode::Window:
+		if (const OwnWindow* window = WindowOf(e.id)) {
+			const auto open = window->open;
+			void*      user = window->user;
+			App::Close();
+			open(user);
+		}
+		break;
+	case Mode::Menu: App::Push(ClientPage(e.id)); break;
+	case Mode::Toml: OpenToml(e.id, e.name, e.config); break;
+	default: break;
+	}
+	return false;
 }
 
 // The Hub's answer came: the list shows it if it is on screen.
 void __cdecl Hub::Refresh(const D2RL::PluginContext*, void*) noexcept {
 	Chat::Try();
-	if (MenuOpen() && Current == View::List) ShowView();
-}
-
-// ---- typing ----
-// The game's text boxes get no keys in a plugin's panel: D2R GUI's TextInput
-// takes them while a box is active. Enter keeps the text (a joined plugin's
-// text is saved then), Esc puts it back, a click anywhere else keeps it.
-
-// The joined plugin's setting a "s<index>" box edits.
-Setting* DraftSetting(const std::string& key) {
-	if (key.empty() || key[0] != 's' || Current != View::Client || Clients.empty()) return nullptr;
-	auto&     client = Clients[static_cast<std::size_t>(std::clamp(Shown, 0, static_cast<int>(Clients.size()) - 1))];
-	const int index  = std::atoi(key.c_str() + 1);
-	return index >= 0 && index < static_cast<int>(client.settings.size()) ? &client.settings[static_cast<std::size_t>(index)] : nullptr;
-}
-
-// The TOML text a "f<field>" or "i<field>.<item>" box edits.
-std::string* TomlText(const std::string& key) {
-	if (key.size() < 2 || (key[0] != 'f' && key[0] != 'i') || Current != View::Toml) return nullptr;
-	const int field = std::atoi(key.c_str() + 1);
-	if (field < 0 || field >= static_cast<int>(Toml.fields.size())) return nullptr;
-	auto& f = Toml.fields[static_cast<std::size_t>(field)];
-	if (key[0] == 'f') return &f.text;
-	const auto dot  = key.find('.');
-	const int  item = dot == std::string::npos ? -1 : std::atoi(key.c_str() + dot + 1);
-	return item >= 0 && item < static_cast<int>(f.list.size()) ? &f.list[static_cast<std::size_t>(item)] : nullptr;
-}
-
-std::string BoxText(const std::string& key) {
-	if (key == "search") return SearchText;
-	if (const Setting* setting = DraftSetting(key)) return ShownValue(Clients[static_cast<std::size_t>(Shown)], *setting);
-	if (const std::string* text = TomlText(key)) return *text;
-	return {};
-}
-
-void SetBoxText(const std::string& key, const std::string& text) {
-	if (key == "search") {
-		if (SearchText != text) ListScroll = 0;
-		SearchText = text;
-	} else if (DraftSetting(key)) ClientDraft = text;
-	else if (std::string* box = TomlText(key)) *box = text;
-}
-
-// UI thread: typing goes to box `key`.
-void StartTyping(const std::string& key) {
-	if (!(Gui::TextInput::Active() && TypingKey == key)) {
-		StopTyping(true);
-		const std::string text = BoxText(key);
-		TypingKey              = key;
-		TypingBefore           = text;
-		if (key[0] == 's') ClientDraft = text;
-	}
-	Gui::TextInput::Start(key, TypingBefore, {
-	    .changed = [](const std::string& text) {
-		    if (TypingKey.empty()) return;
-		    if (!MenuOpen()) return StopTyping(true);
-		    SetBoxText(TypingKey, text);
-		    ShowView();
-	    },
-	    .enter  = [](const std::string&) { StopTyping(true), ShowView(); },
-	    .escape = [] {
-		    StopTyping(false);
-		    if (MenuOpen()) ShowView();
-	    },
-	    .away = [](const std::string&) {
-		    StopTyping(true);
-		    if (MenuOpen()) ShowView();
-	    },
-	});
-}
-
-// UI thread: the box lets the keys go; `keep` false puts its text back.
-void StopTyping(bool keep) {
-	Gui::TextInput::Stop();
-	const std::string key = std::move(TypingKey);
-	TypingKey.clear();
-	if (key.empty()) return;
-	if (Setting* setting = DraftSetting(key)) {
-		if (keep && ClientDraft != TypingBefore) (void)SetValue(Clients[static_cast<std::size_t>(Shown)], *setting, Quote(ClientDraft));
-	} else if (!keep) SetBoxText(key, TypingBefore);
-	ClientDraft.clear();
-}
-
-// ---- scrolling, watching ----
-
-int& ScrollOf() { return Current == View::List ? ListScroll : Current == View::Client ? ClientScroll : Toml.scroll; }
-
-// UI thread, every 250 ms once the menu has opened: a game left panel opening
-// closes the menu; the view moves for the menu while it is open.
-void Watch() {
-	MenuVisible = MenuOpen();
-	if (!MenuVisible && !TypingKey.empty()) StopTyping(true);
-	if (Gui::LeftPanel::Watch(MenuVisible, Window.Busy())) {
-		CloseMenu();
-		MenuVisible = false;
-	}
-}
-
-// Once, when the menu first opens: the wheel over the left of the screen
-// scrolls it, the scroll bar drags, the menu is watched.
-void WatchMouse() {
-	static bool started = false;
-	if (started) return;
-	started = true;
-	Gui::WindowHook::Start({
-	    .active = [] { return MenuVisible.load(); },
-	    .wheel  = [](int notches) {
-            if (!MenuOpen()) return;
-            int&      scroll = ScrollOf();
-            const int before = scroll;
-            scroll           = std::clamp(scroll + notches * WheelStep, 0, std::max(0, Bar.Max()));
-            if (scroll != before) ShowView();
-	    },
-	    .wheelRight = 0.45,
-	    .watch      = Watch,
-	});
-	Bar.OnScroll([](int scroll) {
-		if (!MenuOpen() || ScrollOf() == scroll) return;
-		ScrollOf() = scroll;
-		ShowView();
-	});
-	Bar.Attach();
-}
-
-void Toggle() {
-	if (MenuOpen()) CloseMenu();
-	else {
-		SetNotice({});
-		RefreshText();
-		Current = View::List;
-		WatchMouse();
-		Gui::LeftPanel::Opening();
-		ShowView();
-	}
-	MenuVisible = MenuOpen();
-}
-
-void __cdecl ToggleTask(const D2RL::PluginContext*, void*) noexcept { Toggle(); }
-
-
-// ---- clicks ----
-
-
-void OpenEntry(int index) {
-	RefreshText();
-	const auto list = Entries();
-	if (index < 0 || index >= static_cast<int>(list.size())) return;
-	const auto& e = list[static_cast<std::size_t>(index)];
-	SetNotice({});
-	switch (e.mode) {
-	case Mode::Window: {
-		const OwnWindow* window = WindowOf(e.id);
-		if (!window) return;
-		const auto open = window->open;
-		void*      user = window->user;
-		CloseMenu();
-		MenuVisible = false;
-		open(user);
-		return;
-	}
-	case Mode::Menu:
-		Shown        = ClientIndex(e.id);
-		ClientScroll = 0;
-		OpenDrop     = -1;
-		Current      = View::Client;
-		break;
-	case Mode::Toml: {
-		Toml        = {};
-		Toml.plugin = e.id;
-		Toml.name   = e.name;
-		Toml.path   = e.config;
-		std::string why;
-		if (!LoadToml(Toml.path, why)) Log(true, "%s: %s", Narrow(Toml.path).c_str(), why.c_str());
-		Current = View::Toml;
-		break;
-	}
-	default: return;
-	}
-	ShowView();
-}
-
-void RunListCommand(const std::string& command) {
-	if (command == "searchclear") SearchText.clear(), ListScroll = 0;
-	else if (command[0] == 'O') return OpenEntry(std::atoi(command.c_str() + 1));
-	else if (command[0] == 'U') {
-		const auto list  = Entries();
-		const int  index = std::atoi(command.c_str() + 1);
-		if (index >= 0 && index < static_cast<int>(list.size())) Hub::Open(list[static_cast<std::size_t>(index)].slug);
-		return;
-	}
-	else return;
-	ShowView();
-}
-
-void RunClientCommand(const std::string& command) {
-	if (Clients.empty()) return;
-	auto& client = Clients[static_cast<std::size_t>(std::clamp(Shown, 0, static_cast<int>(Clients.size()) - 1))];
-	const int dropWas = OpenDrop;
-	OpenDrop          = -1; // any click closes a drop-down list
-	if (command == "back") {
-		Current = View::List;
-		SetNotice({});
-		RetryReuse();
-	} else if (command == "dropx") {
-	} else if (command.size() >= 2) {
-		const int index = std::atoi(command.c_str() + 1);
-		if (index < 0 || index >= static_cast<int>(client.settings.size())) return;
-		const Setting setting = client.settings[static_cast<std::size_t>(index)];
-		switch (command[0]) {
-		case 'D': OpenDrop = dropWas == index ? -1 : index; break;
-		case 'P': {
-			const auto colon = command.find(':');
-			const int  k     = colon == std::string::npos ? -1 : std::atoi(command.c_str() + colon + 1);
-			if (k >= 0 && k < static_cast<int>(setting.values.size())) (void)SetValue(client, setting, Quote(setting.values[static_cast<std::size_t>(k)]));
-			break;
-		}
-		case 'H': StepPosition(client, setting, false, false); break;
-		case 'J': StepPosition(client, setting, false, true); break;
-		case 'K': StepPosition(client, setting, true, false); break;
-		case 'M': StepPosition(client, setting, true, true); break;
-		case 'Z':
-			if (!setting.defaultValue.empty()) (void)SetValue(client, setting, setting.defaultValue);
-			break;
-		case 'T': (void)SetValue(client, setting, Unquote(GetValue(client, setting)) == "true" ? "false" : "true"); break;
-		case 'C': { // a table's check box: C<index>:<row>:<column>
-			const auto first = command.find(':'), second = first == std::string::npos ? first : command.find(':', first + 1);
-			if (second == std::string::npos) break;
-			const std::size_t r = std::strtoul(command.c_str() + first + 1, nullptr, 10), c = std::strtoul(command.c_str() + second + 1, nullptr, 10);
-			if (r >= setting.rows.size() || c >= setting.columns.size()) break;
-			if (!setting.needs.empty() && setting.needs[c] >= 0) { // greyed while the box it needs is unticked
-				Setting need = setting;
-				need.key     = setting.rows[r] + "." + setting.columns[static_cast<std::size_t>(setting.needs[c])];
-				if (Unquote(GetValue(client, need)) != "true") break;
-			}
-			Setting cell = setting;
-			cell.kind  = Kind::Bool;
-			cell.key   = setting.rows[r] + "." + setting.columns[c];
-			cell.label = setting.rowLabels[r] + ", " + setting.columnLabels[c];
-			(void)SetValue(client, cell, Unquote(GetValue(client, cell)) == "true" ? "false" : "true");
-			break;
-		}
-		case 'L': Step(client, setting, false); break;
-		case 'R': Step(client, setting, true); break;
-		case 'A':
-			if (setting.confirm && !(ConfirmRow == index && GetTickCount64() < ConfirmUntil)) {
-				ConfirmRow   = index;
-				ConfirmUntil = GetTickCount64() + 10000;
-				SetNotice({});
-			} else {
-				ConfirmRow = -1;
-				(void)SetValue(client, setting, "\"run\"");
-				if (Notice.empty()) SetNotice(setting.label + ": done.");
-			}
-			break;
-		default: return;
-		}
-	} else return;
-	ShowView();
-}
-
-// Scrolls the TOML view so row `r` shows whole.
-void ShowTomlRow(int r) {
-	int top = 0;
-	for (int k = 0; k < r && k < static_cast<int>(Toml.rows.size()); ++k) top += Toml.rows[static_cast<std::size_t>(k)].height;
-	const int height = r < static_cast<int>(Toml.rows.size()) ? Toml.rows[static_cast<std::size_t>(r)].height : 0;
-	if (top < Toml.scroll) Toml.scroll = top;
-	else if (top + height > Toml.scroll + ViewHeight) Toml.scroll = top + height - ViewHeight;
-}
-
-void RunTomlCommand(const std::string& command) {
-	const bool leaving = Toml.leaving;
-	Toml.leaving       = false;
-	if (command == "back") {
-		if (!leaving && TomlChanged()) {
-			Toml.leaving = true;
-			SetNotice("Changes not applied: Apply them, or click the back arrow again to drop them.", true);
-		} else {
-			Current = View::List;
-			SetNotice({});
-			RetryReuse();
-		}
-	} else if (command == "apply") ApplyToml();
-	else if (command == "reload") {
-		const int   scroll = Toml.scroll;
-		std::string why;
-		if (LoadToml(Toml.path, why)) SetNotice("Read again from the file.");
-		else SetNotice(why, true);
-		Toml.scroll = scroll;
-	} else if (command.size() >= 2 && (command[0] == 'C' || command[0] == '+' || command[0] == '-')) {
-		const int r = std::atoi(command.c_str() + 1);
-		if (r < 0 || r >= static_cast<int>(Toml.rows.size())) return;
-		const TomlRow row = Toml.rows[static_cast<std::size_t>(r)];
-		if (row.field < 0) return;
-		auto& f = Toml.fields[static_cast<std::size_t>(row.field)];
-		SetNotice({});
-		if (command[0] == 'C') f.text = f.text == "true" ? "false" : "true";
-		else if (command[0] == '-') {
-			if (row.item >= 0 && row.item < static_cast<int>(f.list.size())) f.list.erase(f.list.begin() + row.item);
-			BuildTomlRows();
-		} else {
-			// a new empty item, typed in at once
-			f.list.emplace_back();
-			BuildTomlRows();
-			const int last = r + static_cast<int>(f.list.size());
-			ShowTomlRow(last);
-			StartTyping("i" + std::to_string(row.field) + "." + std::to_string(f.list.size() - 1));
-		}
-	} else return;
-	ShowView();
-}
-
-void RunCommand(const std::string& command) {
-	if (command.empty()) return;
-	if (command.rfind("type", 0) == 0 && command.size() > 4) {
-		StartTyping(command.substr(4));
-		return ShowView();
-	}
-	if (Bar.Handle(command)) return; // a scroll bar step
-	StopTyping(true);
-	if (command == "close") {
-		CloseMenu();
-		MenuVisible = false;
-		return;
-	}
-	if (Current == View::List) RunListCommand(command);
-	else if (Current == View::Client) RunClientCommand(command);
-	else RunTomlCommand(command);
-}
-
-
-// ---- opening ----
-
-auto OnOpenAction(const D2RL::PluginContext*, const D2RL::Input::ActionEvent* event, void*) noexcept -> D2RL::Input::ActionResult {
-	if (!D2RL::Input::HasActionEventField(event, D2RL::Input::ActionEventRequiredSize) || event->kind != D2RL::Input::ActionEventKind::Pressed) return D2RL::Input::ActionResult::Ignored;
-	if (Threads) (void)Threads->runOnUiThread(Context, ToggleTask, nullptr);
-	return D2RL::Input::ActionResult::Handled;
-}
-
-auto PluginsCommand(D2R::Game::Client*, const D2RL::ConsoleCommandContext* command, void*) noexcept -> D2RL::ConsoleCommandResult {
-	if (!command || !command->plugin) return D2RL::ConsoleCommandResult::Failed;
-	int counts[4] {};
-	for (const auto& e : Entries()) ++counts[static_cast<int>(e.mode)];
-	Say("I Hate TOMLs: %d in this menu, %d with their own window, %d with a TOML file, %d without settings", counts[static_cast<int>(Mode::Menu)], counts[static_cast<int>(Mode::Window)],
-	    counts[static_cast<int>(Mode::Toml)], counts[static_cast<int>(Mode::None)]);
-	if (Threads) (void)Threads->runOnUiThread(Context, ToggleTask, nullptr);
-	return D2RL::ConsoleCommandResult::Handled;
+	App::Refresh();
 }
 
 // ---- after every plugin has loaded ----
 
-void __cdecl AfterAllLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
-	static bool done = false;
-	if (done) return;
-	done = true;
+void Loaded() {
 	FindRunningPlugins();
-	Gui::Font::Measure();
-	RefreshText();
 	Hub::Start();
-	Gui::Kit::Read(); // the game's art for the window
-	Gui::RunOnUi([] { (void)Gui::CharacterWindow::Cover(), (void)Gui::CharacterWindow::BarCover(); }); // the covers made before the first open
-	Log(false, "every plugin has loaded: %zu in the menu, %zu with their own window", Clients.size(), Windows.size());
+	int counts[4] {};
+	for (const auto& e : Entries()) ++counts[static_cast<int>(e.mode)];
+	Log(false, "every plugin has loaded: %d in this menu, %d with their own window, %d with a TOML file, %d without settings", counts[static_cast<int>(Mode::Menu)],
+	    counts[static_cast<int>(Mode::Window)], counts[static_cast<int>(Mode::Toml)], counts[static_cast<int>(Mode::None)]);
 }
 
 template <typename T>
@@ -2272,13 +1606,8 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	Context = context;
 	Backup::Restore(); // before the other plugins read their configs
 
-	Threads     = Query<D2RL::ThreadService>("thread");
-	PanelApi    = Query<D2RL::PanelService>("panel");
-	WidgetApi   = Query<D2RL::WidgetService>("widget");
-	ResourceApi = Query<D2RL::ResourceService>("resource");
-	EventApi    = Query<D2RL::SharedEventService>("shared event");
+	Threads = Query<D2RL::ThreadService>("thread");
 	if (Threads && !D2RL::HasThreadServiceField(Threads, D2RL::ThreadServiceRequiredSize)) Threads = nullptr;
-	if (WidgetApi && !D2RL::HasWidgetServiceField(WidgetApi, D2RL::WidgetServiceRequiredSize)) WidgetApi = nullptr;
 
 	// The service first: plugins loading after this one register at once.
 	if (const auto* comm = Query<D2RL::PluginCommunicationService>("plugin communication");
@@ -2295,48 +1624,28 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		Self::Join(); // its own page, first in the list
 	}
 
-	if (!PanelApi || !ResourceApi || !Threads || !EventApi) {
-		Log(true, "I Hate TOMLs %s: inactive, a service it needs is missing", PluginVersion);
-		return true;
-	}
-	// The window: D2R GUI's panel pool (each view a new layout on one of
-	// PoolSize panels registered now), its button clicks, its art.
-	// A window of its own: GameplayLeftSlot would open the inventory with it.
-	(void)Gui::Init(context, PluginId);
+	// The window, declared: D2R GUI's App does its panels, clicks, typing,
+	// scrolling, the left-panel behaviour, the key binding and the console command.
 	Gui::Api().lowEndBilinear = true;
-	Window.Register(ViewLayout, "Menu", PoolSize, D2RL::Panels::PanelFlags::CloseOnEscape);
-	Window.OnShown([] { MenuVisible = true, WatchMouse(); });
-	Gui::Commands::Listen(RunCommand);
-
-	if (const auto* lifecycle = Query<D2RL::LifecycleService>("lifecycle")) {
-		const D2RL::Lifecycle::DataTablesLoadedListener loaded { .structSize = sizeof(D2RL::Lifecycle::DataTablesLoadedListener), .callback = AfterAllLoaded };
-		D2RL::Lifecycle::ListenerHandle                 handle {};
-		(void)lifecycle->registerDataTablesLoadedListener(context, &loaded, &handle);
-		const D2RL::Lifecycle::GameplayEventListener ready { .structSize = D2RL::Lifecycle::GameplayEventListenerSize, .kind = D2RL::Lifecycle::GameplayEventKind::LocalPlayerReady, .callback = Chat::OnPlayerReady };
-		if (lifecycle->registerGameplayEventListener(context, &ready, &handle) != D2RL::Lifecycle::Result::Success) Log(true, "could not listen to games starting: no chat notice of updates, the view does not move for the menu");
-		const D2RL::Lifecycle::GameplayEventListener left { .structSize = D2RL::Lifecycle::GameplayEventListenerSize, .kind = D2RL::Lifecycle::GameplayEventKind::GameLeft, .callback = Chat::OnGameLeft };
-		(void)lifecycle->registerGameplayEventListener(context, &left, &handle);
-	}
-
-	if (const auto* input = Query<D2RL::InputService>("input"); input && D2RL::HasInputServiceField(input, D2RL::InputServiceRequiredSize)) {
-		const D2RL::Input::ActionRegistration action {
-			.structSize       = D2RL::Input::ActionRegistrationSize,
-			.logicalId        = "open-i-hate-tomls",
-			.displayName      = "Open I Hate TOMLs",
-			.category         = "I Hate TOMLs",
-			.defaultPrimary   = { .key = D2RL::Input::Key::None },
-			.defaultSecondary = { .key = D2RL::Input::Key::None },
-			.callback         = OnOpenAction,
-		};
-		D2RL::Input::ActionHandle handle = D2RL::Input::InvalidHandle;
-		if (input->registerAction(context, &action, &handle) != D2RL::Input::Result::Success) Log(true, "could not add Open I Hate TOMLs to the Controls menu");
-	}
-	(void)context->RegisterConsoleCommand("pluginmenu", PluginsCommand, "Opens or closes I Hate TOMLs (the plugin settings window).");
-	Log(false, "I Hate TOMLs %s: ready on D2R %s, %s", PluginVersion, context->buildVersion ? context->buildVersion : "?", Window.Ready() ? "window ready" : "no window");
+	const bool ready          = App::Start(context, PluginId,
+	                                       {
+	                                           .title       = "Plugins",
+	                                           .frame       = App::Frame::Character,
+	                                           .content     = ListItems,
+	                                           .header      = ListHeader,
+	                                           .footer      = ListFooter,
+	                                           .console     = "pluginmenu",
+	                                           .keybind     = "Open I Hate TOMLs",
+	                                           .keyCategory = "I Hate TOMLs",
+	                                           .views       = 60,
+	                                           .command     = RunCommand,
+	                                           .loaded      = Loaded,
+	                                           .inGame      = Chat::InGameChanged,
+	                                       });
+	Log(!ready, "I Hate TOMLs %s: %s on D2R %s", PluginVersion, ready ? "ready" : "inactive, a service it needs is missing", context->buildVersion ? context->buildVersion : "?");
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
-	D2RGui::TextInput::Shutdown();
-	D2RGui::WindowHook::Stop();
+	App::Stop();
 }
