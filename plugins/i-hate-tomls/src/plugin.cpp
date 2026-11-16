@@ -45,7 +45,7 @@
 namespace {
 
 constexpr const char* PluginId      = "i-hate-tomls";
-constexpr const char* PluginVersion = "1.1.1-dev-4";
+constexpr const char* PluginVersion = "1.1.1-dev-5";
 constexpr const char* CommandPrefix = "i-hate-tomls/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -1261,9 +1261,18 @@ struct TomlConfig {
 	std::wstring                 path;
 	TomlDoc::Document            doc;
 	std::vector<TomlEdit::Field> fields;
+	bool                         leaving {}; // Back clicked once with changes not applied
 };
 
 TomlConfig Toml;
+
+// True when the boxes hold something the file does not.
+bool TomlChanged() {
+	if (!Toml.doc.error.empty()) return false;
+	std::string out, why;
+	int         changed = 0;
+	return !TomlEdit::Apply(Toml.doc, Toml.fields, out, why, changed) || changed > 0;
+}
 
 bool JoinsPrevious(const std::string& previous, const std::string& line) {
 	if (previous.size() < 50 || line.empty()) return false;
@@ -1287,6 +1296,7 @@ bool LoadToml(std::string& why) {
 	Toml.fields = Toml.doc.error.empty() ? TomlEdit::Fields(Toml.doc) : std::vector<TomlEdit::Field>();
 	if (!Toml.doc.error.empty()) Toml.doc.items.clear();
 	TomlEdit::Mark(Toml.doc, Toml.fields);
+	Toml.leaving = false;
 	if (!Toml.doc.error.empty()) return why = "this file is not valid TOML (" + Toml.doc.error + ")", false;
 	return true;
 }
@@ -1400,10 +1410,13 @@ std::vector<App::Item> TomlItems() {
 			case TomlEdit::Editor::List: {
 				const auto count = f->list.empty() ? std::string("empty list") : std::to_string(f->list.size()) + (f->list.size() == 1 ? " item" : " items");
 				out.push_back(App::Adder(f->key, count, [idx] {
-					              if (auto* g = FieldAt(idx)) g->list.emplace_back();
+					              auto* g = FieldAt(idx);
+					              if (!g) return;
+					              g->list.emplace_back();
+					              App::Focus("i" + std::to_string(idx) + "." + std::to_string(g->list.size() - 1)); // typed in at once
 				              }).Note(note));
 				for (int k = 0; k < static_cast<int>(f->list.size()); ++k)
-					out.push_back(App::Field(std::to_string(k + 1), TomlText(idx, k), "(empty)").Tip("Click to type; Esc puts the item back").Remove([idx, k] {
+					out.push_back(App::Field(std::to_string(k + 1), TomlText(idx, k), "(empty)").Tip("Click to type; Esc puts the item back").Id("i" + std::to_string(idx) + "." + std::to_string(k)).Remove([idx, k] {
 						if (auto* g = FieldAt(idx); g && k < static_cast<int>(g->list.size())) g->list.erase(g->list.begin() + k);
 					}));
 				break;
@@ -1430,12 +1443,15 @@ void OpenToml(const std::string& plugin, const std::string& name, const std::wst
 	    .title    = name,
 	    .subtitle = Narrow(FileName(path)),
 	    .content  = TomlItems,
-	    .footer   = [] {
-            std::vector<App::Item> out { App::Action("Read the file again", "Reload", ReloadToml).Tip("Drops the changes not applied") };
-            if (Toml.doc.error.empty()) out.push_back(App::Action("Save the changes to the file", "Apply", ApplyToml));
-            return out;
-	    },
+	    .footer   = [] { return std::vector<App::Item> { App::Buttons("Reload", ReloadToml, Toml.doc.error.empty() ? "Apply" : "", ApplyToml) }; },
 	    .backTip  = "All plugins",
+	    .canLeave = [] {
+		    // changes not applied: the first Back says so, the second drops them
+		    if (Toml.leaving || !TomlChanged()) return true;
+		    Toml.leaving = true;
+		    App::Notice("Changes not applied: Apply them, or click the back arrow again to drop them.", true);
+		    return false;
+	    },
 	});
 	App::Notice(ok ? "Applied changes take effect after a restart." : why, !ok);
 }
@@ -1498,7 +1514,7 @@ std::vector<App::Row> ListRows() {
 		}
 		if (const std::string update = Hub::UpdateFor(e.slug, e.version); !update.empty())
 			row.button = update + " out", row.buttonCommand = "U" + std::to_string(i), row.buttonTip = "A newer version is on the D2RLoader Hub: click to open its page";
-		else if (Hub::UpToDate(e.slug, e.version)) row.value = "up to date";
+		else if (Hub::UpToDate(e.slug, e.version)) row.value = "up to date", row.valueTip = "Same version as on the D2RLoader Hub";
 		rows.push_back(std::move(row));
 	}
 	return rows;
@@ -1517,10 +1533,11 @@ std::vector<App::Item> ListHeader() {
 	std::vector<App::Item> out { App::Section(std::to_string(list.size()) + (list.size() == 1 ? " plugin running" : " plugins running")) };
 	if (Hub::Now == Hub::State::Checking) out.push_back(App::Text(Hub::StateText()).Tip("Versions checked on the D2RLoader Hub at launch"));
 	else if (Hub::Now == Hub::State::Failed)
-		out.push_back(App::Custom(52, [](const App::Place& p) { return Gui::Text(p.name, p.x, p.y, p.width, 48, Hub::StateText(), Gui::Style::Warn, "The D2RLoader Hub could not be reached; see i-hate-tomls.log"); }));
+		out.push_back(App::Text(Hub::StateText()).Warn().Tip("The D2RLoader Hub could not be reached; see i-hate-tomls.log"));
 	out.push_back(App::Field("", App::Bind<std::string>([] { return SearchText; }, [](const std::string& text) { SearchText = text; return std::string(); }), "Search")
 	                  .Clearable()
-	                  .Tip("Type part of a plugin's name"));
+	                  .Tip("Type part of a plugin's name")
+	                  .OnChange([] { App::ScrollTo(0); }));
 	if (!SearchText.empty()) out.push_back(App::Text(std::to_string(found) + " found"));
 	return out;
 }
@@ -1528,17 +1545,7 @@ std::vector<App::Item> ListHeader() {
 // Under the list: what the gems mean.
 std::vector<App::Item> ListFooter() {
 	if (App::Depth() > 0) return {};
-	return { App::Custom(56, [](const App::Place& p) {
-		const Mode  modes[] { Mode::Menu, Mode::Window, Mode::Toml };
-		const char* names[] { "this menu", "own window", "TOML file" };
-		std::string out;
-		for (int k = 0; k < 3; ++k) {
-			const int x = p.x + 120 + k * 260;
-			out += Gui::Image(p.name + "G" + std::to_string(k), x, p.y + 8, ModeIcon(modes[k]));
-			out += Gui::Text(p.name + "T" + std::to_string(k), x + 50, p.y + 4, 200, 48, names[k], Gui::Style::SmallLeft);
-		}
-		return out;
-	}) };
+	return { App::Legend({ { ModeIcon(Mode::Menu), "this menu" }, { ModeIcon(Mode::Window), "own window" }, { ModeIcon(Mode::Toml), "TOML file" } }) };
 }
 
 // A row's gear ("O<index>") or update button ("U<index>").
@@ -1576,13 +1583,23 @@ void __cdecl Hub::Refresh(const D2RL::PluginContext*, void*) noexcept {
 
 // ---- after every plugin has loaded ----
 
+std::string Counts() {
+	int counts[4] {};
+	for (const auto& e : Entries()) ++counts[static_cast<int>(e.mode)];
+	return std::to_string(counts[static_cast<int>(Mode::Menu)]) + " in this menu, " + std::to_string(counts[static_cast<int>(Mode::Window)]) + " with their own window, "
+	       + std::to_string(counts[static_cast<int>(Mode::Toml)]) + " with a TOML file, " + std::to_string(counts[static_cast<int>(Mode::None)]) + " without settings";
+}
+
 void Loaded() {
 	FindRunningPlugins();
 	Hub::Start();
-	int counts[4] {};
-	for (const auto& e : Entries()) ++counts[static_cast<int>(e.mode)];
-	Log(false, "every plugin has loaded: %d in this menu, %d with their own window, %d with a TOML file, %d without settings", counts[static_cast<int>(Mode::Menu)],
-	    counts[static_cast<int>(Mode::Window)], counts[static_cast<int>(Mode::Toml)], counts[static_cast<int>(Mode::None)]);
+	Log(false, "every plugin has loaded: %s", Counts().c_str());
+}
+
+// The console command: the counts, then the window opens or closes.
+bool OnConsole(const D2RL::ConsoleCommandContext*) {
+	Say("I Hate TOMLs: %s", Counts().c_str());
+	return true;
 }
 
 template <typename T>
@@ -1635,9 +1652,11 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	                                           .header      = ListHeader,
 	                                           .footer      = ListFooter,
 	                                           .console     = "pluginmenu",
+	                                           .onConsole   = OnConsole,
 	                                           .keybind     = "Open I Hate TOMLs",
 	                                           .keyCategory = "I Hate TOMLs",
 	                                           .views       = 60,
+	                                           .changed     = [] { Toml.leaving = false; },
 	                                           .command     = RunCommand,
 	                                           .loaded      = Loaded,
 	                                           .inGame      = Chat::InGameChanged,
