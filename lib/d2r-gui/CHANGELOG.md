@@ -23,3 +23,4 @@
 * Coloured text parts (App::Red and the others) show in colour instead of as raw codes.
 * Table headers and cells are cut to their column with "...", and the full text shows on hover.
 * Components inside a card stay inside its frame and clear of the scroll bar.
+* Table and list rows have flat stripes behind them instead of a button sprite.

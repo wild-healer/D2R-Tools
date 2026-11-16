@@ -916,7 +916,7 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 		at += 56;
 		for (int r = 0; r < static_cast<int>(item.gridCells.size()); ++r, at += GridLine) {
 			const auto rn = n + "R" + std::to_string(r);
-			if (r % 2 == 0) out += Image(rn + "B", a.left, at + 2, Kit::Row(width, GridLine - 4));
+			out += Image(rn + "B", a.left, at, Kit::Stripe(width, GridLine, r % 2 == 0));
 			x = a.left;
 			const auto& cells = item.gridCells[static_cast<std::size_t>(r)];
 			for (int c = 0; c < static_cast<int>(widths.size()) && c < static_cast<int>(cells.size()); ++c) {
@@ -1075,7 +1075,7 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 			const bool  clicked = !row.command.empty() || item.pick;
 			int         right   = a.right; // the row's right end, taken by its buttons from the right
 			int         textX   = a.left + 30 + row.indent * 40;
-			out += Image(rn + "B", a.left, ry + 3, Kit::Row(width, ListRow - 6));
+			out += Image(rn + "B", a.left, ry, Kit::Stripe(width, ListRow, r % 2 == 0));
 			if (clicked) out += HitButton(rn + "H", a.left, ry + 3, width, ListRow - 6, !row.command.empty() ? row.command : "a.r" + id + ":" + std::to_string(r), row.tooltip);
 			if (row.expander >= 0) out += ArrowButton(rn + "E", textX - 10, ry + (ListRow - 48) / 2, row.expander == 0, 48, row.expandCommand, row.expander ? "Close" : "Open"), textX += 50;
 			if (row.check >= 0) {
