@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.80";
+constexpr const char* PluginVersion = "0.0.81";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2066,6 +2066,16 @@ ModLook LookOf(const Mod& m) {
 	return make("sun", yellow, Tiers(AuraPct, "", "%"), "of the aura level the game gives elites"); // the auras
 }
 
+// Colour runs: the library's (App::Red...).
+namespace Paint {
+std::string Red(const std::string& t) { return App::Red(t); }
+std::string Green(const std::string& t) { return App::Green(t); }
+std::string Blue(const std::string& t) { return App::Blue(t); }
+std::string Gold(const std::string& t) { return App::Gold(t); }
+std::string Gray(const std::string& t) { return App::Gray(t); }
+std::string Orange(const std::string& t) { return App::Orange(t); }
+} // namespace Paint
+
 std::string IconOf(const char* name, Gui::Rgb colour = { 215, 200, 150 }) { return Gui::Icons::Sprite(name, 40, colour); }
 
 std::vector<App::Item> RuleItems() {
@@ -2075,22 +2085,21 @@ std::vector<App::Item> RuleItems() {
 	out.push_back(App::Card("This game"));
 	AcquireSRWLockShared(&Lock);
 	if (const GameMods* g = Last; g && InGame) {
-		out.push_back(App::Bullet(g->difficulty == 2 ? App::Red("Hell") + ": every level terrorized, zone level " + App::Gold(std::to_string(g->zoneLevel))
-		                                             : App::Orange("Nightmare") + ": act " + std::to_string(g->act.load()) + " terrorized, zone level " + App::Gold(std::to_string(g->zoneLevel)),
+		out.push_back(App::Bullet(g->difficulty == 2 ? Paint::Red("Hell") + ": every level terrorized, zone level " + Paint::Gold(std::to_string(g->zoneLevel))
+		                                             : Paint::Orange("Nightmare") + ": act " + std::to_string(g->act.load()) + " terrorized, zone level " + Paint::Gold(std::to_string(g->zoneLevel)),
 		                          IconOf(g->difficulty == 2 ? "horned-skull" : "death-skull", { 230, 90, 60 })));
 		std::vector<std::vector<App::GridCell>> rows;
 		for (int i = 0; i < g->count; ++i) {
 			const Mod&    m    = Mods[g->mods[i].mod];
 			const ModLook look = LookOf(m);
 			const int     t    = std::clamp(g->mods[i].tier, 1, 3);
-			rows.push_back({ { .text = std::string(m.name) + (m.kind == Kind::Aura ? " aura" : ""), .icon = IconOf(look.icon, look.colour) },
-			                 { .text = App::Gold(Roman(t)) },
-			                 { .text = App::Green(look.tier[t - 1]) },
-			                 { .text = look.what, .tooltip = look.what } });
+			rows.push_back({ { .text = std::string(m.name) + (m.kind == Kind::Aura ? " aura" : ""), .icon = IconOf(look.icon, look.colour), .tooltip = look.what },
+			                 { .text = Paint::Gold(Roman(t)), .tooltip = look.what },
+			                 { .text = Paint::Green(look.tier[t - 1]), .tooltip = look.what } });
 		}
-		if (!rows.empty()) out.push_back(App::Grid("", { { "Mod", 420 }, { "Tier", 130 }, { "Value", 200 }, { "Effect", 0 } }, std::move(rows)));
-		out.push_back(App::Bullet("Rewards: " + App::Gold("+" + std::to_string(g->gold) + "% gold find") + ", " + App::Blue("+" + std::to_string(g->magic) + "% magic find") + ", "
-		                              + App::Green("+" + std::to_string(g->xp) + "% experience"),
+		if (!rows.empty()) out.push_back(App::Grid("", { { "Mod", 0 }, { "Tier", 120 }, { "Value", 220 } }, std::move(rows)));
+		out.push_back(App::Bullet("Rewards: " + Paint::Gold("+" + std::to_string(g->gold) + "% gold find") + ", " + Paint::Blue("+" + std::to_string(g->magic) + "% magic find") + ", "
+		                              + Paint::Green("+" + std::to_string(g->xp) + "% experience"),
 		                          IconOf("gold-stack", { 240, 200, 80 })));
 	} else out.push_back(App::Bullet(InGame ? "No TZ Plus mods in this game" : "Not in a game", IconOf("info")));
 	ReleaseSRWLockShared(&Lock);
@@ -2099,16 +2108,17 @@ std::vector<App::Item> RuleItems() {
 	// terror zones
 	out.push_back(App::Card("Terror zones"));
 	const auto range = [](int d) { return std::to_string(Ranges[d].minLevel) + "-" + std::to_string(Ranges[d].maxLevel); };
-	out.push_back(App::Grid("", { { "Difficulty", 340 }, { "Terrorized", 0 }, { "Zone level", 220 }, { "Mods", 140 }, { "Tiers", 160 } },
-	                        { { { .text = "Normal", .icon = IconOf("castle") }, { .text = "the game's own terror zone" }, { .text = "-" }, { .text = "-" }, { .text = "-" } },
-	                          { { .text = App::Orange("Nightmare"), .icon = IconOf("death-skull", { 230, 150, 60 }) },
-	                            { .text = "one whole act, a new one every 30 min" }, { .text = range(1) }, { .text = "1-" + std::to_string(Ranges[1].maxMods) },
-	                            { .text = "I-" + Roman(Ranges[1].maxTier) } },
-	                          { { .text = App::Red("Hell"), .icon = IconOf("horned-skull", { 230, 90, 60 }) },
-	                            { .text = "every level, all game (no rotation)" }, { .text = range(2) }, { .text = "1-" + std::to_string(Ranges[2].maxMods) },
-	                            { .text = "I-" + Roman(Ranges[2].maxTier) } } }));
+	out.push_back(App::Grid("", { { "Difficulty", 0 }, { "Levels", 190 }, { "Mods", 120 }, { "Tiers", 140 } },
+	                        { { { .text = "Normal", .icon = IconOf("castle") }, { .text = "-" }, { .text = "-" }, { .text = "-" } },
+	                          { { .text = Paint::Orange("Nightmare"), .icon = IconOf("death-skull", { 230, 150, 60 }) }, { .text = range(1) },
+	                            { .text = "1-" + std::to_string(Ranges[1].maxMods) }, { .text = "I-" + Roman(Ranges[1].maxTier) } },
+	                          { { .text = Paint::Red("Hell"), .icon = IconOf("horned-skull", { 230, 90, 60 }) }, { .text = range(2) },
+	                            { .text = "1-" + std::to_string(Ranges[2].maxMods) }, { .text = "I-" + Roman(Ranges[2].maxTier) } } }));
+	out.push_back(App::Bullet("Normal: the game's own terror zone, untouched.", IconOf("castle")));
+	out.push_back(App::Bullet("Nightmare: one whole act is terrorized, a new act every 30 minutes.", IconOf("death-skull", { 230, 150, 60 })));
+	out.push_back(App::Bullet("Hell: every level is terrorized for the whole game, no rotation.", IconOf("horned-skull", { 230, 90, 60 })));
 	out.push_back(App::Bullet("The mods roll once per game: the higher the zone level, the more mods and the higher their tiers.", IconOf("dice-six-faces-five")));
-	out.push_back(App::Bullet(App::Gold("Champions, uniques, minions and bosses") + " get every mod one tier higher. No monster goes over level 99.", IconOf("rank-3", { 240, 200, 80 })));
+	out.push_back(App::Bullet(Paint::Gold("Champions, uniques, minions and bosses") + " get every mod one tier higher. No monster goes over level 99.", IconOf("rank-3", { 240, 200, 80 })));
 	out.push_back(App::CardEnd());
 
 	// rewards
@@ -2117,21 +2127,21 @@ std::vector<App::Item> RuleItems() {
 	for (int t = 1; t <= 3; ++t) {
 		const int g = t, m = t - 1, x = t == 3 ? 1 : 0;
 		rewards.push_back({ { .text = "Tier " + Roman(t), .icon = IconOf(t == 1 ? "rank-1" : t == 2 ? "rank-2" : "rank-3", { 240, 200, 80 }) },
-		                    { .text = App::Gold("+" + std::to_string(g * GoldPerPoint) + "%") },
-		                    { .text = App::Blue(m ? "+" + std::to_string(m * MagicPerPoint) + "%" : "-") },
-		                    { .text = App::Green(x ? "+" + std::to_string(x * XpPerPoint) + "%" : "-") } });
+		                    { .text = Paint::Gold("+" + std::to_string(g * GoldPerPoint) + "%") },
+		                    { .text = Paint::Blue(m ? "+" + std::to_string(m * MagicPerPoint) + "%" : "-") },
+		                    { .text = Paint::Green(x ? "+" + std::to_string(x * XpPerPoint) + "%" : "-") } });
 	}
-	out.push_back(App::Grid("", { { "Tier", 0 }, { "Gold find", 240 }, { "Magic find", 240 }, { "Experience", 240 } }, std::move(rewards)));
-	out.push_back(App::Bullet("Three tier III mods: " + App::Gold("+" + std::to_string(9 * GoldPerPoint) + "% gold find") + ", " + App::Blue("+" + std::to_string(6 * MagicPerPoint) + "% magic find")
-	                          + ", " + App::Green("+" + std::to_string(3 * XpPerPoint) + "% experience") + "."));
+	out.push_back(App::Grid("", { { "Tier", 0 }, { "Gold", 170 }, { "Magic", 170 }, { "XP", 140 } }, std::move(rewards)));
+	out.push_back(App::Bullet("Three tier III mods: " + Paint::Gold("+" + std::to_string(9 * GoldPerPoint) + "% gold find") + ", " + Paint::Blue("+" + std::to_string(6 * MagicPerPoint) + "% magic find")
+	                          + ", " + Paint::Green("+" + std::to_string(3 * XpPerPoint) + "% experience") + "."));
 	out.push_back(App::CardEnd());
 
 	// Roran
 	out.push_back(App::Card("Roran Stronghammer's zones"));
-	out.push_back(App::Bullet("At the fire in Harrogath, in Nightmare and Hell: " + App::Gold(std::to_string(ZoneSlots / ZoneParts) + " zones") + " a game.", IconOf("campfire", { 240, 150, 60 })));
-	out.push_back(App::Bullet("An outdoor area with " + App::Red("twice the monsters") + " and x1.5 elite packs, 8 monster types from every act.", IconOf("world")));
+	out.push_back(App::Bullet("At the fire in Harrogath, in Nightmare and Hell: " + Paint::Gold(std::to_string(ZoneSlots / ZoneParts) + " zones") + " a game.", IconOf("campfire", { 240, 150, 60 })));
+	out.push_back(App::Bullet("An outdoor area with " + Paint::Red("twice the monsters") + " and x1.5 elite packs, 8 monster types from every act.", IconOf("world")));
 	out.push_back(App::Bullet("Its dungeon: x1.5 the density, x2 elite packs; its stairs lead back to Harrogath.", IconOf("castle")));
-	out.push_back(App::Bullet("The exit area holds " + App::Gold("3 golden chests") + ".", IconOf("open-treasure-chest", { 240, 200, 80 })));
+	out.push_back(App::Bullet("The exit area holds " + Paint::Gold("3 golden chests") + ".", IconOf("open-treasure-chest", { 240, 200, 80 })));
 	out.push_back(App::Bullet("Offer runes (Offering tab) to ban a mod or a monster family from your zones.", IconOf("rune-stone")));
 	out.push_back(App::CardEnd());
 
@@ -2145,18 +2155,20 @@ std::vector<App::Item> RuleItems() {
 			continue;
 		}
 		const ModLook look = LookOf(m);
-		mods.push_back({ { .text = m.name, .icon = IconOf(look.icon, look.colour), .tooltip = look.what }, { .text = look.tier[0] }, { .text = look.tier[1] },
-		                 { .text = App::Green(look.tier[2]) }, { .text = look.what, .tooltip = look.what } });
+		mods.push_back({ { .text = m.name, .icon = IconOf(look.icon, look.colour), .tooltip = look.what }, { .text = look.tier[0], .tooltip = look.what },
+		                 { .text = look.tier[1], .tooltip = look.what }, { .text = Paint::Green(look.tier[2]), .tooltip = look.what } });
 	}
 	{
 		const ModLook look = LookOf(Mods[ModCount - 1]);
-		mods.push_back({ { .text = "Auras", .icon = IconOf(look.icon, look.colour), .tooltip = auras }, { .text = look.tier[0] }, { .text = look.tier[1] },
-		                 { .text = App::Green(look.tier[2]) }, { .text = "one a game at most: " + auras, .tooltip = auras } });
+		const std::string tip = "Auras, one a game at most (" + look.what + "): " + auras;
+		mods.push_back({ { .text = "Auras", .icon = IconOf(look.icon, look.colour), .tooltip = tip }, { .text = look.tier[0], .tooltip = tip },
+		                 { .text = look.tier[1], .tooltip = tip }, { .text = Paint::Green(look.tier[2]), .tooltip = tip } });
 	}
-	out.push_back(App::Grid("", { { "Mod", 400 }, { "I", 150 }, { "II", 150 }, { "III", 150 }, { "Effect", 0 } }, std::move(mods)));
+	out.push_back(App::Grid("", { { "Mod", 0 }, { "I", 160 }, { "II", 160 }, { "III", 170 } }, std::move(mods)));
+	out.push_back(App::Bullet("Hover a mod for what its values do.", IconOf("info")));
 	out.push_back(App::CardEnd());
 
-	out.push_back(App::Bullet(App::Gray("Which mods can roll, and Nightmare and Hell on or off: the TOML config or I Hate TOMLs."), IconOf("cog")));
+	out.push_back(App::Bullet(Paint::Gray("Which mods can roll, and Nightmare and Hell on or off: the TOML config or I Hate TOMLs."), IconOf("cog")));
 	return out;
 }
 
