@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.76";
+constexpr const char* PluginVersion = "0.0.77";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1716,6 +1716,7 @@ std::atomic<bool>             InGame { false };
 std::atomic<int>              CurrentLevel { -1 };
 void ShowRewards(int level) noexcept;
 void StartWindowHook() noexcept;
+void UseRoranLook() noexcept;
 std::atomic<bool> ZonePortalOpen { false }; // this game has an open TZ Plus zone portal (the barbarian offers to close it)
 
 void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
@@ -1723,7 +1724,7 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 	if (!D2RL::Lifecycle::HasGameplayEventField(event, D2RL::Lifecycle::GameplayEventRequiredSize)) return;
 	switch (event->kind) {
 	case EventKind::GameJoined: InGame = true, CurrentLevel = -1; break;
-	case EventKind::LocalPlayerReady: StartWindowHook(); break;
+	case EventKind::LocalPlayerReady: StartWindowHook(), UseRoranLook(); break;
 	case EventKind::GameLeft: {
 		InGame = false, CurrentLevel = -1, ZonePortalOpen = false;
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
@@ -2351,6 +2352,44 @@ bool OnGameMessage(UINT message, WPARAM, LPARAM) {
 	return false; // the click goes on: you walk to him
 }
 
+
+// ---- Roran's look: heavy armor and an Ogre Maul at his belt ----
+// His HD definition is ours: the client's unit names (D2R+0x662610() mapper, monsters at +0x18 {rows of 0x30-byte names,
+// count}, read by D2R+0x662FB0 for "data/hd/character/enemy/<name>.json") get "d2rloader/tz-plus/roran" for act5pow, and that
+// file is registered with the resource service: act5pow's skeleton, animations and colours, the Act 5 barbarians' body and
+// heavy torso, and the Ogre Maul's model (hammer/maul) on his left thigh (his special1 part, "lit" for act5pow).
+constexpr const char* RoranDefName = "d2rloader/tz-plus/roran";
+constexpr const char* RoranDefPath = "data/hd/character/enemy/d2rloader/tz-plus/roran.json";
+constexpr const char* RoranDef = R"JSON({"dependencies":{"particles":[],"models":[{"path":"data/hd/character/enemy/act5barb1/body_young.model"},{"path":"data/hd/character/enemy/act5barb1/torso_hvy.model"}],"skeletons":[{"path":"data/hd/character/enemy/act5pow/skeleton/act5pow.skeleton"}],"animations":[],"textures":[{"path":"data/hd/character/common/common_hair1_FLOW.texture"},{"path":"data/hd/character/common/common_hair1_HRT.texture"},{"path":"data/hd/character/common/common_ktint.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_armor_hvy_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_body_SSS.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_hair_ALB.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_SSS.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_alb.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_nrm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_head_young_orm.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_vest_ALB.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_vest_NRM.texture"},{"path":"data/hd/character/enemy/act5barb1/textures/act5barb_vest_ORM.texture"}],"physics":[],"json":[{"path":"data/hd/character/enemy/act5pow/act5pow_state_machine.json"},{"path":"data/hd/items/weapon/hammer/maul.json"}],"variantdata":[{"path":"data/hd/character/enemy/act5pow/act5pow_variant.json"}],"objecteffects":[],"other":[]},"type":"UnitDefinition","name":"roran","entities":[{"type":"Entity","name":"entity_root","id":3706763854,"components":[{"type":"UnitRootComponent","name":"component_root","state_machine_filename":"data/hd/character/enemy/act5pow/act5pow_state_machine.json","doNotInheritRotation":false,"rotationOverride":{"x":0.0,"y":0.3826834,"z":0.0,"w":0.9238795},"doNotUseHDHeight":false,"hideAllMeshWhenInOpenedMode":false,"onCreateEventName":"","animations":[]},{"type":"SkeletonDefinitionComponent","name":"component_skeleton","filename":"data/hd/character/enemy/act5pow/skeleton/act5pow.skeleton","enableWeaponAttachInertialization":false},{"type":"VariantDefinitionComponent","name":"component_variant","filename":"data/hd/character/enemy/act5pow/act5pow_variant.json"}]},{"type":"Entity","name":"entity_basebody","id":3170001002,"components":[{"type":"ModelDefinitionComponent","name":"component_model_basebody","filename":"data/hd/character/enemy/act5barb1/body_young.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1}]},{"type":"Entity","name":"entity_torso","id":267185926,"components":[{"type":"UnitPartComponent","name":"component_part_torso","part":"torso","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_torso","filename":"data/hd/character/enemy/act5barb1/torso_hvy.model","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1}]},{"type":"Entity","name":"entity_belt_maul","id":3170001001,"components":[{"type":"UnitPartComponent","name":"component_part_special1_maul","part":"special1","variant":"lit"},{"type":"ModelDefinitionComponent","name":"component_model_special1_maul","filename":"","visibleLayers":1,"lightMask":19,"shadowMask":3,"ghostShadows":false,"floorModel":false,"terrainBlendEnableYUpBlend":false,"terrainBlendMode":1},{"type":"UnitAttachmentComponent","name":"entity_belt_maul_UnitAttachment","filename":"data/hd/items/weapon/hammer/maul.json","overrideBoneName":"L_Thigh","orientTowardBoneName":"","attachmentTransform":{"type":"Transform","name":"entity_belt_maul_UnitAttachment_attachmentTransform","translation":{"x":0.0,"y":0.0,"z":0.0},"rotation":{"x":0.0,"y":0.0,"z":0.0},"scale":{"x":1.0,"y":1.0,"z":1.0}},"attachmentStateMachineFilename":"","part":"special1","variant":"lit"}]}]})JSON";
+
+void RegisterRoranLook(const D2RL::PluginContext* context) noexcept {
+	const D2RL::ResourceService* resources = nullptr;
+	if (context->QueryService(&resources) != D2RL::ServiceQueryResult::Success || !D2RL::HasResourceServiceField(resources, D2RL::ResourceServiceRequiredSize))
+		return Log(true, "Roran keeps his look: no resource service");
+	const D2RL::Resources::ResourceRegistration file { .structSize = D2RL::Resources::ResourceRegistrationSize, .flags = 0, .path = RoranDefPath, .bytes = RoranDef,
+		                                               .byteCount = std::strlen(RoranDef) };
+	D2RL::Resources::RegistrationHandle handle = D2RL::Resources::InvalidHandle;
+	if (resources->registerResource(context, &file, &handle) != D2RL::Resources::Result::Success) return Log(true, "Roran keeps his look: %s was refused", RoranDefPath);
+}
+
+// UI thread, once a game is ready: act5pow's definition name -> ours.
+void UseRoranLook() noexcept {
+	static bool done = false;
+	if (done) return;
+	auto* mapper = At<std::uint8_t* (*)() noexcept>(0x662610)();
+	auto* rows   = mapper ? Field<std::uint8_t*>(mapper, 0x18) : nullptr;
+	const auto count = mapper ? Field<std::uint64_t>(mapper, 0x20) : 0;
+	if (!rows || count <= 534 || count > 4096) return Log(true, "Roran keeps his look: the client's monster names are not there (%llu)", static_cast<unsigned long long>(count));
+	done      = true;
+	char* row = reinterpret_cast<char*>(rows + 534 * 0x30);
+	if (std::strncmp(row, "act5pow", 8) != 0) return Log(true, "Roran keeps his look: monster 534's definition is \"%.16s\", not act5pow", row);
+	DWORD old = 0;
+	VirtualProtect(row, 0x30, PAGE_READWRITE, &old);
+	std::memset(row, 0, 0x30);
+	std::memcpy(row, RoranDefName, std::strlen(RoranDefName));
+	Log(false, "Roran: his look is %s", RoranDefPath);
+}
+
 // The game window's messages, from the first game on (Roran's clicks), with the window's wheel.
 void StartWindowHook() noexcept {
 	Gui::WindowHook::Start({ .active = [] { return App::IsOpen(); }, .wheel = App::Detail::Wheel, .extra = OnGameMessage });
@@ -2381,6 +2420,7 @@ void StartWindow(const D2RL::PluginContext* context) noexcept {
 		},
 		.mouse = OnGameMessage,
 	};
+	RegisterRoranLook(context);
 	if (!App::Start(context, PluginId, std::move(window))) return Log(true, "the TZ Plus window is off: a service it needs is missing");
 	LoadOfferings({});
 }
