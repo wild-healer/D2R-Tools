@@ -1,21 +1,20 @@
 // Wild Healer's Charm Inventory: a charm grid on Player Page Host's page.
 //   - reserves one area of the host's page (10x4 by default, the size of the inventory),
 //     with active charms, and takes only charms;
-//   - shows it in a game-style left panel (D2R GUI's stash-look window) with
-//     the area's cells;
-//   - a button on the inventory's left edge (D2R GUI's inventory button, the
-//     "rune-stone" icon), under Grail On!'s, opens and closes it;
+//   - shows it as a D2R GUI window on the host's area (stash frame, the
+//     area's cells), opened by a button on the inventory's left edge (the
+//     "rune-stone" icon, under Grail On!'s), a key or the console;
 //   - charms in the normal inventory give no bonus (the local player's), and
 //     the charm inventory holds one of each unique charm (a second copy can
 //     only be swapped with the first);
 //   - every setting applies at once, from the config or I Hate TOMLs.
 // Every window part comes from the D2R GUI library (lib/d2r-gui).
-#include "page_host_api.h"
+#include <d2r_gui/page_host_api.h>
 #include "i_hate_tomls_client.h"
 
 #include <d2r_gui.h>
 #include <d2r_gui/icons.h>
-#include <d2r_gui/stash_window.h>
+#include <d2r_gui/app.h>
 
 #include <windows.h>
 #include <algorithm>
@@ -33,9 +32,10 @@ namespace {
 
 namespace Comm = D2RL::PluginCommunication;
 namespace Gui  = D2RGui;
+namespace App  = D2RGui::App;
 
 constexpr const char* PluginId      = "wild-healers-charm-inventory";
-constexpr const char* PluginVersion = "1.1.2-dev-2";
+constexpr const char* PluginVersion = "1.1.2-dev-3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -72,46 +72,49 @@ void Log(bool error, const char* format, ...) noexcept {
 	else Context->LogInfo(line);
 }
 
-// ---- the inventory button (D2R GUI) ----
+// ---- the window (D2R GUI App on the host's area) ----
 
-// Under Grail On!'s button (its mold at 3,954). Hidden while the plugin is off.
-constexpr int        ButtonX = 3, ButtonY = 954 + Gui::InventoryButton::Height;
-constexpr int        IconSize = 98, IconDrawn = 42;
-Gui::InventoryButton Button;
+// The inventory button under Grail On!'s (its mold at 3,954), hidden while
+// the plugin is off.
+constexpr int ButtonX = 3, ButtonY = 954 + Gui::InventoryButton::Height;
+constexpr int IconSize = 98, IconDrawn = 42;
 
-void AddButton() {
+void ShowButton() {
+	if (GuiReady) (void)Gui::RunOnUi([] { App::Button().SetShown(Enabled.load()); });
+}
+
+// The window's layout as App last built it, sent again when the area is
+// reserved again (a new size, turned on).
+std::string LastLayout;
+int         LastGridX = 0, LastGridY = 0;
+void        SendLayout();
+void        OpenArea();
+void        CloseArea();
+bool        AreaOpen();
+
+App::Window CharmWindow() {
+	App::Window window {
+		.title       = "Charms",
+		.items       = { App::HostGrid(&Columns, &Rows) },
+		.console     = "charms",
+		.keybind     = "Open/close charms",
+		.keyCategory = "Wild Healer's Charm Inventory",
+		.inventory   = App::InventoryLink { .sprite = "button", .tooltip = "Charms", .x = ButtonX, .y = ButtonY },
+	};
+	window.host = App::HostView {
+		.layout = [](const std::string& layout, int gridX, int gridY) { LastLayout = layout, LastGridX = gridX, LastGridY = gridY, SendLayout(); },
+		.open   = OpenArea,
+		.close  = CloseArea,
+		.isOpen = AreaOpen,
+	};
+	return window;
+}
+
+void RegisterButtonArt() {
 	const auto icon = Gui::Icons::Mask("rune-stone", IconSize);
 	if (icon.empty() || !Gui::RegisterSprite("mold", { Gui::MoldPicture() })
 	    || !Gui::RegisterSprite("button", Gui::MaskButton(icon.data(), IconSize, Gui::InventoryButton::Width - 2, 60, IconDrawn)))
 		Log(true, "could not register the button art");
-	const Gui::InventoryButton::Look look { .moldSprite = "mold", .buttonSprite = "button", .button = "CharmButton", .tooltip = "Charms", .command = "toggle" };
-	if (!Button.Register("InventoryButton", look, ButtonX, ButtonY)) Log(true, "could not add the inventory button");
-	Button.SetShown(Enabled.load());
-}
-
-void ShowButton() {
-	if (GuiReady) (void)Gui::RunOnUi([] { Button.SetShown(Enabled.load()); });
-}
-
-// ---- the panel (D2R GUI's stash-look window) ----
-
-// The cells centred inside the frame's gold line.
-namespace Window = Gui::StashWindow;
-int GridX = 0, GridY = 0;
-void PlaceGrid() noexcept {
-	GridX = Window::InnerX + (Window::InnerWidth - Columns * Cell) / 2;
-	GridY = Window::InnerY + (Window::InnerHeight - Rows * Cell) / 2;
-}
-
-// The host's layout: @PANEL@ and @GRID@ are its tokens; the close button
-// closes the panel as the game's own do.
-std::string PanelLayout() {
-	static const bool cell = Gui::RegisterSprite("cell", { Window::Cell() });
-	std::string       cells;
-	if (cell)
-		for (int y = 0; y < Rows; ++y)
-			for (int x = 0; x < Columns; ++x) cells += Gui::Image("Cell" + std::to_string(y * MaxColumns + x), GridX + x * Cell, GridY + y * Cell, Gui::SpriteName("cell"));
-	return Window::Layout("@PANEL@", "Charms", "", cells + ", @GRID@");
 }
 
 // ---- no bonus from inventory charms ----
@@ -495,13 +498,9 @@ auto __cdecl OnItemClick(const D2RL::PluginContext*, const Clicks::ItemInteracti
 }
 
 
-bool PanelArt = false; // D2R GUI is ready: the panel gets its frame
-
-void SetLayout() {
-	if (!PanelArt || !Area || !Host) return;
-	static std::string layout;
-	layout = PanelLayout();
-	const PageHost::LayoutRequest request { .structSize = sizeof(request), .flags = 0, .layout = layout.c_str(), .gridX = GridX, .gridY = GridY };
+void SendLayout() {
+	if (LastLayout.empty() || !Area || !Host) return;
+	const PageHost::LayoutRequest request { .structSize = sizeof(request), .flags = 0, .layout = LastLayout.c_str(), .gridX = LastGridX, .gridY = LastGridY };
 	if (const auto set = Host->setAreaLayout(Area, &request); set != PageHost::Result::Success) Log(true, "the host refused the panel layout (result %u): the plain one shows", static_cast<unsigned>(set));
 }
 
@@ -518,7 +517,8 @@ bool Join() {
 	}
 	Area = info.handle;
 	(void)Host->setItemPolicy(Area, CharmsOnly, nullptr);
-	SetLayout();
+	SendLayout();
+	if (GuiReady) (void)Gui::RunOnUi([] { App::Refresh(); }); // the layout for this size
 	Log(false, "%dx%d charm area reserved", Columns, Rows);
 	return true;
 }
@@ -535,7 +535,8 @@ void __cdecl AfterAllLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::D
 		Log(false, "area at %d,%d of the page (-1: not placed yet), charms active %u", info.x, info.y, info.charmsActive);
 }
 
-void Toggle() {
+// The window's opening and closing (App calls them on the UI thread).
+void OpenArea() {
 	if (!Enabled.load()) {
 		Context->WriteConsoleMessage("Charms: the charm inventory is turned off in its settings");
 		return;
@@ -544,40 +545,18 @@ void Toggle() {
 		Context->WriteConsoleMessage("Charms: Player Page Host is missing (see the plugin's log)");
 		return;
 	}
-	if (Host->isAreaOpen(Area)) {
-		(void)Host->closeArea(Area);
-		return;
-	}
+	if (Host->isAreaOpen(Area)) return;
 	PrepareDrops();
 	const auto opened = Host->openArea(Area);
 	if (opened == PageHost::Result::NoRoom) Context->WriteConsoleMessage("Charms: no room on the player page beside the other plugins' areas");
 	else if (opened != PageHost::Result::Success) Log(true, "open: result %u", static_cast<unsigned>(opened));
 }
 
-// Button clicks (D2R GUI, UI thread).
-void OnCommand(const std::string& command) {
-	if (command == "toggle") Toggle();
+void CloseArea() {
+	if (Area && Host && Host->isAreaOpen(Area)) (void)Host->closeArea(Area);
 }
 
-// A key or the console: on the UI thread, as the button.
-void PostToggle() {
-	if (GuiReady) Gui::Commands::Post("toggle");
-	else Toggle();
-}
-
-// The "Open/close charms" action of the game's Controls menu (unbound by
-// default): the same as the inventory button.
-auto OnCharmsAction(const D2RL::PluginContext*, const D2RL::Input::ActionEvent* event, void*) noexcept -> D2RL::Input::ActionResult {
-	if (!D2RL::Input::HasActionEventField(event, D2RL::Input::ActionEventRequiredSize) || event->kind != D2RL::Input::ActionEventKind::Pressed)
-		return D2RL::Input::ActionResult::Ignored;
-	PostToggle();
-	return D2RL::Input::ActionResult::Handled;
-}
-
-auto Command(D2R::Game::Client*, const D2RL::ConsoleCommandContext*, void*) noexcept -> D2RL::ConsoleCommandResult {
-	PostToggle();
-	return D2RL::ConsoleCommandResult::Handled;
-}
+bool AreaOpen() { return Area && Host && Host->isAreaOpen(Area); }
 
 // ---- settings, applied at once ----
 
@@ -654,7 +633,6 @@ bool SetSize(int columns, int rows, std::string& error) {
 	const bool wasOpen = live && Host->isAreaOpen(Area);
 	ReleaseArea();
 	Columns = columns, Rows = rows;
-	PlaceGrid();
 	bool ok = !Enabled.load() || (Join() && Area);
 	PageHost::AreaInfo now { .structSize = sizeof(now) };
 	if (ok && live && inside && (Host->getAreaInfo(Area, &now) != PageHost::Result::Success || now.x != old.x || now.y != old.y)) {
@@ -664,13 +642,14 @@ bool SetSize(int columns, int rows, std::string& error) {
 	} else if (!ok) error = "the host has no room for that size (see the log)";
 	if (!ok) {
 		Columns = oldColumns, Rows = oldRows;
-		PlaceGrid();
 		if (Enabled.load()) (void)Join();
 	}
-	if (wasOpen && Area) {
-		PrepareDrops();
-		(void)Host->openArea(Area);
-	}
+	if (GuiReady) // the window again at the size it has now, open again if it was
+		(void)Gui::RunOnUi([wasOpen] {
+			App::Close();
+			App::Refresh();
+			if (wasOpen && Area) App::Open();
+		});
 	if (ok) Log(false, "size %dx%d", Columns, Rows);
 	return ok;
 }
@@ -843,12 +822,11 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	if (!D2RL::HasContext(context) || !context->GetApi()) return false;
 	Context = context;
 	LoadConfig();
-	PlaceGrid();
 	Log(false, "%s %s loading, %dx%d%s", Info.name, PluginVersion, Columns, Rows, Enabled.load() ? "" : " (off: enabled = false)");
 	(void)Menu.Start(context, Schema, MenuGet, MenuSet, nullptr);
-	GuiReady = Gui::Init(context, PluginId);
-	PanelArt = GuiReady && !Window::FrameSprite().empty();
-	if (!GuiReady) Log(true, "a window service is missing: no button or panel art (use the charms console command)");
+	GuiReady = App::Start(context, PluginId, CharmWindow());
+	if (GuiReady) RegisterButtonArt(), App::Button().SetShown(Enabled.load());
+	else Log(true, "a window service is missing: no button or panel");
 	if (context->QueryService(&CommApi) != D2RL::ServiceQueryResult::Success) CommApi = nullptr;
 	if (context->QueryService(&Inventory) != D2RL::ServiceQueryResult::Success) Inventory = nullptr;
 	if (context->QueryService(&ItemApi) != D2RL::ServiceQueryResult::Success) ItemApi = nullptr;
@@ -859,36 +837,17 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		D2RL::Lifecycle::ListenerHandle                 handle {};
 		(void)lifecycle->registerDataTablesLoadedListener(context, &listener, &handle);
 	}
-	if (GuiReady) {
-		AddButton();
-		if (!Gui::Commands::Listen(OnCommand)) Log(true, "could not listen to button clicks");
-	}
-	if (const D2RL::InputService* input = nullptr;
-	    context->QueryService(&input) == D2RL::ServiceQueryResult::Success && input && D2RL::HasInputServiceField(input, D2RL::InputServiceRequiredSize)) {
-		const D2RL::Input::ActionRegistration action {
-			.structSize       = D2RL::Input::ActionRegistrationSize,
-			.logicalId        = "toggle-charms",
-			.displayName      = "Open/close charms",
-			.category         = "Wild Healer's Charm Inventory",
-			.defaultPrimary   = { .key = D2RL::Input::Key::None },
-			.defaultSecondary = { .key = D2RL::Input::Key::None },
-			.callback         = OnCharmsAction,
-		};
-		D2RL::Input::ActionHandle handle = D2RL::Input::InvalidHandle;
-		if (const auto result = input->registerAction(context, &action, &handle); result != D2RL::Input::Result::Success)
-			Log(true, "could not add the open/close action to the Controls menu (result %u)", static_cast<unsigned>(result));
-	}
 	if (const D2RL::ItemInteractionService* clicks = nullptr; context->QueryService(&clicks) == D2RL::ServiceQueryResult::Success && clicks) {
 		const Clicks::ItemInteractionListener listener { .structSize = Clicks::ItemInteractionListenerSize, .priority = 0, .callback = OnItemClick };
 		Clicks::ListenerHandle                handle {};
 		if (clicks->registerListener(Context, &listener, &handle) != Clicks::Result::Success) Log(true, "could not listen to Ctrl+clicks: a second copy of a unique charm can be Ctrl+clicked in");
 	}
-	(void)context->RegisterConsoleCommand("charms", Command, "Opens or closes the charm inventory.");
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
 	Menu.Stop();
+	App::Stop();
 	Gui::TileGrid::Unwrap();
 	UnwrapCharmSlot();
 	if (Area && Host) (void)Host->releaseArea(Context, Area);

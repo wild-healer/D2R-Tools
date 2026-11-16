@@ -1,5 +1,9 @@
 # Wild Healer's Charm Inventory 1.1.2: release texts
 
+## Test build 1.1.2-dev-3 (not released, diagnostic)
+
+1.1.2-dev-2 with the window declared through D2R GUI's App standard (a window on the host's area). The "Open/close charms" key binding has a new id: a key set for it before must be set again. Still has the diagnostic log.
+
 ## Test build 1.1.2-dev-2 (not released, diagnostic)
 
 1.1.2-dev-1 plus a diagnostic log of the charm check where the game adds or removes charm stats (at most 20 lines a second, 400 a session). Remove before a release.
