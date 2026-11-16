@@ -62,7 +62,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.71";
+constexpr const char* PluginVersion = "0.0.72";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -743,6 +743,33 @@ std::uint64_t HookApply(std::uint8_t* game, std::uint8_t* zone, std::uint8_t fla
 	const int players = GiveRewards(game, *g, difficulty == 2);
 	if (RewardLogs < 24) ++RewardLogs, Log(false, "rewards at zone change: %d player(s) found", players);
 	return result;
+}
+
+// The 30 minute rotation (the broadcast threads D2R+0x405B30 and 0x4073C0, for each game: 0x488DF0 (game, 1) clears its terror
+// zone, 0x488C70 (game) checks terror zones are on, then the new zone is applied and 0x4F22C0 tells the players). In a TZ Plus
+// Hell game every level stays terrorized: the rotation is skipped there (no "terror has spread" message every half hour).
+constexpr std::uint64_t RotationClearCalls[2] { 0x405CCD, 0x4074DD }, RotationCheckCalls[2] { 0x405CD5, 0x4074E5 };
+constexpr std::uint64_t RotationClearRva = 0x488DF0, RotationCheckRva = 0x488C70;
+thread_local const void* SkipRotation = nullptr;
+std::atomic<int>         RotationLogs { 0 };
+bool HellTzPlus(const std::uint8_t* game) noexcept {
+	return game && Config.enabled.load(std::memory_order_relaxed) && Config.hell && Field<std::uint8_t>(game, GameDifficulty) == 2 && Field<std::uint8_t>(game, GameMode) >= 2 &&
+	       ModsOf(game);
+}
+void HookRotationClear(std::uint8_t* game, std::uint8_t flag) noexcept {
+	if (HellTzPlus(game)) {
+		SkipRotation = game;
+		if (RotationLogs.fetch_add(1, std::memory_order_relaxed) < 10) Log(false, "rotation skipped in a Hell game: every level stays terrorized");
+		return;
+	}
+	At<void (*)(std::uint8_t*, std::uint8_t) noexcept>(RotationClearRva)(game, flag);
+}
+std::uint8_t HookRotationCheck(std::uint8_t* game) noexcept {
+	if (game && SkipRotation == game) {
+		SkipRotation = nullptr;
+		return 0;
+	}
+	return At<std::uint8_t (*)(std::uint8_t*) noexcept>(RotationCheckRva)(game);
 }
 
 // ---- monsters ----
@@ -3729,6 +3756,10 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 	for (const std::uint64_t site : LabelCalls)
 		if (!PatchCall(site, LabelRva, reinterpret_cast<const void*>(&HookLabel)))
 			Log(true, "zones: could not patch D2R+0x%llX (hover)", static_cast<unsigned long long>(site));
+	for (int i = 0; i < 2; ++i)
+		if (!PatchCall(RotationClearCalls[i], RotationClearRva, reinterpret_cast<const void*>(&HookRotationClear)) ||
+		    !PatchCall(RotationCheckCalls[i], RotationCheckRva, reinterpret_cast<const void*>(&HookRotationCheck)))
+			Log(true, "could not patch the rotation at D2R+0x%llX: Hell games still get the half-hour terror zone message", static_cast<unsigned long long>(RotationClearCalls[i]));
 	if (!PatchJump(FillJump, FillRva, reinterpret_cast<const void*>(&HookFill)))
 		Log(true, "zones: could not patch D2R+0x%llX (fill pieces)", static_cast<unsigned long long>(FillJump));
 	if (!PatchCall(Ds1LoadCall, Ds1LoadRva, reinterpret_cast<const void*>(&HookDs1Load), { 0x4D, 0x89, 0xF1 })) // mov r9, r14 (room2)
