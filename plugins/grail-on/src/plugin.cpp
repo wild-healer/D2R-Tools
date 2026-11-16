@@ -99,6 +99,7 @@
 #include <tuple>
 #include <vector>
 #include <d2r_gui.h>
+#include <d2r_gui/icons.h>
 
 // The stash frame's PNGs, compiled into the DLL's read-only data (not
 // resources: see D2R GUI's png.h).
@@ -116,7 +117,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.2.2-dev-4";
+constexpr const char* PluginVersion = "1.2.2-dev-5";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -142,7 +143,92 @@ struct AssetEntry {
 };
 #include "art.inc"
 #include "builtin_art.inc"
-#include "icons.inc"
+// The menu and category icons: the D2R GUI set (game-icons.net, CC BY 3.0,
+// lib/d2r-gui/ICONS-CREDITS.txt), by Grail On!'s short names.
+constexpr int IconSize = 98, ObjIconSize = 196;
+struct GrailIcon { const char* name; const char* site; };
+constexpr GrailIcon GrailIcons[] {
+	{ "helm", "visored-helm" },
+	{ "tors", "breastplate" },
+	{ "shld", "round-shield" },
+	{ "glov", "gauntlet" },
+	{ "boot", "boots" },
+	{ "belt", "belt" },
+	{ "barb", "horned-helm" },
+	{ "drui", "wolf-head" },
+	{ "pala", "templar-shield" },
+	{ "necr", "totem-head" },
+	{ "warl", "evil-book" },
+	{ "axe", "battle-axe" },
+	{ "bow", "pocket-bow" },
+	{ "assn", "wolverine-claws" },
+	{ "xbow", "crossbow" },
+	{ "knif", "plain-dagger" },
+	{ "jave", "stone-spear" },
+	{ "blun", "spiked-mace" },
+	{ "sorc", "crystal-ball" },
+	{ "pole", "halberd" },
+	{ "scep", "winged-scepter" },
+	{ "spea", "trident" },
+	{ "staf", "wizard-staff" },
+	{ "swor", "broadsword" },
+	{ "thro", "thrown-daggers" },
+	{ "wand", "crystal-wand" },
+	{ "char", "rune-stone" },
+	{ "amul", "gem-pendant" },
+	{ "ring", "ring" },
+	{ "jewl", "cut-diamond" },
+	{ "other", "swap-bag" },
+	{ "cls0", "woman-elf-face" },
+	{ "cls1", "ninja-head" },
+	{ "cls2", "barbarian" },
+	{ "cls3", "bear-head" },
+	{ "cls4", "dread-skull" },
+	{ "cls5", "black-knight-helm" },
+	{ "cls6", "witch-face" },
+	{ "cls7", "warlock-hood" },
+	{ "tier0", "rank-1" },
+	{ "tier1", "rank-2" },
+	{ "tier2", "rank-3" },
+	{ "stats", "histogram" },
+	{ "grail", "holy-grail" },
+	{ "weapons", "crossed-swords" },
+	{ "armor", "chest-armor" },
+	{ "sets", "linked-rings" },
+	{ "runewords", "rune-sword" },
+	{ "config", "cog" },
+	{ "setgen", "scroll-unfurled" },
+	{ "setdisp", "eyeball" },
+	{ "setloot", "open-treasure-chest" },
+	{ "setmisc", "checklist" },
+	{ "objectives", "target-arrows" },
+	{ "rename", "quill-ink" },
+	{ "edit", "pencil" },
+	{ "cancel", "cancel" },
+	{ "save", "check-mark" },
+	{ "clear", "broom" },
+	{ "reset", "anticlockwise-rotation" },
+	{ "lost", "pie-chart" },
+};
+// The objectives' tile icons, in their order (two cells).
+constexpr const char* ObjectiveIcons[] {
+	"flag-objective",
+	"trophy-cup",
+	"death-skull",
+	"horned-skull",
+	"dragon-head",
+	"crown",
+	"key",
+	"treasure-map",
+	"hourglass",
+	"castle",
+	"gold-stack",
+	"upgrade",
+	"spell-book",
+	"anvil",
+	"star-medal",
+	"swords-emblem",
+};
 
 using Gui::Languages; // the game's 13, in its string tables' order
 // The panel is Expanded Stash Plus's stash made two cells taller
@@ -1692,7 +1778,7 @@ std::vector<Objective> Objectives;
 int                    NextObjective = 1, ObjCategory = -1;
 // Their icons (game-icons.net), registered as "objicon<n>" at two cells.
 // The objectives' own icons, then every other icon of the plugin's (menus, categories, classes).
-constexpr int ObjOwnIcons = static_cast<int>(std::size(ObjIconMasks)), ObjectiveIconCount = ObjOwnIcons + static_cast<int>(std::size(IconMasks)), ObjTileIcon = Cell * 60 / 100;
+constexpr int ObjOwnIcons = static_cast<int>(std::size(ObjectiveIcons)), ObjectiveIconCount = ObjOwnIcons + static_cast<int>(std::size(GrailIcons)), ObjTileIcon = Cell * 60 / 100;
 // The icon picker: icons in rows of PickColumns, on a box of PickWidth x PickHeight.
 constexpr int PickCell = 96, PickGap = 10, PickColumns = 10, PickIcon = 76, PickRows = (ObjectiveIconCount + PickColumns - 1) / PickColumns;
 constexpr int PickWidth = PickColumns * PickCell + (PickColumns - 1) * PickGap + 80, PickHeight = PickRows * PickCell + (PickRows - 1) * PickGap + 150;
@@ -2048,7 +2134,7 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 				for (std::uint32_t t = 0; t < types.count && added.icon == "other"; ++t) {
 					const unsigned char* row = types.rows + static_cast<std::size_t>(t) * TypeRowSize;
 					if (row[TypeRow::RunewordCategory1] != c && row[TypeRow::RunewordCategory2] != c) continue;
-					for (const auto& icon : IconMasks)
+					for (const auto& icon : GrailIcons)
 						if (typeCodes[t] == icon.name) added.icon = icon.name;
 				}
 				ruleOf[c] = static_cast<int>(RunewordRules.size());
@@ -4877,10 +4963,8 @@ using Gui::RegisterSprite;
 // The inventory button's grail (frames: 0 normal, 1 pressed, 2 disabled, 3 hovered), in the mold.
 constexpr int ButtonX = 3, ButtonY = 954, GrailButtonWidth = 52, GrailButtonHeight = 60, GrailIconSize = 42;
 bool RegisterGrailButton() {
-	const unsigned char* mask = nullptr;
-	for (const auto& icon : IconMasks)
-		if (!std::strcmp(icon.name, "grail")) mask = icon.alpha;
-	return mask && RegisterSprite("grailbutton", Gui::MaskButton(mask, IconSize, GrailButtonWidth, GrailButtonHeight, GrailIconSize));
+	const auto mask = Gui::Icons::Mask("holy-grail", IconSize);
+	return !mask.empty() && RegisterSprite("grailbutton", Gui::MaskButton(mask.data(), IconSize, GrailButtonWidth, GrailButtonHeight, GrailIconSize));
 }
 
 // The sprite of a ring chart, made once for its numbers.
@@ -11738,25 +11822,23 @@ void Register() {
 	// button. The slots wait for the lists, which say which sizes are needed.
 	if (!RegisterPanelArt()) Say(true, "grail-on: could not unpack the stash frame");
 	// The menu and category icons (game-icons.net), in the game's gold text colour.
-	for (const auto& mask : IconMasks) {
-		Picture icon { IconSize, IconSize, std::vector<unsigned char>(static_cast<std::size_t>(IconSize) * IconSize * 4) };
-		for (int p = 0; p < IconSize * IconSize; ++p) {
-			const bool lost = std::string_view(mask.name) == "lost"; // the Lost items menu: red
-			icon.rgba[p * 4] = lost ? 200 : 215, icon.rgba[p * 4 + 1] = lost ? 30 : 200, icon.rgba[p * 4 + 2] = lost ? 30 : 150;
-			icon.rgba[p * 4 + 3] = mask.alpha[p];
-		}
-		if (!RegisterSprite(std::string("icon-") + mask.name, { icon })) Say(true, "grail-on: could not register icon %s", mask.name);
+	for (const auto& entry : GrailIcons) {
+		const bool    lost = std::string_view(entry.name) == "lost"; // the Lost items menu: red
+		const Picture icon = Gui::Icons::Picture(entry.site, IconSize, lost ? Gui::Rgb { 200, 30, 30 } : Gui::Rgb { 215, 200, 150 });
+		if (icon.rgba.empty() || !RegisterSprite(std::string("icon-") + entry.name, { icon })) Say(true, "grail-on: could not register icon %s", entry.name);
 	}
 	// The objectives' icons: at two cells (the settings), the picker's (gold,
 	// then bright), and a tile of one cell.
 	for (int k = 0; k < ObjectiveIconCount; ++k) {
 		const bool own  = k < ObjOwnIcons;
 		const int  size = own ? ObjIconSize : IconSize;
+		const auto mask = Gui::Icons::Mask(own ? ObjectiveIcons[k] : GrailIcons[k - ObjOwnIcons].site, size);
+		if (mask.empty()) continue;
 		const auto tint = [&](int r, int g, int b) {
 			Picture icon { size, size, std::vector<unsigned char>(static_cast<std::size_t>(size) * size * 4) };
 			for (int p = 0; p < size * size; ++p) {
 				icon.rgba[p * 4] = static_cast<unsigned char>(r), icon.rgba[p * 4 + 1] = static_cast<unsigned char>(g), icon.rgba[p * 4 + 2] = static_cast<unsigned char>(b);
-				icon.rgba[p * 4 + 3] = own ? ObjIconMasks[k][p] : IconMasks[k - ObjOwnIcons].alpha[p];
+				icon.rgba[p * 4 + 3] = mask[static_cast<std::size_t>(p)];
 			}
 			return icon;
 		};

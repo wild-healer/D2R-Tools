@@ -10,7 +10,7 @@ if [ ! -d "$sdk" ]; then
 fi
 out=$here/build
 mkdir -p "$out"
-x86_64-w64-mingw32-windres -I"$sdk/include" -I"$here" -I"$here/src" "$here/src/plugin.rc" -O coff -o "$out/plugin.res"
+x86_64-w64-mingw32-windres -I"$sdk/include" -I"$here" -I"$here/src" -I"$here/../../lib/d2r-gui" "$here/src/plugin.rc" -O coff -o "$out/plugin.res"
 ${CXX:-x86_64-w64-mingw32-g++} -std=c++20 -O2 -Wall -shared -static -s \
   -I"$sdk/include" -I"$here/../../lib/d2r-gui/include" "$here/src/plugin.cpp" "$out/plugin.res" -lversion -lshell32 -lole32 -luuid -Wa,-I"$here/src" \
   -o "$out/d2rl-grail-on.dll"

@@ -27,4 +27,4 @@ BEGIN
 END
 
 // Icon attribution (CC BY 3.0), kept inside the DLL so the package is the DLL alone.
-103 RCDATA "art/ICONS-CREDITS.txt"
+103 RCDATA "ICONS-CREDITS.txt"
