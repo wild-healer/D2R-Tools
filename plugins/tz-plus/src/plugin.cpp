@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.90";
+constexpr const char* PluginVersion = "0.0.91";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1718,6 +1718,7 @@ void ShowRewards(int level) noexcept;
 void UseRoranLook() noexcept;
 bool RoranMenuRow() noexcept;
 extern bool MenuHooked;
+std::atomic<void*> RoranServer { nullptr }; // his server unit (this game)
 std::atomic<bool> ZonePortalOpen { false }; // this game has an open TZ Plus zone portal (the barbarian offers to close it)
 
 void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
@@ -1726,6 +1727,7 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 	switch (event->kind) {
 	case EventKind::GameJoined: InGame = true, CurrentLevel = -1, UseRoranLook(), (MenuHooked && RoranMenuRow()); break;
 	case EventKind::GameLeft: {
+		RoranServer = nullptr;
 		InGame = false, CurrentLevel = -1, ZonePortalOpen = false;
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
 		for (GameMods* g : Games)
@@ -2529,7 +2531,32 @@ void* __cdecl HookNpcRecord(std::uint8_t, int monster) noexcept {
 	return nullptr;
 }
 
+// Diagnostics: the server's talk target check D2R+0x53B8F0(player, unit id, range) (called at D2R+0x4C24C1 by the NPC talk
+// handler D2R+0x4C2410): its answer, and for Roran each of its checks.
+using FindTalkFn = void* (*)(void* player, std::uint32_t id, int range) noexcept;
+constexpr std::uint64_t FindTalkRva = 0x53B8F0, FindTalkCall = 0x4C24C1;
+std::atomic<int>        TalkCheckLogs { 0 };
+
+void* HookFindTalk(void* player, std::uint32_t id, int range) noexcept {
+	void* unit = At<FindTalkFn>(FindTalkRva)(player, id, range);
+	if (TalkCheckLogs.fetch_add(1) >= 60) return unit;
+	Log(false, "talk: the server checks unit %u (range %d): %s", id, range, unit ? "OK, the talk starts" : "refused");
+	void* roran = RoranServer.load();
+	if (!unit && roran && Field<std::uint32_t>(roran, 8) == id) {
+		const int dist   = At<int (*)(void*, void*) noexcept>(0x325140)(roran, player);
+		const int sight  = At<int (*)(void*, void*, int) noexcept>(0x350550)(player, roran, 0x804);
+		const int dead   = At<int (*)(void*) noexcept>(0x3AF150)(roran);
+		const int state  = At<int (*)(void*, int) noexcept>(0x3351B0)(roran, 0x36);
+		const int flag   = At<int (*)(void*) noexcept>(0x3500E0)(roran);
+		const int mode   = At<int (*)(void*) noexcept>(0x34AB60)(roran);
+		Log(false, "talk: Roran: distance %d (max %d), 0x350550 %d (0 wanted), dead %d, state 54 %d, unit flag +0x124 bit 1 %d (1 wanted), flags 0x%X, mode %d",
+		    dist, range, sight, dead, state, flag, Field<std::uint32_t>(roran, 0x124), mode);
+	}
+	return unit;
+}
+
 bool PatchNpcRecord() noexcept {
+	if (!PatchCall(FindTalkCall, FindTalkRva, reinterpret_cast<const void*>(&HookFindTalk))) Log(true, "talk diagnostics off (D2R+0x%llX)", static_cast<unsigned long long>(FindTalkCall));
 	static const std::uint8_t expected[14] { 0x45, 0x33, 0xC0, 0x4C, 0x8D, 0x15, 0xB6, 0x78, 0xFE, 0x01, 0x41, 0x8B, 0xC8, 0x4D };
 	std::uint8_t              jump[14] { 0xFF, 0x25, 0, 0, 0, 0 };
 	const auto                target = reinterpret_cast<std::uint64_t>(&HookNpcRecord);
@@ -4187,6 +4214,7 @@ void SpawnRoran(std::uint8_t* game) noexcept {
 		if (!roran) roran = At<SpawnFn>(0x492CF0)(game, spot, RoranX, RoranY, RoranClass, 1, 4, 0x42);
 		if (roran) {
 			g->roranDone = true;
+			RoranServer  = roran;
 			Coord at {};
 			At<GetCoordsFn>(0x34A040)(roran, &at);
 			Log(false, "Roran Stronghammer: unit %u in Harrogath at %d,%d (asked %d,%d)", Field<std::uint32_t>(roran, 8), at.x, at.y, RoranX, RoranY);
