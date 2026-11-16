@@ -19,7 +19,7 @@ namespace Gui = D2RGui;
 namespace App = D2RGui::App;
 
 constexpr const char* PluginId      = "d2r-gui-demo";
-constexpr const char* PluginVersion = "0.0.3";
+constexpr const char* PluginVersion = "0.0.4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,

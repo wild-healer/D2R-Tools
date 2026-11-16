@@ -169,6 +169,19 @@ inline std::string Row(int width, int height) {
 	});
 }
 
+// A read-only table or list line: a flat warm stripe (`shaded`) or clear, with a faint line at its foot.
+inline std::string Stripe(int width, int height, bool shaded = true) {
+	return Detail::Once(std::string(shaded ? "stripe" : "stripeclear") + std::to_string(width) + "x" + std::to_string(height), [&] {
+		Picture out = shaded ? Fill(width, height, 0xC8, 0xB4, 0x8C, 0x16) : Blank(width, height);
+		for (int x = 0; x < width; ++x) {
+			const int fade = std::min({ x, width - 1 - x, 60 }) * 0x30 / 60; // fades out at both ends
+			unsigned char* px = out.at(x, height - 1);
+			px[0] = 0xC8, px[1] = 0xB4, px[2] = 0x8C, px[3] = static_cast<unsigned char>(fade);
+		}
+		return std::vector<Picture> { out };
+	});
+}
+
 // The loot filter list's up or down arrow, cut to its art, `size` square (0 normal, 1 hovered, 2 pressed).
 inline std::string Arrow(bool up, int size = 56) {
 	return Detail::Once(std::string(up ? "uparrow" : "downarrow") + std::to_string(size), [&] {
