@@ -72,6 +72,7 @@ the UI thread.
 | Scroll bars | A recessed track with a bronze thumb sized to the share shown. Click a step to jump, drag the thumb, or use the mouse wheel over the window. |
 | Clip views | Content taller than its room, cut to the room. |
 | Section titles, dividers, table rows | For settings pages and long lists. |
+| Icon tabs | A row or column of square tabs with an icon each, as Grail On!'s menus: lighter on hover, gold-rimmed when current. |
 | Inventory button | A button on the inventory's left edge in the stone and gold mold that Charm Inventory uses. You can move it while the game runs. You can also hide it and show it again live. |
 
 ## Items
@@ -82,6 +83,7 @@ the UI thread.
 | **Half-cell tiles** | A 1-wide item sits centred in a 2-wide slot, for both drawing and the mouse. |
 | **Tooltips past the grid** | An item can show its tooltip on a picture tile outside the grid's own cells. |
 | **No "cannot wear" colour** | Items in your grid aren't coloured red, neither by the game nor by Item Quality Backgrounds. |
+| **Item cells** | Single cells that each take one item code only, such as an offering of one of each rune. The items stay on the player page, through Player Page Host or the plugin's own page, and can be taken back. The plugin hears when a cell fills or empties. |
 | **Item pictures** | Item art recoloured like the game does it, greyed out for items not found yet, with sockets, runes and Item Quality Backgrounds' quality colours. |
 
 ## Art
