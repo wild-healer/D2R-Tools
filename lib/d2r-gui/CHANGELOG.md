@@ -41,3 +41,6 @@
 * A stash look for settings (FormLook): ticks, drop boxes, arrows, input boxes and tables of the stash kit, in a centred column with rows of a set step.
 * List rows in the stash look: small ticks and group arrows for trees, icon buttons, a red Delete before a confirmed remove, grey names and counts.
 * Pushed pages can show in place (Page.inPlace): no back arrow or title, the menus kept.
+* App::Search: a search bar anywhere on the panel, with its result line, previous, next and clear.
+* App::Heading and App::Space; charts take a look (text colours and sizes, hole, a tooltip over each slice); squares take item art and a see-through look.
+* Fields can act on Enter (Item.OnEnter).

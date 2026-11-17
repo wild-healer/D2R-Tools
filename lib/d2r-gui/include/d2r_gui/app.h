@@ -244,14 +244,38 @@ struct Slice {
 };
 
 // A square tile button with a ring chart around its icon (a stats page's categories).
+// How a Chart is drawn (Item.Looks).
+struct ChartLook {
+	std::string bigColor;       // the text in the ring: a profile colour or App::RgbText (default the title style)
+	int         bigSize = 0;    // its font size (0: the title style)
+	int         smallSize = 0;  // the line under it, gray (0: the note style)
+	int         hole = 58;      // the ring's inner edge, % of its outer
+	bool        sliceTips = false; // each slice's name, count and share over the slice itself (else one tooltip for the ring)
+	Rgb         empty { 50, 50, 50 };
+};
+
+// A Search bar: anywhere on the panel (outside the frame too), its result line under it while something is typed.
+struct SearchSpec {
+	int                         x = 0, y = 0, width = 480; // panel units
+	int                         height = 56, gap = 8;      // the bar's and the result line's height, between them
+	std::string                 hint = "Search", tooltip;
+	std::function<std::string()> count;    // the result line's text ("3 / 12", "No match")
+	std::function<bool()>       matched;   // false: the count is gray
+	std::function<bool()>       many;      // previous and next shown
+	std::function<void()>       next, previous, clear; // Enter also sends next
+};
+
 struct Square {
 	std::string           icon, tooltip, command; // command: to window.command (else click)
+	std::string           art;                    // instead of icon: an item art path (raw), artWidth x artHeight cells of artUnit, scaled to 70
+	int                   artWidth = 1, artHeight = 1, artUnit = 98;
+	bool                  seeThrough = false;     // the icon or art see-through (ethereal items' look)
 	std::vector<Slice>    ring;
 	std::function<void()> click;
 };
 
 struct Item {
-	enum class Kind { Section, Text, Check, Choice, Number, Position, Table, Field, Value, Action, Adder, List, Cells, HostGrid, ItemGrid, Tiles, Chart, Squares, Legend, Buttons, Grid, Bullet, CardStart, CardEnd, Custom };
+	enum class Kind { Section, Text, Check, Choice, Number, Position, Table, Field, Value, Action, Adder, List, Cells, HostGrid, ItemGrid, Tiles, Chart, Squares, Legend, Buttons, Grid, Bullet, CardStart, CardEnd, Search, Custom };
 	Kind        kind = Kind::Text;
 	std::string label, tooltip, note, button, hint, value;
 	bool        restart = false, confirm = false, arrow = false, draft = false, clearable = false, filter = false, warn = false, above = false;
@@ -290,6 +314,9 @@ struct Item {
 	int                                      cellSize = 98; // Tiles: a cell's size
 	TileLook                                 tileLook;      // Tiles, ItemGrid
 	int                                      boxWidth = 0;  // Choice in the stash look: its drop box (0: FormLook.dropWidth)
+	ChartLook                                chartLook;     // Chart
+	std::shared_ptr<const SearchSpec>        search;        // Search
+	std::function<void()>                    enter;         // Field: Enter while typing
 	bool                                     first = false; // set by the library: the page's first component
 	std::vector<Slice>                       slices;     // Chart
 	int                                      size = 0;   // Chart: the ring's size; Squares: a square's
@@ -303,6 +330,8 @@ struct Item {
 	Item Tip(std::string tip) const { auto c = *this; c.tooltip = std::move(tip); return c; }
 	Item Looks(TileLook look) const { auto c = *this; c.tileLook = look; return c; } // Tiles, ItemGrid: how tiles are drawn
 	Item BoxWidth(int w) const { auto c = *this; c.boxWidth = w; return c; }         // Choice: its drop box's width (stash look)
+	Item Looks(ChartLook look) const { auto c = *this; c.chartLook = std::move(look); return c; } // Chart: its texts and slices
+	Item OnEnter(std::function<void()> fn) const { auto c = *this; c.enter = std::move(fn); return c; } // Field: Enter while typing
 	Item Note(std::string n) const { auto c = *this; c.note = std::move(n); return c; }
 	Item Restart(bool on = true) const { auto c = *this; c.restart = on; return c; }
 	Item OnChange(std::function<void()> fn) const { auto c = *this; c.changed = std::move(fn); return c; }
@@ -427,6 +456,24 @@ inline Item Chart(std::vector<Slice> parts, int size, std::string big = {}, std:
 // Square buttons with ring charts, in centred rows.
 inline Item Squares(std::vector<Square> squares, int size = 170) { return { .kind = Item::Kind::Squares, .size = size, .squares = std::move(squares) }; }
 inline Item Custom(int height, std::function<std::string(const Place&)> draw) { return { .kind = Item::Kind::Custom, .custom = std::move(draw), .height = height }; }
+// Room: `height` units with nothing in them.
+inline Item Space(int height) { return Custom(height, {}); }
+// A line of text in one size and colour, centred (a page's big title, say).
+inline Item Heading(std::string text, int size = 44, int height = 60, std::string color = "$FontColorGoldYellow") {
+	return Custom(height, [text = std::move(text), size, color = std::move(color)](const Place& p) {
+		return TextBox(p.name, p.x, p.y, p.width, p.height, text, { .color = color, .size = size, .h = "center" });
+	});
+}
+// A colour for a text from red, green and blue (Heading, ChartLook.bigColor, Tile.labelColor).
+inline std::string RgbText(Rgb color) {
+	return "{\"r\": " + std::to_string(color.r) + ", \"g\": " + std::to_string(color.g) + ", \"b\": " + std::to_string(color.b) + ", \"a\": 255}";
+}
+// A search bar bound to `text` (typing it, Enter: next), placed by `spec`; it takes no room in the page.
+inline Item Search(std::string* text, SearchSpec spec) {
+	Item item { .kind = Item::Kind::Search, .text = Bind<std::string>(text) };
+	item.search = std::make_shared<const SearchSpec>(std::move(spec));
+	return item;
+}
 
 // ---- structure ----
 
@@ -1001,6 +1048,7 @@ inline int HeightOf(const Item& item, int width) {
 		return count ? ((count + per - 1) / per) * (item.size + 36) : 0;
 	}
 	case Item::Kind::Custom: return item.height;
+	case Item::Kind::Search: return 0; // at its own place
 	default: return RowHeight + NoteHeight(item, width);
 	}
 }
@@ -1074,6 +1122,47 @@ inline std::string Label(const std::string& name, const Item& item, int x, int y
 inline std::string NoteText(const std::string& name, const Item& item, int x, int y, int width) {
 	if (item.note.empty()) return {};
 	return D2RGui::Text(name, x, y, width, NoteHeight(item, width), item.note, Style::Comment);
+}
+
+// Invisible buttons over a ring's slices, for their tooltips (name: count (share)):
+// along rows of small squares, one button per run whose centre is in one slice.
+inline std::string SliceTips(const std::string& name, int x, int y, int size, int hole, const std::vector<Slice>& slices) {
+	int total = 0;
+	for (const auto& slice : slices) total += slice.count;
+	if (!total) return {};
+	std::vector<double> ends;
+	double              sum = 0;
+	for (const auto& slice : slices) ends.push_back((sum += slice.count) / total);
+	const double pi = 3.14159265358979, centre = size / 2.0, outer = size / 2.0 - 1, inner = outer * hole / 100.0;
+	const int    step = std::max(12, size / 32), parts = static_cast<int>(slices.size());
+	std::string  out;
+	int          k = 0;
+	for (int top = 0; top < size; top += step) {
+		int        start = 0, run = -1;
+		const auto flush = [&](int end) {
+			if (run >= 0 && !slices[static_cast<std::size_t>(run)].name.empty()) {
+				const auto& slice = slices[static_cast<std::size_t>(run)];
+				out += QuietButton(name + "Hit" + std::to_string(k++), x + start, y + top, end - start, std::min(step, size - top), {},
+				                   slice.name + ": " + std::to_string(slice.count) + " (" + std::to_string(slice.count * 100 / total) + "%)");
+			}
+			run = -1;
+		};
+		for (int left = 0; left < size; left += step) {
+			const double dx = left + step / 2.0 - centre, dy = top + step / 2.0 - centre, r = std::sqrt(dx * dx + dy * dy);
+			int          part = -1;
+			if (r <= outer && r >= inner) {
+				double turn = std::atan2(dx, -dy) / (2 * pi); // 0 at the top, clockwise
+				if (turn < 0) turn += 1;
+				part = 0;
+				while (part + 1 < parts && turn >= ends[static_cast<std::size_t>(part)]) ++part;
+			}
+			if (part == run) continue;
+			flush(left);
+			if (part >= 0) start = left, run = part;
+		}
+		flush(size);
+	}
+	return out;
 }
 
 // The stash look's settings (FormLook.stash); empty for the kinds it leaves to Draw.
@@ -1618,11 +1707,20 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 			parts.push_back({ slice.count, slice.color });
 			if (!slice.name.empty()) tip += (tip.empty() ? "" : "\n") + slice.name + ": " + std::to_string(slice.count);
 		}
-		const int x = a.left + (width - item.size) / 2;
-		out += Image(n, x, y, StashKit::Chart(parts, item.size, 58, false, Rgb { 50, 50, 50 }));
-		if (!item.big.empty()) out += D2RGui::Text(n + "B", x, y + item.size / 2 - 52, item.size, 60, item.big, Style::Name);
-		if (!item.small.empty()) out += D2RGui::Text(n + "S", x, y + item.size / 2 + 8, item.size, 44, item.small, Style::Note);
-		if (!tip.empty()) out += D2RGui::Text(n + "T", x, y, item.size, item.size, "", Style::Note, tip);
+		const auto& look = item.chartLook;
+		const int   x    = a.left + (width - item.size) / 2;
+		out += Image(n, x, y, StashKit::Chart(parts, item.size, look.hole, false, look.empty));
+		if (!item.big.empty()) {
+			if (look.bigSize || !look.bigColor.empty())
+				out += TextBox(n + "B", x, y + item.size / 2 - 52, item.size, 60, item.big, { .color = look.bigColor.empty() ? "$FontColorGoldYellow" : look.bigColor, .size = look.bigSize ? look.bigSize : 42, .h = "center" });
+			else out += D2RGui::Text(n + "B", x, y + item.size / 2 - 52, item.size, 60, item.big, Style::Name);
+		}
+		if (!item.small.empty()) {
+			if (look.smallSize) out += TextBox(n + "S", x, y + item.size / 2 + 8, item.size, 44, item.small, { .color = "$FontColorGray", .size = look.smallSize, .h = "center" });
+			else out += D2RGui::Text(n + "S", x, y + item.size / 2 + 8, item.size, 44, item.small, Style::Note);
+		}
+		if (look.sliceTips) out += SliceTips(n, x, y, item.size, look.hole, item.slices);
+		else if (!tip.empty()) out += D2RGui::Text(n + "T", x, y, item.size, item.size, "", Style::Note, tip);
 		break;
 	}
 	case Item::Kind::Squares: {
@@ -1638,13 +1736,44 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 				for (const auto& slice : square.ring) parts.push_back({ slice.count, slice.color });
 				out += Image(qn + "R", sx + 9, sy + 9, StashKit::Chart(parts, size - 18, 62, true, Rgb { 50, 50, 50 }));
 			}
-			if (!square.icon.empty()) out += Image(qn + "I", sx + (size - 70) / 2, sy + (size - 70) / 2, square.icon);
+			const std::string see = square.seeThrough ? R"(, "transparency": 0.55)" : "";
+			if (!square.art.empty()) {
+				const int    w = std::max(1, square.artWidth), h = std::max(1, square.artHeight), unit = std::max(1, square.artUnit);
+				const double scale = 70.0 / (std::max(w, h) * unit);
+				out += ScaledImage(qn + "I", sx + (size - 70) / 2 + static_cast<int>((70 - w * unit * scale) / 2), sy + (size - 70) / 2 + static_cast<int>((70 - h * unit * scale) / 2), scale, Path(square.art), see);
+			} else if (!square.icon.empty()) out += Image(qn + "I", sx + (size - 70) / 2, sy + (size - 70) / 2, square.icon, see);
 		}
 		break;
 	}
 	case Item::Kind::Custom:
 		if (item.custom) out += item.custom({ .name = n, .x = a.left, .y = y, .width = width, .height = item.height });
 		break;
+	case Item::Kind::Search: {
+		if (!item.search) break;
+		const auto&       sp     = *item.search;
+		const std::string key    = "a.f" + id;
+		const bool        typing = TextInput::Key() == key;
+		const std::string typed  = item.text.Get();
+		const bool        empty  = typed.empty() && !typing;
+		const int         h = sp.height, x = sp.x, sy = sp.y;
+		out += Image(n + "Back", x, sy, StashKit::InputBox(sp.width, h));
+		out += TextBox(n, x + 24, sy, sp.width - 48, h, empty ? sp.hint : Fit(typed, sp.width - 48, typing) + (typing ? "|" : ""), { .color = empty ? "$FontColorGray" : "$FontColorWhite" });
+		out += HitButton(n + "Hit", x, sy, sp.width, h, "type" + key, sp.tooltip);
+		if (typed.empty()) break;
+		const int line = sy + h + sp.gap;
+		out += Image(n + "LineBack", x, line, StashKit::InputBox(sp.width, h));
+		int at = x + sp.width - 12 - h;
+		out += SpriteButton(n + "Clear", at, line, h, h, StashKit::Remove(h), { .normal = 0, .pressed = 1, .hovered = 3 }, "a.s" + id + "x", "Clear the search");
+		if (sp.many && sp.many()) {
+			at -= h + 10;
+			out += SpriteButton(n + "Next", at, line, h, h, StashKit::Arrow(false, h), { .normal = 0, .pressed = 2, .hovered = 1 }, "a.s" + id + "n", "Next");
+			at -= h + 10;
+			out += SpriteButton(n + "Prev", at, line, h, h, StashKit::Arrow(true, h), { .normal = 0, .pressed = 2, .hovered = 1 }, "a.s" + id + "p", "Previous");
+		}
+		const bool matched = !sp.matched || sp.matched();
+		out += TextBox(n + "Count", x + 24, line, at - x - 34, h, sp.count ? sp.count() : std::string(), { .color = matched ? "$FontColorWhite" : "$FontColorGray" });
+		break;
+	}
 	}
 	return out;
 }
@@ -2078,7 +2207,11 @@ inline void Type(const std::string& key, const Item& item) {
 	} else {
 		TextInput::Start(key, s.original, {
 		    .changed = [text, item](const std::string& typed) { Took(item, text.Set(typed)), Show(); },
-		    .enter   = [](const std::string&) { Show(); },
+		    .enter   = [item](const std::string&) {
+			    if (item.enter) item.enter();
+			    else if (item.search && item.search->next) item.search->next();
+			    Show();
+		    },
 		    .escape  = [text, item] { Took(item, text.Set(Get().original)), Show(); },
 		});
 	}
@@ -2248,6 +2381,16 @@ inline void OnCommand(const std::string& command) {
 			if (const auto& click = rows[static_cast<std::size_t>(r)].tiles[static_cast<std::size_t>(t)].click) click();
 		break;
 	}
+	case 's': // a search bar's buttons
+		if (!item.search) break;
+		if (rest == "n" && item.search->next) item.search->next();
+		else if (rest == "p" && item.search->previous) item.search->previous();
+		else if (rest == "x") {
+			Took(item, item.text.Set({}));
+			if (TextInput::Key() == "a.f" + std::to_string(i)) TextInput::Stop();
+			if (item.search->clear) item.search->clear();
+		}
+		break;
 	case 'g': // off the tiles of an item grid
 		if (item.itemGrid && item.itemGrid->drop) item.itemGrid->drop();
 		break;
