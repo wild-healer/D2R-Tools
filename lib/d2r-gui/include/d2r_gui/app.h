@@ -585,6 +585,9 @@ struct Window {
 	std::string                       restartNote = "* applies after a restart";
 	int                               views       = 16; // panels in the pool
 	int                               priority    = 10;
+	int                               wheelStep   = 120;   // what a wheel notch scrolls
+	bool                              smoothScroll = false; // a notch scrolls over scrollFrames views, frameMs apart (App::SetSmoothScroll)
+	int                               scrollFrames = 4, frameMs = 30;
 	double                            wheelRight  = 0.45; // the wheel scrolls the window left of this share of the game window's width
 	bool                              mouseAlways = false; // `mouse` (and the hook) from the first game on, not from the first open
 	bool                              overStash   = false; // opened while the stash is open: over it (priority 130), the stash left open, closing with it as the cube does
@@ -679,6 +682,8 @@ struct State {
 	std::string                original; // a field's text when typing began
 	std::string                hostGrid; // the last layout sent to an ItemGrid's host
 	FormLook                   form;     // the view's settings look (Build)
+	int                        scrollTarget = 0;  // smooth scrolling: where it goes
+	std::atomic<bool>          animating {};
 	int                        outerLeft = 0, outerRight = 0; // the area before FormLook.width narrowed it
 };
 
@@ -2113,6 +2118,7 @@ inline void Close() {
 	if (was && s.window.opened) s.window.opened(false);
 }
 
+inline void AnimateScroll();
 inline void Wheel(int notches) {
 	auto& s = Get();
 	if (!s.open) return;
@@ -2124,8 +2130,31 @@ inline void Wheel(int notches) {
 		}
 		return;
 	}
-	Scroll() = std::clamp(Scroll() + notches * WheelStep, 0, std::max(0, s.bar->Max()));
+	const int step   = s.window.wheelStep > 0 ? s.window.wheelStep : WheelStep;
+	const int target = std::clamp((s.animating ? s.scrollTarget : Scroll()) + notches * step, 0, std::max(0, s.bar->Max()));
+	if (!s.window.smoothScroll || s.window.scrollFrames <= 1) {
+		Scroll() = target;
+		return Show();
+	}
+	s.scrollTarget = target;
+	if (s.animating.exchange(true)) return;
+	AnimateScroll();
+}
+
+// Smooth scrolling: one frame towards the target, the next one frameMs later.
+inline void AnimateScroll() {
+	auto& s = Get();
+	if (!s.open) return void(s.animating = false);
+	const int step = std::max(1, (s.window.wheelStep > 0 ? s.window.wheelStep : WheelStep) / std::max(1, s.window.scrollFrames));
+	const int left = s.scrollTarget - Scroll();
+	if (left == 0) return void(s.animating = false);
+	Scroll() += std::clamp(left, -step, step);
 	Show();
+	const int ms = std::max(1, s.window.frameMs);
+	std::thread([ms] {
+		Sleep(static_cast<DWORD>(ms));
+		if (!RunOnUi(AnimateScroll)) Get().animating = false;
+	}).detach();
 }
 
 // A tile's callback (UI thread), found again from its indices.
@@ -2681,5 +2710,17 @@ inline InventoryButton& Button() { return Detail::Get().button; }
 // UI thread: the mouse wheel's notches as the window takes them (for a
 // plugin running its own WindowHook).
 inline void Wheel(int notches) { Detail::Wheel(notches); }
+
+// UI thread: the menus' and pages' bars change (columns swapped, a compact layout).
+inline void SetMenuLook(std::optional<Menus::Look> look) {
+	Detail::Get().window.menuLook = std::move(look);
+	Refresh();
+}
+
+// UI thread: smooth wheel scrolling on or off (frames per notch, ms between them).
+inline void SetSmoothScroll(bool on, int frames = 4, int frameMs = 30) {
+	auto& w        = Detail::Get().window;
+	w.smoothScroll = on, w.scrollFrames = frames, w.frameMs = frameMs;
+}
 
 } // namespace D2RGui::App

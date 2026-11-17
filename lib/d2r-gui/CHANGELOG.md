@@ -45,3 +45,4 @@
 * App::Heading and App::Space; charts take a look (text colours and sizes, hole, a tooltip over each slice); squares take item art and a see-through look.
 * Fields can act on Enter (Item.OnEnter).
 * In the stash look, texts and fields can carry icon buttons at their row's end (Item.Side), and a Choice can be an add button opening its list (Item.AsAdder).
+* App::SetMenuLook changes the tab bars at runtime; smooth wheel scrolling (window.smoothScroll, App::SetSmoothScroll) and window.wheelStep.
