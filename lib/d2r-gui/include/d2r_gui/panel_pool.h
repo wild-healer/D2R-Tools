@@ -39,14 +39,19 @@ public:
 	// (<id>/<prefix>1 ..), `count` of them (at least 2; more make the
 	// fallback after a lost layout last longer; the loader allows 64 panels a
 	// plugin in all). Flags: CloseOnEscape for a window of its own.
-	bool Register(Builder builder, const std::string& localPrefix = "View", int count = 16, D2RL::Panels::PanelFlags flags = D2RL::Panels::PanelFlags::CloseOnEscape) {
+	// `page` and `gridChild`: every panel's item grid of that name shows that
+	// player page (the placeholder layout holds the grid).
+	bool Register(Builder builder, const std::string& localPrefix = "View", int count = 16, D2RL::Panels::PanelFlags flags = D2RL::Panels::PanelFlags::CloseOnEscape,
+	              D2RL::Inventory::PageRegistrationHandle page = D2RL::Inventory::InvalidHandle, const std::string& gridChild = {}) {
 		build_     = std::move(builder);
 		const auto& api = Api();
+		const bool  bind = page != D2RL::Inventory::InvalidHandle && !gridChild.empty();
 		if (!api.panels || !api.resources) return false;
 		for (int i = 1; i <= count; ++i) {
 			Slot slot { .id = localPrefix + std::to_string(i) };
 			// The game only finds a panel's layout if one was registered at load.
-			const std::string placeholder = R"({"type": "Panel", "name": )" + Json(api.pluginId + "/" + slot.id) + R"(, "fields": {"priority": 10}, "children": []})";
+			const std::string placeholder = R"({"type": "Panel", "name": )" + Json(api.pluginId + "/" + slot.id) + R"(, "fields": {"priority": 10}, "children": [)"
+			                              + (bind ? ItemGrid(gridChild, -20000, 0, 1, 1).substr(2) : std::string()) + "]}";
 			if (!RegisterResource(LayoutPath(slot.id), placeholder, &slot.layout) && i == 1) Log(true, "d2r-gui: first layout for %s refused", slot.id.c_str());
 			const D2RL::Panels::PanelRegistration registration {
 				.structSize = D2RL::Panels::PanelRegistrationSize,
@@ -57,6 +62,11 @@ public:
 			if (result != D2RL::Panels::Result::Success) {
 				if (slots_.size() < 2) Log(true, "d2r-gui: panel %s refused (result %u)", slot.id.c_str(), static_cast<unsigned>(result));
 				break;
+			}
+			if (bind && api.panels->bindPlayerPageGrid) {
+				const D2RL::Panels::PlayerPageGridBinding binding { .structSize = D2RL::Panels::PlayerPageGridBindingSize, .panel = slot.panel, .page = page, .childName = gridChild.c_str() };
+				if (const auto bound = api.panels->bindPlayerPageGrid(api.context, &binding); bound != D2RL::Panels::Result::Success)
+					Log(true, "d2r-gui: could not bind the grid of %s (result %u)", slot.id.c_str(), static_cast<unsigned>(bound));
 			}
 			slots_.push_back(std::move(slot));
 		}

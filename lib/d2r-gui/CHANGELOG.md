@@ -26,3 +26,15 @@
 * Table and list rows have flat stripes behind them instead of a button sprite.
 * Cards are a flat dark panel with a thin line around it instead of a bevelled box sprite.
 * Long tooltips wrap over several lines instead of running off the screen.
+* App windows can have a frame of the plugin's own art and size (Frame::Own), with the menus where the frame says.
+* App::ItemGrid puts the page's real item grid on a page, with pictures over it, or sends a Player Page Host area its place.
+* App windows can show the plugin's own player page in their item grid (window.page, window.pageGrid).
+* ItemGrid can stay at a fixed place while its tiles scroll, and sends a command for clicks off its tiles.
+* Tile labels can wrap over several lines, take a colour and a tooltip; tile row titles take a colour.
+* Tabs can show item art, look see-through, leave a gap before a group and pad their badge.
+* App::SetFrame moves or changes an own frame at runtime.
+* window.wheelRight sets how far across the screen the wheel scrolls the window.
+* Windows choose their tab bars' look (window.menuLook, Menu.pageLook); tabs can spread over a length with gaps between groups.
+* Own frames can have a stone cover over their picture and a scroll bar of their own place and size (window.barLook for its art).
+* Tiles take a look (Item.Looks / ItemGridSpec.look): label box, margin and font size, gaps, row title height, font, place and divider.
+* Table values are centred under their column titles (the first column stays left); GridColumn.align picks another side.

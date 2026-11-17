@@ -71,7 +71,7 @@ App::Window window {
   (`.Draft`: Enter saves, Esc cancels; `.Clearable`), `Value` (read-only),
   `Action` (`.Arrow`, `.Confirm`), `Adder`, `List` (rows with an icon, two
   lines, a value or a button, a gear; `.Empty`), `Cells` (the window's
-  `.cells`), `HostGrid` (a Player Page Host area's grid), `Tiles` (rows of item tiles
+  `.cells`), `HostGrid` (a Player Page Host area's grid), `ItemGrid` (the page's real item grid with pictures over it), `Tiles` (rows of item tiles
   with labels, left, right and middle clicks, hover, `App::Reveal`), `Chart`
   (a ring chart), `Squares` (square buttons with rings), `Custom`. List rows
   can form a tree (indent, open arrow, a check box partly ticked) and carry

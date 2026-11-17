@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,9 +32,10 @@ struct Page {
 };
 
 struct Menu {
-	Tabs::Tab         tab;
-	std::string       title; // the window's title while the menu is current
-	std::vector<Page> pages;
+	Tabs::Tab                 tab;
+	std::string               title; // the window's title while the menu is current
+	std::vector<Page>         pages;
+	std::optional<Tabs::Look> pageLook; // its pages' bar look (else Look.pages)
 };
 
 // Where the bars go, in the window (Grail On!: menus in a column left of the
@@ -117,7 +119,8 @@ public:
 			if (!pages.empty()) {
 				std::vector<Tabs::Tab> tabs;
 				for (const auto& page : pages) tabs.push_back(page.tab);
-				out += Tabs::Bar(prefix_ + "Page", look.pageX, look.pageY, tabs, page_, look.pages);
+				const auto& own = menus_[static_cast<std::size_t>(menu_)].pageLook;
+				out += Tabs::Bar(prefix_ + "Page", look.pageX, look.pageY, tabs, page_, own ? *own : look.pages);
 			}
 		}
 		if (look.title) out += Text(prefix_ + "Title", look.titleX, look.titleY, look.titleWidth, look.titleHeight, Title(), look.titleStyle);
