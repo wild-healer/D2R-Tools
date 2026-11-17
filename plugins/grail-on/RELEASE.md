@@ -1,3 +1,17 @@
+# Grail On! 1.2.3: patch notes
+
+```
+**Grail On! 1.2.3**
+
+**New**
+
+* The loot filter's Hide found option is now called Hide stored.
+
+**Fixed**
+
+* Unique and set items on another tier of their base (Exalted Items) stay on their tile and in the loot filter.
+```
+
 # Grail On! 1.2.2: patch notes
 
 ```
