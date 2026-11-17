@@ -317,6 +317,8 @@ struct Item {
 	ChartLook                                chartLook;     // Chart
 	std::shared_ptr<const SearchSpec>        search;        // Search
 	std::function<void()>                    enter;         // Field: Enter while typing
+	std::vector<RowButton>                   side;          // stash look: icon buttons at the row's right end (Text, Field; right to left)
+	bool                                     addLook = false; // stash look: a Choice drawn as an add button and its label, its list opening under it
 	bool                                     first = false; // set by the library: the page's first component
 	std::vector<Slice>                       slices;     // Chart
 	int                                      size = 0;   // Chart: the ring's size; Squares: a square's
@@ -332,6 +334,8 @@ struct Item {
 	Item BoxWidth(int w) const { auto c = *this; c.boxWidth = w; return c; }         // Choice: its drop box's width (stash look)
 	Item Looks(ChartLook look) const { auto c = *this; c.chartLook = std::move(look); return c; } // Chart: its texts and slices
 	Item OnEnter(std::function<void()> fn) const { auto c = *this; c.enter = std::move(fn); return c; } // Field: Enter while typing
+	Item Side(std::vector<RowButton> buttons) const { auto c = *this; c.side = std::move(buttons); return c; } // stash look: buttons at the row's end (Text, Field)
+	Item AsAdder() const { auto c = *this; c.addLook = true; return c; } // stash look: a Choice as an add button whose list picks what to add
 	Item Note(std::string n) const { auto c = *this; c.note = std::move(n); return c; }
 	Item Restart(bool on = true) const { auto c = *this; c.restart = on; return c; }
 	Item OnChange(std::function<void()> fn) const { auto c = *this; c.changed = std::move(fn); return c; }
@@ -1005,6 +1009,9 @@ inline int StashHeight(const Item& item, int width) {
 	case Item::Kind::Action:
 	case Item::Kind::Adder:
 	case Item::Kind::Value: return f.row + NoteHeight(item, width);
+	case Item::Kind::Text:
+		if (item.side.empty()) return -1;
+		return std::max(f.row, Lines(item.label, width - static_cast<int>(item.side.size()) * (f.box + 12)) * NoteLine() + 8);
 	case Item::Kind::List: {
 		int h = 0;
 		for (const auto& row : item.rows ? item.rows() : std::vector<Row> {}) h += row.height ? row.height : f.row;
@@ -1186,7 +1193,32 @@ inline std::string DrawStash(const Item& item, int i, int y, int origin, const A
 	};
 	const int   valueW = f.valueWidth, step = (box + 8);
 	std::string out;
+	// Item.side: icon (or sprite) buttons from the row's right end; returns where they start.
+	const auto sideButtons = [&](int right) {
+		for (int b = 0; b < static_cast<int>(item.side.size()); ++b) {
+			const auto& button = item.side[static_cast<std::size_t>(b)];
+			const auto  bn     = n + "Sd" + std::to_string(b);
+			const int   size   = button.width > 0 ? button.width : box;
+			if (!button.sprite.empty()) out += SpriteButton(bn, right - size, y, size, size, button.sprite, button.frames, button.command, button.tooltip);
+			else if (!button.icon.empty()) {
+				out += SpriteButton(bn, right - size, y, size, size, StashKit::SlotButton(size, size), { .normal = 0, .pressed = 2, .hovered = 1 }, button.command, button.tooltip);
+				out += Image(bn + "Im", right - size + size * 15 / 100, y + size * 15 / 100, button.icon);
+			} else {
+				const int bw = button.width > 0 ? button.width : 160;
+				out += SpriteButton(bn, right - bw, y, bw, box, StashKit::PlainButton(bw, box), { .normal = 0, .pressed = 1, .hovered = 3 }, button.command, button.tooltip, { .text = button.text, .color = "$FontColorLightGold", .size = f.font - 4 });
+				right -= bw - size;
+			}
+			right -= size + 12;
+		}
+		return right;
+	};
 	switch (item.kind) {
+	case Item::Kind::Text: {
+		if (item.side.empty()) return {};
+		const int right = sideButtons(end);
+		out += TextBox(n, a.left, y, right - a.left - 10, std::max(box, StashHeight(item, width) - 8), item.label, { .color = item.warn ? "$FontColorLightRed" : "$FontColorGray", .size = f.font - 4, .wrap = true });
+		return out;
+	}
 	case Item::Kind::Section: {
 		const int sw = f.sectionWidth ? f.sectionWidth : width;
 		const int sx = s.outerLeft + (s.outerRight - s.outerLeft - sw) / 2;
@@ -1206,6 +1238,12 @@ inline std::string DrawStash(const Item& item, int i, int y, int origin, const A
 		break;
 	}
 	case Item::Kind::Choice: {
+		if (item.addLook) { // an add button and its label; the list opens under the button
+			out += SpriteButton(n, a.left, y, box, box, StashKit::Add(box, box), { .normal = 0, .pressed = 2, .hovered = 1 }, "a.d" + id, tip.empty() ? "Add" : tip);
+			out += name(n + "L", a.left + box + 20, end - a.left - box - 20, LabelText(item), "a.d" + id);
+			if (s.drop == i) s.dropX = a.left, s.dropY = origin + y, s.dropW = item.boxWidth ? item.boxWidth : f.dropWidth;
+			break;
+		}
 		const int bw = item.boxWidth ? item.boxWidth : f.dropWidth;
 		out += name(n + "L", a.left, end - bw - a.left - 20, LabelText(item), {});
 		out += SpriteButton(n, end - bw, y, bw, box, StashKit::DropBox(bw, box), { .normal = 0, .pressed = 1, .hovered = 3 }, "a.d" + id, tip, { .text = Shown(item), .color = "$FontColorLightGold", .size = f.font });
@@ -1280,14 +1318,15 @@ inline std::string DrawStash(const Item& item, int i, int y, int origin, const A
 			out += name(n + "L", start, nameW, LabelText(item), {});
 			start += nameW + 20;
 		}
-		const int         right = item.clearable ? end - box - 12 : end;
-		const std::string text  = typing && item.draft ? s.draft : item.text.Get();
+		const int         sideEnd = sideButtons(end);
+		const int         right   = item.clearable ? sideEnd - box - 12 : sideEnd;
+		const std::string text    = typing && item.draft ? s.draft : item.text.Get();
 		const bool        empty = text.empty() && !typing;
 		out += Image(n + "Frame", start, y, StashKit::InputBox(right - start, box));
 		out += TextBox(n, start + 20, y, right - start - 40, box, empty ? (item.hint.empty() ? std::string() : item.hint) : Fit(text, right - start - 40, typing) + (typing ? "|" : ""),
 		               { .color = empty ? "$FontColorGray" : "$FontColorWhite", .size = f.font });
 		out += HitButton(n + "Hit", start, y, right - start, box, "type" + key, item.tooltip.empty() ? (item.draft ? "Click to type; Enter saves, Esc cancels" : "Click to type") : item.tooltip);
-		if (item.clearable && !text.empty()) out += SpriteButton(n + "C", end - box, y, box, box, StashKit::Remove(box), { .normal = 0, .pressed = 1, .hovered = 3 }, "a.e" + id, "Clear");
+		if (item.clearable && !text.empty()) out += SpriteButton(n + "C", sideEnd - box, y, box, box, StashKit::Remove(box), { .normal = 0, .pressed = 1, .hovered = 3 }, "a.e" + id, "Clear");
 		break;
 	}
 	case Item::Kind::Action: {
