@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.96";
+constexpr const char* PluginVersion = "0.0.97";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -543,6 +543,7 @@ constexpr int    ZoneSlots = 30; // ZoneParts levels a zone
 // A zone's levels: its outdoor area, its dungeon, the dungeon's down stairs stand-in (sends you back outdoors), and two small
 // outdoor areas joined to the outdoor one by the game's own passages: the entry (where the portal arrives) and the exit (chests).
 constexpr int    ZoneParts = 5, KindMain = 0, KindDungeon = 1, KindStandIn = 2, KindEntry = 3, KindExit = 4;
+constexpr int    MainArea  = 40; // tiles, the outdoor area's size (a quarter of an 80x80 wilderness level)
 constexpr int    SmallArea = 24; // tiles, the entry and exit areas' size (levels come in 8-tile cells; border pieces that don't fit are skipped, HookBorderPlace)
 thread_local int  BuildingKind = -1;   // the kind of zone level being built (outdoor build steps skipped for the small areas)
 thread_local bool OwnObject    = false; // our own objects (golden chests), let through the small areas' object block
@@ -2214,7 +2215,7 @@ std::vector<App::Item> RuleItems() {
 	// Roran
 	out.push_back(App::Card("Roran Stronghammer's zones"));
 	out.push_back(App::Bullet("At the fire in Harrogath, in Nightmare and Hell: " + Paint::Gold(std::to_string(ZoneSlots / ZoneParts) + " zones") + " a game.", IconOf("campfire", { 240, 150, 60 })));
-	out.push_back(App::Bullet("An outdoor area with " + Paint::Red("twice the monsters") + " and x1.5 elite packs, 8 monster types from every act.", IconOf("world")));
+	out.push_back(App::Bullet("A small outdoor area (a quarter of Cold Plains) with " + Paint::Red("4x the monsters") + " and x1.5 elite packs, 8 monster types from every act.", IconOf("world")));
 	out.push_back(App::Bullet("Its dungeon: x1.5 the density, x2 elite packs; its stairs lead back to Harrogath.", IconOf("castle")));
 	out.push_back(App::Bullet("The exit area holds " + Paint::Gold("3 golden chests") + ".", IconOf("open-treasure-chest", { 240, 200, 80 })));
 	out.push_back(App::Bullet("Offer runes (Offering tab) to ban a mod or a monster family from your zones.", IconOf("rune-stone")));
@@ -2718,7 +2719,7 @@ constexpr int            ZoneDensity = 3000; // fallback density (a template wit
 // game gives them more spawn tries for the same monsters per room) x DensityScale %, then scaled by the picks' group sizes.
 constexpr int            DensityScale = 125;
 constexpr int            DungeonDensity = 150; // a zone's dungeon vs its outdoor area
-constexpr int            OutdoorDensity = 200; // the outdoor area: twice the monsters
+constexpr int            OutdoorDensity = 400; // the outdoor area: 4x the monsters (0.0.97: 40x40 area, density doubled again)
 constexpr int            OutdoorElites = 150, DungeonElites = 200; // elite packs vs the template level's own (%)
 constexpr int            GroupRef = 25;      // x10: the average group (with minions) ZoneDensity is tuned for; zones of bigger groups get fewer of them
 constexpr std::uintptr_t MonStatsVec = 0xF58; // MonStats {rows, count}: row 0x1FC, minion1 word +0x5A, PartyMin/Max +0x62/+0x63, MinGrp/MaxGrp +0x65/+0x66
@@ -4087,12 +4088,7 @@ void ZoneBox(std::uint8_t mode, int id, int& x, int& y, int& w, int& h) noexcept
 		return;
 	}
 	const int mx = 3300 + (first % 10) * 220, my = 3200 + (first / 10) * 230;
-	int mw = 80, mh = 80;
-	if (const int tmpl = ZoneTemplate[first].load(); mode <= 3 && Banks[mode].defs && tmpl > 0) {
-		const std::uint8_t* def = Banks[mode].defs + tmpl * DefRow;
-		for (int d = 0; d < 3; ++d) mw = std::max(mw, Field<std::int32_t>(def, DefSizeX + d * 4)), mh = std::max(mh, Field<std::int32_t>(def, DefSizeY + d * 4));
-		mw = std::min((mw + 7) & ~7, 200), mh = std::min((mh + 7) & ~7, 200);
-	}
+	const int mw = MainArea, mh = MainArea; // a quarter of Cold Plains (80x80)
 	// One block taller than wide: a 2x2-block area is 4 corner pieces and has no edge piece to open for the passage (0.0.66 pen),
 	// a 3rd block along the side facing the outdoor area gives it one.
 	const int sh = SmallArea, sy = my + ((mh - sh) / 2 & ~7);
