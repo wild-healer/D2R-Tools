@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.98";
+constexpr const char* PluginVersion = "0.0.99";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -336,6 +336,7 @@ struct GameMods {
 	bool                single = false;
 	int                 exitX = 0, exitY = 0; // the zone's exit area (subtiles): the farthest room from the entry, 3 golden chests
 	bool                exitDone = false;
+	bool                heraldDone = false; // the dungeon's herald (made once a player is in the dungeon)
 	std::uint32_t       exitPortalId = 0;
 	bool                roranDone = false; // Roran Stronghammer is in Harrogath
 	int                 roranTries = 0;
@@ -2218,6 +2219,10 @@ std::vector<App::Item> RuleItems() {
 	out.push_back(App::Bullet("An outdoor area half the size of Cold Plains with " + Paint::Red("4x the monsters") + " and x1.5 elite packs, 8 monster types from every act.", IconOf("world")));
 	out.push_back(App::Bullet("Its dungeon: x1.5 the density, x2 elite packs; its stairs lead back to Harrogath.", IconOf("castle")));
 	out.push_back(App::Bullet("The exit area holds " + Paint::Gold("3 golden chests") + ".", IconOf("open-treasure-chest", { 240, 200, 80 })));
+	out.push_back(App::Bullet("Every monster rolls its drops " + Paint::Gold("once more") + ", elites " + Paint::Gold("twice more") + ", and the dungeon's " + Paint::Orange("herald") +
+	                              " (at its far stairs) " + Paint::Gold("four times more") + ".",
+	                          IconOf("swap-bag", { 240, 200, 80 })));
+	out.push_back(App::Bullet("Every monster has a " + Paint::Gold("2% chance") + " to drop a perfect gem or a rune (at Hell's rune odds).", IconOf("gem-pendant", { 120, 170, 240 })));
 	out.push_back(App::Bullet("Offer runes (Offering tab) to ban a mod or a monster family from your zones.", IconOf("rune-stone")));
 	out.push_back(App::Bullet(Paint::Red("Beware: ") + "these zones mix monsters from every act with this game's mods. Some combinations can be deadly, even for a strong character.",
 	                          IconOf("hazard-sign", { 230, 90, 60 })));
@@ -3724,7 +3729,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		                       freeRoom ? "" : " (no free spot)");
 	g->zonesUsed += ZoneParts;
 	g->zoneId = id, g->level2Id = id + 2, g->exitPortal = nullptr, g->exitPortalId = 0, g->single = ZoneSingle[id - base].load();
-	g->exitX = g->exitY = 0, g->exitDone = false;
+	g->exitX = g->exitY = 0, g->exitDone = false, g->heraldDone = false;
 	g->portal   = portal;
 	g->portalId = portal ? Field<std::uint32_t>(portal, 8) : 0;
 	ZonePortalOpen = portal != nullptr;
@@ -3812,6 +3817,75 @@ void MoveOutOfSafeArea(std::uint8_t* game) noexcept {
 // entry gets a red portal to level 2 once a player is in the zone. Rooms: level +0x10, next +0x48, flags +0x50, Room1 +0x58,
 // x, y, w, h +0x60 (tiles), level +0x90.
 int ExitLogs = 0;
+// ---- Loot in Roran's zones ----
+// The game's monster drop (D2R+0x447B80 (game, monster, ignoreNoDrop, modeChange) = D2MOO MONSTERMODE_DropTreasure: picks the
+// monster's TC (normal, champion, unique, quest) and rolls it once; reached from the death (D2R+0x447B24, ignoreNoDrop 0) or Find
+// Item (D2R+0x446E80, 1)). In a zone a death rolls it again: once for any monster, twice for elites, four times for a herald
+// (MonsterData +0x1A word bit 0x200, set by the herald maker). Then 2% for a perfect gem or a rune (half each; the rune at the
+// game's own odds within Hell's "Runes 17"), dropped as the quests drop a given item: the monster's drop code (unit +0x118,
+// D2R+0x34F390) set, D2R+0x43FBF0 (game, monster, quality 2 normal, &item level, 0, -1, 0), the code put back.
+constexpr std::uint64_t DropTreasureRva = 0x447B80, DropByCodeRva = 0x43FBF0;
+constexpr std::array<std::uint8_t, 15> DropTreasureBytes { 0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x53, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56 };
+using DropTreasureFn = std::uint64_t (*)(void* game, void* unit, int ignoreNoDrop, void* modeChange) noexcept;
+using DropByCodeFn   = std::uint64_t (*)(void* game, void* unit, int quality, int* itemLevel, void* a5, int a6, int a7) noexcept;
+DropTreasureFn DropTreasureOrig {};
+constexpr int  ExtraDropsNormal = 1, ExtraDropsElite = 2, ExtraDropsHerald = 4, BonusDropPerMille = 20;
+constexpr const char* PerfectGems[] { "gpv", "gpw", "gpg", "gpr", "gpb", "skz", "gpy" };
+// Hell "Runes 17" odds per rune r01-r33 (parts per million, from the TC chain without NoDrop).
+constexpr int RuneOdds[33] { 23057, 15371, 57642, 38428, 80699, 53799, 115284, 76856, 115284, 76856, 89083, 59389, 53450, 35633, 29694, 19796, 15672,
+                             10448, 8054,  5369,  4083,  2722,  2777,   1851,  1958,   1305,  1375,  917,   1017,  678,   757,   505,   193 };
+std::atomic<int> LootLogs { 0 };
+
+std::uint64_t LootRandom() noexcept {
+	thread_local std::uint64_t state = GetTickCount64() ^ reinterpret_cast<std::uintptr_t>(&state);
+	return Mix(state);
+}
+
+bool InZoneLevel(void* unit) noexcept {
+	void*     room = unit ? At<UnitRoomFn>(0x34B440)(unit) : nullptr;
+	const int id   = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0, base = ZoneBase.load(std::memory_order_relaxed);
+	return base > 0 && id >= base && id < base + ZoneSlots;
+}
+
+void DropBonus(void* game, void* unit) noexcept {
+	char code[5] {};
+	if (LootRandom() % 2) std::snprintf(code, sizeof(code), "%s", PerfectGems[LootRandom() % std::size(PerfectGems)]);
+	else {
+		int total = 0;
+		for (const int w : RuneOdds) total += w;
+		int pick = static_cast<int>(LootRandom() % static_cast<std::uint64_t>(total)), rune = 0;
+		while (rune < 32 && pick >= RuneOdds[rune]) pick -= RuneOdds[rune++];
+		std::snprintf(code, sizeof(code), "r%02d", rune + 1);
+	}
+	const std::uint32_t value = static_cast<std::uint32_t>(static_cast<std::uint8_t>(code[0])) | static_cast<std::uint32_t>(static_cast<std::uint8_t>(code[1])) << 8 |
+	                            static_cast<std::uint32_t>(static_cast<std::uint8_t>(code[2])) << 16 | 0x20u << 24;
+	const std::uint32_t before = Field<std::uint32_t>(unit, 0x118);
+	At<void (*)(void*, std::uint32_t) noexcept>(0x34F390)(unit, value);
+	int itemLevel = 0;
+	At<DropByCodeFn>(DropByCodeRva)(game, unit, 2, &itemLevel, nullptr, -1, 0);
+	At<void (*)(void*, std::uint32_t) noexcept>(0x34F390)(unit, before);
+	if (LootLogs.fetch_add(1) < 60) Log(false, "loot: bonus %s from monster %u (class %u)", code, Field<std::uint32_t>(unit, 8), Field<std::uint32_t>(unit, 4));
+}
+
+std::uint64_t HookDropTreasure(void* game, void* unit, int ignoreNoDrop, void* modeChange) noexcept {
+	const std::uint64_t result = DropTreasureOrig(game, unit, ignoreNoDrop, modeChange);
+	if (ignoreNoDrop || !game || !unit || Field<std::uint32_t>(unit, 0) != 1 || !InZoneLevel(unit)) return result;
+	const auto* data   = Field<std::uint8_t*>(unit, 0x10);
+	const bool  herald = data && (Field<std::uint16_t>(data, 0x1A) & 0x200);
+	const int   extra  = herald ? ExtraDropsHerald : At<IsSpecialFn>(0x38E0E0)(unit, true) ? ExtraDropsElite : ExtraDropsNormal;
+	for (int i = 0; i < extra; ++i) DropTreasureOrig(game, unit, ignoreNoDrop, modeChange);
+	if (herald && LootLogs.fetch_add(1) < 60) Log(false, "loot: herald %u dropped %d more times", Field<std::uint32_t>(unit, 8), extra);
+	if (static_cast<int>(LootRandom() % 1000) < BonusDropPerMille) DropBonus(game, unit);
+	return result;
+}
+
+// The dungeon's herald: the game's herald maker (D2R+0x498810 (game, x, y, monster class, room), as its "heraldspawn" command
+// does) at the dungeon's far stairs (the stairs room farthest from the first player in it), one of the zone's monster types.
+// The maker needs the level's region to be terrorized (D2R+0x489B70) and a herald tier (game +0x1A5C4, 1 here when none).
+using HeraldMakerFn = bool (*)(void* game, int x, int y, std::int16_t monster, void* room) noexcept;
+constexpr std::uint64_t HeraldMakerRva = 0x498810;
+void ZoneHerald(std::uint8_t* game) noexcept;
+
 // A zone's exit area (its own small level, east of the outdoor area): 3 golden chests (Objects 397, sparkly chest) in its middle.
 // Set up once, the first frame a player is in one of the zone's levels.
 using SpawnUnitFn = void* (*)(int type, int cls, int x, int y, void* game, void* room, std::uint64_t flag, int mode, int a9, void* a10) noexcept;
@@ -3864,6 +3938,50 @@ void ZoneExitArea(std::uint8_t* game) noexcept {
 	}
 }
 
+
+void ZoneHerald(std::uint8_t* game) noexcept {
+	GameMods* g = ModsOf(game);
+	if (!g || !g->zoneId || g->heraldDone) return;
+	auto* client = Field<std::uint8_t*>(game, GameClients);
+	for (int guard = 0; client && guard < 64; ++guard, client = Field<std::uint8_t*>(client, ClientNext)) {
+		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
+		void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
+		if (!room || At<RoomLevelFn>(0x2EFC10)(room) != g->zoneId + KindDungeon) continue;
+		g->heraldDone = true;
+		auto* room2 = Field<std::uint8_t*>(room, 0x18);
+		auto* level = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
+		if (!level) return Log(true, "zones: herald: the dungeon level was not found");
+		Coord at {};
+		At<GetCoordsFn>(0x34A040)(player, &at);
+		std::uint8_t* stairs = nullptr;
+		long long     best = -1;
+		int           rooms = 0;
+		for (auto* r = Field<std::uint8_t*>(level, 0x10); r && rooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++rooms) {
+			if (!(Field<std::uint32_t>(r, 0x50) & 0xFF0)) continue; // stairs rooms only
+			const long long dx = (Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2) * 5LL - at.x, dy = (Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2) * 5LL - at.y;
+			if (dx * dx + dy * dy > best) best = dx * dx + dy * dy, stairs = r;
+		}
+		if (!stairs) return Log(true, "zones: herald: the dungeon (level %d) has no stairs room", g->zoneId + KindDungeon);
+		const auto mode = Field<std::uint8_t>(game, GameMode);
+		if (!Field<void*>(stairs, 0x58)) At<ActivateRoomFn>(0x3289A0)(mode, stairs);
+		void* stairsRoom = Field<void*>(stairs, 0x58);
+		if (!stairsRoom) return Log(true, "zones: herald: its room could not be loaded");
+		Coord spot { (Field<std::int32_t>(stairs, 0x60) + Field<std::int32_t>(stairs, 0x68) / 2) * 5, (Field<std::int32_t>(stairs, 0x64) + Field<std::int32_t>(stairs, 0x6C) / 2) * 5 };
+		void* free = nullptr;
+		At<FindFreeSpotFn>(0x517F90)(game, stairsRoom, &spot, 2, 0x400, &free, 4, 100); // as for the chests
+		if (!free) return Log(true, "zones: herald: no free spot near %d,%d", spot.x, spot.y);
+		std::int16_t monster = ForcedCount > 0 ? ForcedPicks[LootRandom() % static_cast<std::uint64_t>(ForcedCount)] : 0;
+		if (monster <= 0) return Log(true, "zones: herald: no monster type for it");
+		auto&     tier   = *reinterpret_cast<std::int32_t*>(game + 0x1A5C4);
+		const int before = tier;
+		if (tier < 1) tier = 1;
+		const bool made = At<HeraldMakerFn>(HeraldMakerRva)(game, spot.x, spot.y, monster, free);
+		if (before < 1) tier = before;
+		Log(!made, "zones: herald (monster %d) in the dungeon (level %d) at %d,%d, %d rooms away from the entry: %s", monster, g->zoneId + KindDungeon, spot.x, spot.y,
+		    rooms, made ? "made" : "refused by the game (level not terrorized?)");
+		return;
+	}
+}
 
 void OpenExitPortal(std::uint8_t* game) noexcept {
 	GameMods* g = ModsOf(game);
@@ -4416,7 +4534,7 @@ void TrackMeetings(std::uint8_t* game) noexcept {
 
 std::uint64_t HookFrameCall(void* game) noexcept {
 	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), TrackMeetings(static_cast<std::uint8_t*>(game)),
-		          ZoneExitArea(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
+		          ZoneExitArea(static_cast<std::uint8_t*>(game)), ZoneHerald(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
 	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
@@ -4609,6 +4727,10 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	}
 	{
 		void* original = nullptr;
+		if (!context->InstallInlineHook(DropTreasureRva, DropTreasureBytes.data(), static_cast<std::uint32_t>(DropTreasureBytes.size()), reinterpret_cast<void*>(&HookDropTreasure), &original) || !original)
+			Log(true, "TZ Plus %s: no extra loot in the zones, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(DropTreasureRva));
+		else DropTreasureOrig = reinterpret_cast<DropTreasureFn>(original);
+		original = nullptr;
 		if (!context->InstallInlineHook(ThinkRva, ThinkBytes.data(), static_cast<std::uint32_t>(ThinkBytes.size()), reinterpret_cast<void*>(&HookThink), &original) || !original)
 			Log(true, "TZ Plus %s: Teleportation off, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(ThinkRva));
 		else ThinkOrig = reinterpret_cast<std::uint64_t>(original);
