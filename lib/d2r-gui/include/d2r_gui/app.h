@@ -898,7 +898,8 @@ inline int HeightOf(const Item& item, int width) {
 	case Item::Kind::ItemGrid: {
 		if (!item.itemGrid) return 0;
 		const auto& g = *item.itemGrid;
-		return std::max(g.height ? g.height : g.rows * item.cellSize, TilesHeight(item, g.columns * item.cellSize));
+		const int   tiles = TilesHeight(item, g.fixed ? width : g.columns * item.cellSize); // a fixed grid's tiles take the area's width
+		return g.fixed ? std::max(g.height, tiles) : std::max(g.height ? g.height : g.rows * item.cellSize, tiles);
 	}
 	case Item::Kind::Chart: return item.size + (item.small.empty() ? 20 : 20);
 	case Item::Kind::Squares: {
@@ -994,7 +995,7 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 		Item tiles = item;
 		tiles.kind = Item::Kind::Tiles;
 		Area at    = a;
-		at.right   = a.left + item.itemGrid->columns * item.cellSize;
+		if (!item.itemGrid->fixed) at.right = a.left + item.itemGrid->columns * item.cellSize; // a fixed grid's tiles take the area's width
 		if (item.itemGrid->drop) { // under the tiles' buttons: a click off any tile
 			const int top = std::max(y, 0), bottom = std::min(y + HeightOf(item, width), room);
 			if (bottom > top) out += QuietButton(n + "Drop", a.left, top, at.right - a.left, bottom - top, "a.g" + id, item.itemGrid->dropTip);
