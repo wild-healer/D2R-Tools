@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.99";
+constexpr const char* PluginVersion = "0.0.100";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -336,7 +336,9 @@ struct GameMods {
 	bool                single = false;
 	int                 exitX = 0, exitY = 0; // the zone's exit area (subtiles): the farthest room from the entry, 3 golden chests
 	bool                exitDone = false;
-	bool                heraldDone = false; // the dungeon's herald (made once a player is in the dungeon)
+	bool                heraldDone = false; // the dungeon's herald (made once a player reaches the dungeon's end)
+	void*               heraldRoom = nullptr; // its stairs room (Room2), picked when the first player comes into the dungeon
+	int                 heraldX = 0, heraldY = 0;
 	std::uint32_t       exitPortalId = 0;
 	bool                roranDone = false; // Roran Stronghammer is in Harrogath
 	int                 roranTries = 0;
@@ -2220,9 +2222,9 @@ std::vector<App::Item> RuleItems() {
 	out.push_back(App::Bullet("Its dungeon: x1.5 the density, x2 elite packs; its stairs lead back to Harrogath.", IconOf("castle")));
 	out.push_back(App::Bullet("The exit area holds " + Paint::Gold("3 golden chests") + ".", IconOf("open-treasure-chest", { 240, 200, 80 })));
 	out.push_back(App::Bullet("Every monster rolls its drops " + Paint::Gold("once more") + ", elites " + Paint::Gold("twice more") + ", and the dungeon's " + Paint::Orange("herald") +
-	                              " (at its far stairs) " + Paint::Gold("four times more") + ".",
+	                              " (it appears when you reach the dungeon's end) " + Paint::Gold("four times more") + ".",
 	                          IconOf("swap-bag", { 240, 200, 80 })));
-	out.push_back(App::Bullet("Every monster has a " + Paint::Gold("2% chance") + " to drop a perfect gem or a rune (at Hell's rune odds).", IconOf("gem-pendant", { 120, 170, 240 })));
+	out.push_back(App::Bullet("Every monster has a " + Paint::Gold("2% chance") + " to drop a flawless gem or a rune (at Hell's rune odds).", IconOf("gem-pendant", { 120, 170, 240 })));
 	out.push_back(App::Bullet("Offer runes (Offering tab) to ban a mod or a monster family from your zones.", IconOf("rune-stone")));
 	out.push_back(App::Bullet(Paint::Red("Beware: ") + "these zones mix monsters from every act with this game's mods. Some combinations can be deadly, even for a strong character.",
 	                          IconOf("hazard-sign", { 230, 90, 60 })));
@@ -3701,11 +3703,18 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	SetConstants(*g, mode);
 	GiveRewards(game, *g, difficulty == 2);
 
-	Coord at {};
-	At<GetCoordsFn>(0x34A040)(player, &at);
-	Coord spot { at.x + 3, at.y + 3 };
+	// The portal: always at the same spot, by Roran's fire (in Harrogath), or next to the player when that spot is not loaded.
+	constexpr int PortalX = 5151, PortalY = 5110;
+	Coord         spot { PortalX, PortalY };
+	void*         fixedRoom = At<void* (*)(void*, int, int) noexcept>(0x38DFB0)(room, PortalX, PortalY);
+	if (!fixedRoom || At<RoomLevelFn>(0x2EFC10)(fixedRoom) != 109) {
+		Coord at {};
+		At<GetCoordsFn>(0x34A040)(player, &at);
+		spot = { at.x + 3, at.y + 3 }, fixedRoom = room;
+		Log(true, "zones: the portal's spot by the fire is not loaded, the portal opens next to the player");
+	}
 	void* freeRoom = nullptr;
-	At<FindFreeSpotFn>(0x517F90)(game, room, &spot, 3, 0x400, &freeRoom, 4, 100);
+	At<FindFreeSpotFn>(0x517F90)(game, fixedRoom, &spot, 3, 0x400, &freeRoom, 4, 100);
 	// a10 = 1: past the game's town check (only the cow level and Pandemonium from towns); the act must still match.
 	void* portal = nullptr;
 	g->safeLevel = 0;
@@ -3729,7 +3738,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		                       freeRoom ? "" : " (no free spot)");
 	g->zonesUsed += ZoneParts;
 	g->zoneId = id, g->level2Id = id + 2, g->exitPortal = nullptr, g->exitPortalId = 0, g->single = ZoneSingle[id - base].load();
-	g->exitX = g->exitY = 0, g->exitDone = false, g->heraldDone = false;
+	g->exitX = g->exitY = 0, g->exitDone = false, g->heraldDone = false, g->heraldRoom = nullptr, g->heraldX = g->heraldY = 0;
 	g->portal   = portal;
 	g->portalId = portal ? Field<std::uint32_t>(portal, 8) : 0;
 	ZonePortalOpen = portal != nullptr;
@@ -3821,7 +3830,7 @@ int ExitLogs = 0;
 // The game's monster drop (D2R+0x447B80 (game, monster, ignoreNoDrop, modeChange) = D2MOO MONSTERMODE_DropTreasure: picks the
 // monster's TC (normal, champion, unique, quest) and rolls it once; reached from the death (D2R+0x447B24, ignoreNoDrop 0) or Find
 // Item (D2R+0x446E80, 1)). In a zone a death rolls it again: once for any monster, twice for elites, four times for a herald
-// (MonsterData +0x1A word bit 0x200, set by the herald maker). Then 2% for a perfect gem or a rune (half each; the rune at the
+// (MonsterData +0x1A word bit 0x200, set by the herald maker). Then 2% for a flawless gem or a rune (half each; the rune at the
 // game's own odds within Hell's "Runes 17"), dropped as the quests drop a given item: the monster's drop code (unit +0x118,
 // D2R+0x34F390) set, D2R+0x43FBF0 (game, monster, quality 2 normal, &item level, 0, -1, 0), the code put back.
 constexpr std::uint64_t DropTreasureRva = 0x447B80, DropByCodeRva = 0x43FBF0;
@@ -3830,7 +3839,7 @@ using DropTreasureFn = std::uint64_t (*)(void* game, void* unit, int ignoreNoDro
 using DropByCodeFn   = std::uint64_t (*)(void* game, void* unit, int quality, int* itemLevel, void* a5, int a6, int a7) noexcept;
 DropTreasureFn DropTreasureOrig {};
 constexpr int  ExtraDropsNormal = 1, ExtraDropsElite = 2, ExtraDropsHerald = 4, BonusDropPerMille = 20;
-constexpr const char* PerfectGems[] { "gpv", "gpw", "gpg", "gpr", "gpb", "skz", "gpy" };
+constexpr const char* FlawlessGems[] { "gzv", "glw", "glg", "glr", "glb", "skl", "gly" };
 // Hell "Runes 17" odds per rune r01-r33 (parts per million, from the TC chain without NoDrop).
 constexpr int RuneOdds[33] { 23057, 15371, 57642, 38428, 80699, 53799, 115284, 76856, 115284, 76856, 89083, 59389, 53450, 35633, 29694, 19796, 15672,
                              10448, 8054,  5369,  4083,  2722,  2777,   1851,  1958,   1305,  1375,  917,   1017,  678,   757,   505,   193 };
@@ -3849,7 +3858,7 @@ bool InZoneLevel(void* unit) noexcept {
 
 void DropBonus(void* game, void* unit) noexcept {
 	char code[5] {};
-	if (LootRandom() % 2) std::snprintf(code, sizeof(code), "%s", PerfectGems[LootRandom() % std::size(PerfectGems)]);
+	if (LootRandom() % 2) std::snprintf(code, sizeof(code), "%s", FlawlessGems[LootRandom() % std::size(FlawlessGems)]);
 	else {
 		int total = 0;
 		for (const int w : RuneOdds) total += w;
@@ -3939,6 +3948,7 @@ void ZoneExitArea(std::uint8_t* game) noexcept {
 }
 
 
+constexpr int HeraldReach = 40; // subtiles from the end's stairs room centre: a player this close makes the herald
 void ZoneHerald(std::uint8_t* game) noexcept {
 	GameMods* g = ModsOf(game);
 	if (!g || !g->zoneId || g->heraldDone) return;
@@ -3947,38 +3957,51 @@ void ZoneHerald(std::uint8_t* game) noexcept {
 		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
 		void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
 		if (!room || At<RoomLevelFn>(0x2EFC10)(room) != g->zoneId + KindDungeon) continue;
-		g->heraldDone = true;
-		auto* room2 = Field<std::uint8_t*>(room, 0x18);
-		auto* level = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
-		if (!level) return Log(true, "zones: herald: the dungeon level was not found");
 		Coord at {};
 		At<GetCoordsFn>(0x34A040)(player, &at);
-		std::uint8_t* stairs = nullptr;
-		long long     best = -1;
-		int           rooms = 0;
-		for (auto* r = Field<std::uint8_t*>(level, 0x10); r && rooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++rooms) {
-			if (!(Field<std::uint32_t>(r, 0x50) & 0xFF0)) continue; // stairs rooms only
-			const long long dx = (Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2) * 5LL - at.x, dy = (Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2) * 5LL - at.y;
-			if (dx * dx + dy * dy > best) best = dx * dx + dy * dy, stairs = r;
+		if (!g->heraldRoom) {
+			// The dungeon's end: its stairs room farthest from where the first player came in.
+			auto* room2 = Field<std::uint8_t*>(room, 0x18);
+			auto* level = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
+			if (!level) return g->heraldDone = true, Log(true, "zones: herald: the dungeon level was not found");
+			long long best  = -1;
+			int       rooms = 0;
+			for (auto* r = Field<std::uint8_t*>(level, 0x10); r && rooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++rooms) {
+				if (!(Field<std::uint32_t>(r, 0x50) & 0xFF0)) continue; // stairs rooms only
+				const int       cx = (Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2) * 5, cy = (Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2) * 5;
+				const long long dx = cx - at.x, dy = cy - at.y;
+				if (dx * dx + dy * dy > best) best = dx * dx + dy * dy, g->heraldRoom = r, g->heraldX = cx, g->heraldY = cy;
+			}
+			if (!g->heraldRoom) return g->heraldDone = true, Log(true, "zones: herald: the dungeon (level %d) has no stairs room", g->zoneId + KindDungeon);
+			Log(false, "zones: herald: waits at the dungeon's end, %d,%d (%d rooms)", g->heraldX, g->heraldY, rooms);
 		}
-		if (!stairs) return Log(true, "zones: herald: the dungeon (level %d) has no stairs room", g->zoneId + KindDungeon);
-		const auto mode = Field<std::uint8_t>(game, GameMode);
+		const long long dx = g->heraldX - at.x, dy = g->heraldY - at.y;
+		if (dx * dx + dy * dy > static_cast<long long>(HeraldReach) * HeraldReach) continue;
+		g->heraldDone = true;
+		auto*      stairs = static_cast<std::uint8_t*>(g->heraldRoom);
+		const auto mode   = Field<std::uint8_t>(game, GameMode);
 		if (!Field<void*>(stairs, 0x58)) At<ActivateRoomFn>(0x3289A0)(mode, stairs);
 		void* stairsRoom = Field<void*>(stairs, 0x58);
 		if (!stairsRoom) return Log(true, "zones: herald: its room could not be loaded");
-		Coord spot { (Field<std::int32_t>(stairs, 0x60) + Field<std::int32_t>(stairs, 0x68) / 2) * 5, (Field<std::int32_t>(stairs, 0x64) + Field<std::int32_t>(stairs, 0x6C) / 2) * 5 };
+		Coord spot { g->heraldX, g->heraldY };
 		void* free = nullptr;
 		At<FindFreeSpotFn>(0x517F90)(game, stairsRoom, &spot, 2, 0x400, &free, 4, 100); // as for the chests
 		if (!free) return Log(true, "zones: herald: no free spot near %d,%d", spot.x, spot.y);
-		std::int16_t monster = ForcedCount > 0 ? ForcedPicks[LootRandom() % static_cast<std::uint64_t>(ForcedCount)] : 0;
-		if (monster <= 0) return Log(true, "zones: herald: no monster type for it");
-		auto&     tier   = *reinterpret_cast<std::int32_t*>(game + 0x1A5C4);
-		const int before = tier;
+		// One of the zone's monster types (those the game made in it so far).
+		std::vector<int> classes;
+		AcquireSRWLockShared(&g->modLock);
+		for (const auto& [cls, made] : g->zoneClasses)
+			if (made > 0) classes.push_back(cls);
+		ReleaseSRWLockShared(&g->modLock);
+		if (classes.empty()) return Log(true, "zones: herald: no monster type for it");
+		const auto monster = static_cast<std::int16_t>(classes[LootRandom() % classes.size()]);
+		auto&      tier    = *reinterpret_cast<std::int32_t*>(game + 0x1A5C4);
+		const int  before  = tier;
 		if (tier < 1) tier = 1;
 		const bool made = At<HeraldMakerFn>(HeraldMakerRva)(game, spot.x, spot.y, monster, free);
 		if (before < 1) tier = before;
-		Log(!made, "zones: herald (monster %d) in the dungeon (level %d) at %d,%d, %d rooms away from the entry: %s", monster, g->zoneId + KindDungeon, spot.x, spot.y,
-		    rooms, made ? "made" : "refused by the game (level not terrorized?)");
+		Log(!made, "zones: herald (monster %d) at the dungeon's end (level %d), %d,%d: %s", monster, g->zoneId + KindDungeon, spot.x, spot.y,
+		    made ? "made" : "refused by the game (level not terrorized?)");
 		return;
 	}
 }
@@ -4249,6 +4272,23 @@ void LinkNeighbours(std::uint8_t mode, void* level, int id) noexcept {
 // Every build of one of our levels (the server's and the client's, and the client's again when you come back) starts from the
 // zone's seed, so they all make the same map; each level gets its own place on the act's map (else their automaps overlap).
 // While a zone is built under its template's id, the template's links (LevelDefs Vis) are ours, so its stairs lead to our levels.
+// The tiles of an act 1 outdoor area's plain cells (D2R+0x3EE7D7: mov r12d, 0x44103 = the level type's tile files 1 Floor,
+// 2 Trees, 9 Objects, 15 Stones, 19 puddle, D2MOO DRLGOUTDOORS_GenerateLevel): the entry and exit areas get the floor alone (1),
+// no trees or rocks; the game's value is put back right after their build.
+constexpr std::uint64_t WildTilesRva = 0x3EE7D9;
+constexpr std::uint32_t WildTilesGame = 0x44103, WildTilesFloor = 0x1;
+void SetWildTiles(std::uint32_t mask) noexcept {
+	auto* at = reinterpret_cast<std::uint8_t*>(Base + WildTilesRva);
+	const std::uint32_t now = Field<std::uint32_t>(at, 0);
+	if (now != WildTilesGame && now != WildTilesFloor) return void(Log(true, "zones: the outdoor tile mask is not as expected (0x%X): entry/exit keep their trees", now));
+	if (now == mask) return;
+	DWORD old = 0;
+	if (!VirtualProtect(at, 4, PAGE_EXECUTE_READWRITE, &old)) return;
+	std::memcpy(at, &mask, 4);
+	VirtualProtect(at, 4, old, &old);
+	FlushInstructionCache(GetCurrentProcess(), at, 4);
+}
+
 std::uint64_t BuildZoneLevel(std::uint8_t mode, void* level, MazeBuildFn build, const char* what) noexcept {
 	const int base = ZoneBase.load(std::memory_order_relaxed);
 	const int id   = level ? Field<std::int32_t>(level, 0x1F8) : 0;
@@ -4285,7 +4325,10 @@ std::uint64_t BuildZoneLevel(std::uint8_t mode, void* level, MazeBuildFn build, 
 		    Field<std::int32_t>(level, 0), Field<void*>(level, 0x18));
 		OutdoorTrace.fetch_add(1);
 	}
+	const bool bare = outdoor && (BuildingKind == KindEntry || BuildingKind == KindExit);
+	if (bare) SetWildTiles(WildTilesFloor);
 	const std::uint64_t result = build(mode, level);
+	if (bare) SetWildTiles(WildTilesGame);
 	if (outdoor) OutdoorTrace.fetch_sub(1);
 	BuildingKind = -1;
 	SetField<std::int32_t>(level, 0x1F8, id);
@@ -4299,28 +4342,25 @@ std::uint64_t BuildZoneLevel(std::uint8_t mode, void* level, MazeBuildFn build, 
 }
 
 // A linear dungeon: the game grows a maze (D2R+0x3E96D0) by adding a room next to a random room, in a random direction
-// (call D2R+0x3E97C9 -> 0x3E77A0 (room, direction 0 W / 1 N / 2 E / 3 S, merge)); rooms that touch are joined. For our
-// dungeons every room goes after the newest one (level +0x10, the list head), only east or south: a path that never
-// touches itself (no loops, no side branches), its two ends being the dead ends where the game puts the stairs. The first
-// room moves to the box's north-west corner to leave the path room; when neither way fits, the game's own choice is kept.
+// (call D2R+0x3E97C9 -> 0x3E77A0 (room, direction 0 W / 1 N / 2 E / 3 S, merge), null when the spot is taken or outside the
+// level); rooms that touch are joined. For our dungeons every room goes after the newest one (level +0x10, the list head), in
+// the game's random direction: one winding corridor, no side branches. When the newest room is boxed in (8 refusals in a row),
+// the game's own random room is used once (a short branch). (0.0.98 went east/south only from a first room moved to the
+// box's corner: the cave pieces opened onto nothing.)
 constexpr std::uint64_t MazeAddCall = 0x3E97C9, MazeAddRva = 0x3E77A0;
 using MazeAddFn = void* (*)(void* room, int direction, int merge) noexcept;
-thread_local int LinearFallbacks = 0;
+thread_local int LinearRefused = 0, LinearBranches = 0;
 void* HookMazeAdd(void* room, int direction, int merge) noexcept {
 	auto* level = room ? Field<std::uint8_t*>(room, 0x90) : nullptr;
 	if (BuildingKind == KindDungeon && level) {
-		auto* last = Field<std::uint8_t*>(level, 0x10);
-		const int bx = Field<std::int32_t>(level, 0x24), by = Field<std::int32_t>(level, 0x28), bw = Field<std::int32_t>(level, 0x2C), bh = Field<std::int32_t>(level, 0x30);
-		if (last && bw > 0 && bh > 0) {
-			if (Field<std::int32_t>(level, 8) == 1) SetField<std::int32_t>(last, 0x60, bx), SetField<std::int32_t>(last, 0x64, by), LinearFallbacks = 0; // the first room
-			const int x = Field<std::int32_t>(last, 0x60), y = Field<std::int32_t>(last, 0x64), w = Field<std::int32_t>(last, 0x68), h = Field<std::int32_t>(last, 0x6C);
-			const bool east = x + 2 * w <= bx + bw, south = y + 2 * h <= by + bh;
-			if (east || south) {
-				const int dir = east && south ? ((direction & 1) ? 3 : 2) : east ? 2 : 3;
-				return At<MazeAddFn>(MazeAddRva)(last, dir, merge);
-			}
-			if (LinearFallbacks++ == 0) Log(true, "zones: the dungeon path reached the box corner at %d rooms, the rest branches", Field<std::int32_t>(level, 8));
+		if (Field<std::int32_t>(level, 8) == 1) LinearRefused = 0, LinearBranches = 0; // the first room only: a new build
+		if (auto* last = Field<std::uint8_t*>(level, 0x10); last && LinearRefused < 8) {
+			if (void* added = At<MazeAddFn>(MazeAddRva)(last, direction, merge)) return LinearRefused = 0, added;
+			++LinearRefused;
+			return nullptr; // the game rolls again
 		}
+		LinearRefused = 0;
+		if (LinearBranches++ < 3) Log(false, "zones: the dungeon corridor is boxed in at %d rooms, one branch", Field<std::int32_t>(level, 8));
 	}
 	return At<MazeAddFn>(MazeAddRva)(room, direction, merge);
 }
