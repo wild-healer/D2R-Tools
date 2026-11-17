@@ -116,7 +116,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.2.2";
+constexpr const char* PluginVersion = "1.2.2-dev-10";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -437,8 +437,8 @@ int MiscFirst = 0, MiscPerPage = 1; // the misc tracking page's first type shown
 constexpr const char* GoalNames[] { "None", "Find", "Perfect" };
 constexpr const char* GoalKeys[] { "none", "find", "perfect" };
 constexpr const char* GoalSettings[] { "goal_uniques", "goal_ethereal", "goal_sets", "goal_runewords" };
-constexpr const char* LootNames[] { "Show all", "Hide found", "Hide perfect" };
-constexpr const char* LootKeys[] { "all", "found", "perfect" };
+constexpr const char* LootNames[] { "Show all", "Hide stored", "Hide perfect" };
+constexpr const char* LootKeys[] { "all", "stored", "perfect" };
 constexpr const char* LootSettings[] { "loot_uniques", "loot_ethereal", "loot_sets" };
 constexpr const char* GoalRowNames[] { "Uniques", "Ethereal uniques", "Set items", "Runewords" };
 
@@ -582,6 +582,7 @@ struct BaseInfo {
 	int  pictures {};     // its item type's VarInvGfx: how many pictures the game picks from (rings 5...), 0 or 1 for one
 	int  row = -1;        // its Items row (an item unit's class)
 	std::string type;     // its own item type (Items type column)
+	std::string family;   // its normal tier's code (normcode): the same for every tier of that item
 	std::string name, asset;
 	std::vector<std::string> types; // its item types and their parents
 };
@@ -1880,6 +1881,8 @@ void BuildLists(TableRows types, TableRows items, TableRows uniques, TableRows s
 			if (has(SetRules[r].type)) base.classRule = r;
 		if (code == FourCC(row, ItemRow::EliteCode) && code != FourCC(row, ItemRow::NormalCode)) base.tier = 2;
 		else if (code == FourCC(row, ItemRow::ExceptionalCode) && code != FourCC(row, ItemRow::NormalCode)) base.tier = 1;
+		base.family = FourCC(row, ItemRow::NormalCode);
+		if (base.family.empty()) base.family = code;
 		base.name = names(Field<std::uint16_t>(row, ItemRow::NameString));
 		if (base.name.empty()) base.name = code;
 		const auto asset = mod.bases.count(code) ? mod.bases.at(code) : builtin.count(code) ? builtin[code] : "";
@@ -3089,7 +3092,7 @@ void LoadSettings() {
 		for (int k = 0; k < 3; ++k)
 			if (!std::strcmp(key, LootSettings[k]))
 				for (int mode = 0; mode < 3; ++mode)
-					if (!std::strcmp(value, LootKeys[mode])) Config.loot[k] = mode;
+					if (!std::strcmp(value, LootKeys[mode]) || (mode == LootFound && !std::strcmp(value, "found"))) Config.loot[k] = mode; // "found": its older name
 		if (!std::strcmp(key, "language")) {
 			Config.language = -1;
 			for (int k = 0; k < LanguageCount; ++k)
@@ -3142,7 +3145,7 @@ void SaveSettings() {
 		if (!std::strcmp(toggle.key, "perfect_frames")) {
 			std::fprintf(file, "# Goals (none, find or perfect): the kinds the overview counts, and what each stats page's centre shows.\n");
 			for (int k = 0; k < 4; ++k) std::fprintf(file, "%s = %s\n", GoalSettings[k], GoalKeys[Config.goal[k]]);
-			std::fprintf(file, "# Loot (all, found or perfect): ground items hidden when the grail has them, or has them perfect.\n");
+			std::fprintf(file, "# Loot (all, stored or perfect): ground items hidden when the grail has them, or has them perfect.\n");
 			for (int k = 0; k < 3; ++k) std::fprintf(file, "%s = %s\n", LootSettings[k], LootKeys[Config.loot[k]]);
 		}
 		if (toggle.group >= DisplayGroup) std::fprintf(file, "# %s\n", toggle.help);
@@ -5259,7 +5262,7 @@ std::string ViewLayout(const std::string& id, bool over = false) {
 		for (int k = 0; k < 3; ++k)
 			dropdown(4 + k, GoalRowNames[k], choices(LootNames, 3), Config.loot[k],
 			         std::string("Ground ") + (k == 0 ? "uniques" : k == 1 ? "ethereal uniques" : "set items")
-			             + ", after the game's filter and other filters. Hide found: hidden when the grail has one. Hide perfect: hidden when its grail copy is perfect.",
+			             + ", after the game's filter and other filters. Hide stored: hidden when the grail has one. Hide perfect: hidden when its grail copy is perfect.",
 			         "loot" + std::to_string(k));
 		for (const auto& toggle : Toggles)
 			if (toggle.group == LootGroup) {
@@ -8266,13 +8269,22 @@ void TakeOut(std::uint32_t fingerprint) {
 std::uint64_t GrailChanges {}; // counts the grail's rebuilds, for what is kept about its copies
 // Lock held. Whether a record still is the item its entry says (the game's
 // files may have changed: another row, another base).
+// Lock held. Whether two bases are tiers of one item (same normcode): plugins
+// such as Exalted Items put a unique or set item on another tier's copy of its
+// base, which the game itself never does.
+bool SameFamily(const std::string& a, const std::string& b) {
+	if (a == b) return true;
+	const auto first = Bases.find(a), second = Bases.find(b);
+	return first != Bases.end() && second != Bases.end() && first->second.family == second->second.family;
+}
+
 bool RecordMatches(const Record& record, int u) {
 	const auto& entry = Uniques[u];
 	if (entry.runeword || entry.objective || entry.lost) return true;
 	if (entry.misc || entry.secret) return CodeText(record.code) == entry.code;
 	const auto quality = static_cast<Items::Quality>(record.quality);
 	if (quality != (entry.set ? Items::Quality::Set : Items::Quality::Unique)) return false;
-	return CodeText(record.code) == entry.code && record.qualityRecordId == entry.row;
+	return SameFamily(CodeText(record.code), entry.code) && record.qualityRecordId == entry.row;
 }
 
 // Lock held. The Lost items tiles: one entry per lost record, after every
@@ -11193,6 +11205,7 @@ struct LootTable {
 	// By Items row: hidden whatever unique (set item) of that base it is, for
 	// unidentified items when ambiguous bases are not filtered.
 	std::vector<std::uint8_t> uniqueBases, setBases;
+	std::vector<int>          family; // by Items row: its normal tier's Items row (tiers of one item share it)
 	// The same by picture (Filter graphic variants): [Items row][picture], empty when not filtered so.
 	std::vector<std::vector<std::uint8_t>> uniqueBasePics, setBasePics;
 	bool                      exact {};   // unidentified items by their row
@@ -11395,8 +11408,10 @@ bool LootDecide(const void* unit, const void* data, const LootTable& table, std:
 	file = At<std::int32_t>(data, Game::DataFile);
 	if (file < 0 || file >= static_cast<int>(rows->size())) return false;
 	const LootRow& row = (*rows)[file];
-	// An unidentified item's row is only trusted when its base is the row's.
-	if (row.item != item) return false;
+	// An unidentified item's row is only trusted when its base is the row's
+	// (or another tier of it, as Exalted Items makes).
+	const auto family = [&](int i) { return i >= 0 && i < static_cast<int>(table.family.size()) && table.family[i] >= 0 ? table.family[i] : i; };
+	if (row.item != item && (row.item < 0 || family(row.item) != family(item))) return false;
 	// Filter graphic variants: by its own picture's tiles.
 	if (!row.pictures.empty() && picture >= 0) {
 		const bool hidden = picture < static_cast<int>(row.pictures.size()) && (row.pictures[picture] & bit) != 0;
@@ -11519,6 +11534,12 @@ void PublishLootTable() {
 		const auto base = Bases.find(Uniques[u].code);
 		return base == Bases.end() ? -1 : base->second.row;
 	};
+	for (const auto& [code, base] : Bases) {
+		if (base.row < 0) continue;
+		if (static_cast<int>(table->family.size()) <= base.row) table->family.resize(static_cast<std::size_t>(base.row) + 1, -1);
+		const auto normal = Bases.find(base.family);
+		table->family[static_cast<std::size_t>(base.row)] = normal != Bases.end() ? normal->second.row : base.row;
+	}
 	table->uniques.resize(UniqueByRow.size());
 	for (std::size_t r = 0; r < UniqueByRow.size(); ++r) {
 		const int u = UniqueByRow[r];

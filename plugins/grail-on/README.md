@@ -64,7 +64,7 @@ All of them are on the grail's settings page (the gear icon), on five pages (Gen
 | `affix_variant_off`, `graphic_variant_off` | none | One line per item left out of affix / graphic variants (grail entry id), from the Variants lists. |
 | `compact` | `false` | The Layout choice: Compact puts the window against the screen's left edge, with its menus on its right. |
 | `swap_columns` | `false` | The Menu direction choice: Right to left puts the category icons in the left column and the menu icons in the right one. |
-| `loot_uniques`, `loot_ethereal`, `loot_sets` | `all` | `all`, `found` or `perfect`: ground items hidden once the grail has them, or has them perfect. |
+| `loot_uniques`, `loot_ethereal`, `loot_sets` | `all` | `all`, `stored` or `perfect` (`found` still read): ground items hidden once the grail stores them, or has them perfect. |
 | `loot_unid_only` | `true` | Only unidentified ground items are hidden; identified ones always show. |
 | `loot_unid_stats` | `false` | With Hide perfect: an item whose grail copy is not perfect only shows when it is an upgrade (every varying stat the same or better, at least one better). Read in single player and games you host; hidden in games you join. |
 | `loot_list` | the 2 presets | One line per exclusion list, in order: preset (`none`, `valuable` or `interesting`), `1` once a preset's list was changed, then its name. |
