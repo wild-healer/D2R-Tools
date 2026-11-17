@@ -201,6 +201,19 @@ struct Tile {
 	std::function<void(bool over)>           hover;
 };
 
+// How tiles are drawn (Tiles, ItemGrid): 0 keeps the library's default.
+struct TileLook {
+	int         labelHeight = 0;  // a label's box above its slot (0: labelLines * 44)
+	int         labelMargin = 30; // how far it reaches past the slot on each side
+	int         labelSize   = 0;  // its font size (0: the small size)
+	const char* labelV      = "center"; // its vertical alignment in the box
+	int         gap         = 0;  // under a row of tiles (0: 24)
+	int         headerHeight = 0; // a row's title (0: 70)
+	int         headerSize   = 0; // its font size (0: the medium size)
+	int         headerLeft = 0, headerWidth = 0; // its place across (width 0: the whole row)
+	int         dividerUp   = 14; // the line under it, this far above the header's bottom
+};
+
 struct TileRow {
 	std::string       header; // a gold title over the row (none: empty)
 	std::string       headerColor; // its colour (a profile colour; default gold)
@@ -269,6 +282,7 @@ struct Item {
 	int                                      height = 0; // Custom
 	std::function<std::vector<TileRow>()>    tileRows;   // Tiles
 	int                                      cellSize = 98; // Tiles: a cell's size
+	TileLook                                 tileLook;      // Tiles, ItemGrid
 	std::vector<Slice>                       slices;     // Chart
 	int                                      size = 0;   // Chart: the ring's size; Squares: a square's
 	std::string                              big, small; // Chart: the text in the ring, under it
@@ -279,6 +293,7 @@ struct Item {
 	std::function<bool()>                    shown;
 
 	Item Tip(std::string tip) const { auto c = *this; c.tooltip = std::move(tip); return c; }
+	Item Looks(TileLook look) const { auto c = *this; c.tileLook = look; return c; } // Tiles, ItemGrid: how tiles are drawn
 	Item Note(std::string n) const { auto c = *this; c.note = std::move(n); return c; }
 	Item Restart(bool on = true) const { auto c = *this; c.restart = on; return c; }
 	Item OnChange(std::function<void()> fn) const { auto c = *this; c.changed = std::move(fn); return c; }
@@ -347,6 +362,7 @@ struct ItemGridSpec {
 	int                                   height = 0; // the row's height (0: the grid's, or the tiles' when taller)
 	bool                                  fixed = false; // at x, y in the panel whatever the page's scroll (the tiles scroll over it)
 	int                                   x = 0, y = 0;
+	TileLook                              look;  // how its tiles are drawn
 	std::function<void()>                 drop;  // a click on the tiles' area off any tile (the cursor's item put back, say)
 	std::string                           dropTip;
 	// With a Player Page Host area: the host's grid is used, not one of the
@@ -358,6 +374,7 @@ struct ItemGridSpec {
 inline Item ItemGrid(ItemGridSpec spec) {
 	Item item { .kind = Item::Kind::ItemGrid, .cellSize = 98 };
 	item.tileRows = spec.tiles;
+	item.tileLook = spec.look;
 	item.itemGrid = std::make_shared<const ItemGridSpec>(std::move(spec));
 	return item;
 }
@@ -420,6 +437,7 @@ struct Page {
 struct Menu {
 	Tabs::Tab         tab;
 	std::string       title;
+	std::optional<Tabs::Look> pageLook; // its pages' bar (else the window's menuLook.pages)
 	std::vector<Page> pages; // none: the menu is a page itself
 	std::vector<Item> items;
 	Content           content;
@@ -442,6 +460,12 @@ struct OwnFrame {
 	bool menusPlaced = false;            // the menus and pages where these say, not in rows over the area:
 	int  menuX = 0, menuY = 0, pageX = 0, pageY = 0;
 	bool menusVertical = false, pagesVertical = true;
+	int  coverX = 0, coverY = 0, coverWidth = 0, coverHeight = 0; // stone over the picture (coverWidth 0: none)
+	int  coverColor[3] { 20, 20, 22 };
+	int  coverGrain = 12;
+	unsigned coverSeed = 3;
+	int  barTop = 0, barHeight = 0;     // the scroll bar's track (0: the area's)
+	int  barWidth = 30, barStep = 30;   // its width and step height
 };
 
 struct InventoryLink {
@@ -462,6 +486,8 @@ struct Window {
 	std::string                       title;
 	Frame                             frame = Frame::Stash;
 	OwnFrame                          own;            // Frame::Own's
+	std::optional<Menus::Look>        menuLook;       // the menus' and pages' bars (sizes, places, steps); the area is not shrunk for them
+	std::optional<ScrollBar::Look>    barLook;        // the scroll bar's art
 	std::vector<Menu>                 menus; // or one page:
 	std::vector<Item>                 items;
 	Content                           content;
@@ -604,6 +630,7 @@ inline std::string OwnLayout(const std::string& panelName, const std::string& ti
 	const auto& o = Own();
 	std::string c = ClickCatcher("PanelClickCatcher", 0, 0, o.width, o.height) + under;
 	if (const auto sprite = OwnSprite(); !sprite.empty()) c += Image("Background", o.artX, o.artY, sprite);
+	if (o.coverWidth > 0 && o.coverHeight > 0) c += Image("Cover", o.coverX, o.coverY, StashKit::Stone(o.coverWidth, o.coverHeight, o.coverColor, o.coverGrain, o.coverSeed));
 	if (!title.empty() && o.titleHeight > 0)
 		c += R"(, {"type": "TextBoxWidget", "name": "Title", "fields": {)" + Rect(o.titleX, o.titleY, o.titleWidth ? o.titleWidth : o.width, o.titleHeight) + R"(, "text": )" + Json(GameText(title))
 		   + R"(, "style": {"fontColor": "$FontColorGoldYellow", "pointSize": 52, "dropShadow": "$DefaultDropShadow", "alignment": {"h": "center", "v": "center"}}}})";
@@ -680,7 +707,7 @@ inline void SetNav() {
 	auto&                    s = Get();
 	std::vector<Menus::Menu> menus;
 	for (const auto& menu : s.window.menus) {
-		Menus::Menu m { .tab = menu.tab, .title = menu.title };
+		Menus::Menu m { .tab = menu.tab, .title = menu.title, .pageLook = menu.pageLook };
 		for (const auto& page : menu.pages) m.pages.push_back({ page.tab });
 		menus.push_back(std::move(m));
 	}
@@ -706,7 +733,8 @@ struct Placed {
 };
 constexpr int TileHeader = 70, TileLabel = 44, TileGap = 24;
 
-inline std::vector<Placed> PlaceTiles(const std::vector<TileRow>& rows, int cell, int width, int& height) {
+inline std::vector<Placed> PlaceTiles(const std::vector<TileRow>& rows, int cell, int width, int& height, const TileLook& look = {}) {
+	const int headerH = look.headerHeight ? look.headerHeight : TileHeader, gapH = look.gap ? look.gap : TileGap;
 	std::vector<Placed> out;
 	const int           columns = std::max(1, width / cell), left = (width - columns * cell) / 2;
 	int                 y       = 0;
@@ -715,18 +743,18 @@ inline std::vector<Placed> PlaceTiles(const std::vector<TileRow>& rows, int cell
 		int         lines = 0;
 		for (const auto& tile : row.tiles)
 			if (!tile.label.empty()) lines = std::max(lines, std::max(1, tile.labelLines));
-		if (!row.header.empty()) out.push_back({ left, y, columns * cell, TileHeader, r, -1 }), y += TileHeader;
-		const int label = lines * TileLabel;
+		if (!row.header.empty()) out.push_back({ left, y, columns * cell, headerH, r, -1 }), y += headerH;
+		const int label = lines ? (look.labelHeight ? look.labelHeight : lines * TileLabel) : 0;
 		int       col = 0, line = 0;
 		for (int t = 0; t < static_cast<int>(row.tiles.size()); ++t) {
 			const auto& tile = row.tiles[static_cast<std::size_t>(t)];
 			const int   w = std::clamp(tile.width, 1, columns), h = std::max(1, tile.height);
 			if (tile.column >= 0) col = tile.column;
-			if (col + w > columns) col = 0, y += label + line * cell + TileGap / 2, line = 0; // the row goes on below
+			if (col + w > columns) col = 0, y += label + line * cell + gapH / 2, line = 0; // the row goes on below
 			out.push_back({ left + col * cell, y + label, w * cell, h * cell, r, t });
 			col += w, line = std::max(line, h);
 		}
-		y += label + line * cell + TileGap;
+		y += label + line * cell + gapH;
 	}
 	height = y;
 	return out;
@@ -735,7 +763,7 @@ inline std::vector<Placed> PlaceTiles(const std::vector<TileRow>& rows, int cell
 inline int TilesHeight(const Item& item, int width) {
 	if (!item.tileRows) return 0;
 	int height = 0;
-	(void)PlaceTiles(item.tileRows(), item.cellSize, width, height);
+	(void)PlaceTiles(item.tileRows(), item.cellSize, width, height, item.tileLook);
 	return height;
 }
 
@@ -1256,16 +1284,21 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 		if (!item.tileRows) break;
 		const auto rows   = item.tileRows();
 		int        height = 0, k = 0;
-		for (const auto& p : PlaceTiles(rows, item.cellSize, width, height)) {
+		const auto& look = item.tileLook;
+		for (const auto& p : PlaceTiles(rows, item.cellSize, width, height, look)) {
 			const int ty = y + p.y;
 			if (ty + p.h < 0 || ty - TileLabel > room) continue; // outside the room: not drawn
 			const auto tn = n + "T" + std::to_string(k++);
 			const int  tx = a.left + p.x;
 			if (p.tile < 0) {
 				const auto& row = rows[static_cast<std::size_t>(p.row)];
-				const std::string style = row.headerColor.empty() ? std::string(Style::Axis) : StyleColor(Style::Axis, row.headerColor);
-				out += D2RGui::Text(tn, tx, ty, p.w, TileHeader - 14, row.header, style.c_str());
-				out += Image(tn + "R", tx, ty + TileHeader - 14, StashKit::Divider(p.w));
+				const int hx = look.headerWidth ? a.left + look.headerLeft : tx, hw = look.headerWidth ? look.headerWidth : p.w, hh = p.h - look.dividerUp;
+				if (look.headerSize) out += TextBox(tn, hx, ty, hw, hh, row.header, { .color = row.headerColor.empty() ? "$FontColorGoldYellow" : row.headerColor, .size = look.headerSize, .h = "center" });
+				else {
+					const std::string style = row.headerColor.empty() ? std::string(Style::Axis) : StyleColor(Style::Axis, row.headerColor);
+					out += D2RGui::Text(tn, hx, ty, hw, hh, row.header, style.c_str());
+				}
+				out += Image(tn + "R", hx, ty + hh, StashKit::Divider(hw));
 				continue;
 			}
 			const auto& tile = rows[static_cast<std::size_t>(p.row)].tiles[static_cast<std::size_t>(p.tile)];
@@ -1273,9 +1306,14 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 			if (tile.draw) out += tile.draw({ .name = tn + "D", .x = tx, .y = ty, .width = p.w, .height = p.h });
 			else if (!tile.sprite.empty()) out += Image(tn + "A", tx, ty, tile.sprite);
 			if (!tile.label.empty()) {
-				const int lh = std::max(1, tile.labelLines) * TileLabel;
-				const std::string style = tile.labelColor.empty() ? std::string(Style::SmallValue) : StyleColor(Style::SmallValue, tile.labelColor);
-				out += D2RGui::Text(tn + "N", tx - 30, ty - lh, p.w + 60, lh, tile.label, style.c_str(), tile.labelTip);
+				const int lh = look.labelHeight ? look.labelHeight : std::max(1, tile.labelLines) * TileLabel, m = look.labelMargin;
+				if (look.labelSize) {
+					out += TextBox(tn + "N", tx - m, ty - lh, p.w + 2 * m, lh, tile.label, { .color = tile.labelColor.empty() ? "$FontColorWhite" : tile.labelColor, .size = look.labelSize, .h = "center", .v = look.labelV, .wrap = true });
+					if (!tile.labelTip.empty()) out += QuietButton(tn + "NT", tx - m, ty - lh, p.w + 2 * m, lh, {}, tile.labelTip);
+				} else {
+					const std::string style = tile.labelColor.empty() ? std::string(Style::SmallValue) : StyleColor(Style::SmallValue, tile.labelColor);
+					out += D2RGui::Text(tn + "N", tx - m, ty - lh, p.w + 2 * m, lh, tile.label, style.c_str(), tile.labelTip);
+				}
 			}
 			const std::string cmd = tile.click ? "a.k" + id + ":" + std::to_string(p.row) + ":" + std::to_string(p.tile) : std::string();
 			out += QuietButton(tn + "H", tx, ty, p.w, p.h, cmd, tile.tooltip);
@@ -1386,7 +1424,8 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 		look.pages = { .size = 76, .iconSize = 46, .gap = 12 };
 		look.menuX = a.left, look.menuY = a.top;
 		look.pageX = a.left, look.pageY = a.top;
-		if (OwnFramed() && Own().menusPlaced) { // where the frame says, the area as it is
+		if (s.window.menuLook) look = *s.window.menuLook; // all of it the window's
+		else if (OwnFramed() && Own().menusPlaced) { // where the frame says, the area as it is
 			const auto& o = Own();
 			look.menuX = o.menuX, look.menuY = o.menuY, look.pageX = o.pageX, look.pageY = o.pageY;
 			look.menus.vertical = o.menusVertical, look.pages.vertical = o.pagesVertical;
@@ -1431,7 +1470,7 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 			if ((item.kind == Item::Kind::Tiles || item.kind == Item::Kind::ItemGrid) && item.tileRows) {
 				const auto rows   = item.tileRows();
 				int        height = 0;
-				for (const auto& p : PlaceTiles(rows, item.cellSize, width, height))
+				for (const auto& p : PlaceTiles(rows, item.cellSize, width, height, item.tileLook))
 					if (p.tile >= 0 && rows[static_cast<std::size_t>(p.row)].tiles[static_cast<std::size_t>(p.tile)].id == s.reveal) scroll = at + p.y - room / 3, s.reveal.clear();
 			}
 			at += HeightOf(item, width);
@@ -1497,7 +1536,10 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 	}
 	if (s.drop >= 0 && s.drop < HeaderBase && s.dropY < a.top) s.drop = -1;
 	std::string c = fixed + (inside.empty() ? std::string() : Clip("Content", 0, a.top, a.bar - 6, room, inside));
-	c += s.bar->Layout(a.top, room, total, scroll);
+	if (OwnFramed() && Own().barHeight > 0) { // the frame's own track
+		const int steps = std::max(2, Own().barHeight / std::max(1, Own().barStep)), max = std::max(0, total - room);
+		c += s.bar->Steps(Own().barTop ? Own().barTop : a.top, steps, ScrollBar::ThumbSteps(steps, room, total), max, std::clamp(scroll, 0, max), std::max(1, max));
+	} else c += s.bar->Layout(a.top, room, total, scroll);
 	// the open drop-down, over everything
 	if (const Item* item = s.drop >= 0 ? ItemAt(v, s.drop) : nullptr) {
 		const int         cur  = item->index.Get();
@@ -1987,6 +2029,15 @@ inline auto OnConsole(D2R::Game::Client*, const D2RL::ConsoleCommandContext* com
 	return D2RL::ConsoleCommandResult::Handled;
 }
 
+// The scroll bar, where the frame puts it, in the window's look.
+inline void MakeBar(const Area& a) {
+	auto&     s     = Get();
+	const int width = OwnFramed() ? Own().barWidth : 30, step = OwnFramed() ? Own().barStep : 30;
+	s.bar           = std::make_unique<ScrollBar>("abar", a.bar, width, step, FrameX(), FrameY());
+	if (s.window.barLook) s.bar->SetLook(*s.window.barLook);
+	s.bar->OnScroll([](int scroll) { Scroll() = scroll, Show(); });
+}
+
 } // namespace Detail
 
 // While the plugin loads: the window, its panels and everything around it.
@@ -1997,8 +2048,7 @@ inline bool Start(const D2RL::PluginContext* context, const char* pluginId, Wind
 	s.window = std::move(window);
 	if (!Init(context, pluginId)) return false;
 	const Area a = AreaOf(s.window.frame);
-	s.bar        = std::make_unique<ScrollBar>("abar", a.bar, 30, 30, FrameX(), FrameY());
-	s.bar->OnScroll([](int scroll) { Scroll() = scroll, Show(); });
+	MakeBar(a);
 	SetNav();
 	if (!Hosted()) {
 		if (!s.pool.Register(Build, "View", std::max(2, s.window.views), D2RL::Panels::PanelFlags::CloseOnEscape, s.window.page, s.window.pageGrid)) return false;
@@ -2119,8 +2169,7 @@ inline void SetFrame(OwnFrame frame) {
 	auto& s      = Get();
 	s.window.own = std::move(frame);
 	const Area a = AreaOf(s.window.frame);
-	s.bar        = std::make_unique<ScrollBar>("abar", a.bar, 30, 30, FrameX(), FrameY());
-	s.bar->OnScroll([](int scroll) { Scroll() = scroll, Show(); });
+	MakeBar(a);
 	s.hostGrid.clear();
 	Refresh();
 }

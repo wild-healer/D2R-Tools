@@ -36,6 +36,8 @@ struct Look {
 	int  iconSize = 50;  // the icon inside it
 	int  gap      = 18;  // between two tabs
 	bool vertical = false;
+	int  span     = 0;   // spread: the tabs share this length (each step at most size + gap, a tab centred in its step), gapBefore's included
+	int  offset   = 0;   // the first tab this far along
 	Rgb  icon { 215, 200, 150 };   // the game's gold text colour
 	Rgb  current { 255, 240, 190 }; // the current tab's icon
 };
@@ -53,12 +55,23 @@ inline std::string Bar(const std::string& name, int x, int y, const std::vector<
 	std::string out;
 	const int   inset = (look.size - look.iconSize) / 2;
 	int         slot  = 0, extra = 0; // extra: the gaps before groups so far
+	int         step = look.size + look.gap, centre = 0;
+	if (look.span > 0) {
+		int count = 0, gaps = 0;
+		for (const auto& tab : tabs)
+			if (tab.shown) ++count, gaps += count > 1 ? tab.gapBefore : 0;
+		step   = std::min(step, (look.span - gaps) / std::max(1, count));
+		centre = (step - look.size) / 2;
+	}
+	Look along = look;
+	along.gap  = step - look.size;
 	for (std::size_t i = 0; i < tabs.size(); ++i) {
 		if (!tabs[i].shown) continue;
 		const bool on = static_cast<int>(i) == current;
 		const auto n  = name + std::to_string(i);
-		extra += tabs[i].gapBefore;
-		const int  tx = TabX(x, slot, look) + (look.vertical ? 0 : extra), ty = TabY(y, slot, look) + (look.vertical ? extra : 0);
+		if (slot > 0 || look.span <= 0) extra += tabs[i].gapBefore;
+		const int  shift = look.offset + centre + extra;
+		const int  tx = TabX(x, slot, along) + (look.vertical ? 0 : shift), ty = TabY(y, slot, along) + (look.vertical ? shift : 0);
 		++slot;
 		out += Button(n, tx, ty, StashKit::SlotButton(look.size, look.size, on), { .normal = 0, .pressed = 2, .hovered = 1 }, tabs[i].command, tabs[i].tooltip, look.size, look.size);
 		if (!tabs[i].badge.empty()) out += Image(n + "Badge", tx - tabs[i].badgePad, ty - tabs[i].badgePad, tabs[i].badge);
