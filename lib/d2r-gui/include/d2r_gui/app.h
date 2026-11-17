@@ -192,6 +192,9 @@ struct Tile {
 	int                                      column = -1; // its first column (-1: after the previous tile)
 	int                                      width = 1, height = 1;
 	std::string                              sprite, label, tooltip;
+	std::string                              labelColor; // a profile colour ("$FontColorGoldYellow"; default white)
+	std::string                              labelTip;   // the label's tooltip
+	int                                      labelLines = 1; // lines the label can wrap over (44 a line)
 	bool                                     slot = true; // the stash's empty slot under it
 	std::function<std::string(const Place&)> draw; // instead of the sprite: its widgets
 	std::function<void()>                    click, rightClick, middleClick;
@@ -200,6 +203,7 @@ struct Tile {
 
 struct TileRow {
 	std::string       header; // a gold title over the row (none: empty)
+	std::string       headerColor; // its colour (a profile colour; default gold)
 	std::vector<Tile> tiles;
 };
 
@@ -341,6 +345,10 @@ struct ItemGridSpec {
 	bool                                  hidden = false; // under the window's background: only pictures show (tiles)
 	std::function<std::vector<TileRow>()> tiles;   // drawn over it from its corner, 98 a cell (Tiles' rows; tile.column places them)
 	int                                   height = 0; // the row's height (0: the grid's, or the tiles' when taller)
+	bool                                  fixed = false; // at x, y in the panel whatever the page's scroll (the tiles scroll over it)
+	int                                   x = 0, y = 0;
+	std::function<void()>                 drop;  // a click on the tiles' area off any tile (the cursor's item put back, say)
+	std::string                           dropTip;
 	// With a Player Page Host area: the host's grid is used, not one of the
 	// window's own. `host` gets the area's layout (a panel at the grid's place
 	// under the window, "@PANEL@" and "@GRID@") each time it moves, for
@@ -465,6 +473,8 @@ struct Window {
 	std::optional<InventoryLink>      inventory;      // a button on the inventory that opens it
 	std::optional<ItemCells::Options> cells;          // the Cells component's item cells
 	std::optional<HostView>           host;           // on a Player Page Host area (Stash frame)
+	D2RL::Inventory::PageRegistrationHandle page = D2RL::Inventory::InvalidHandle; // the plugin's own page: its grid shows in every panel's item grid named
+	std::string                       pageGrid;       // this (ItemGrid's name)
 	std::string                       restartNote = "* applies after a restart";
 	int                               views       = 16; // panels in the pool
 	int                               priority    = 10;
@@ -680,6 +690,15 @@ inline int NoteLine() { return std::max(36, Font::LineHeight(false)); }
 inline int Lines(const std::string& text, int width) { return std::max(1, Font::WrappedLines(text, width, std::max(20, width / 17), false)); }
 inline int NoteHeight(const Item& item, int width) { return item.note.empty() ? 0 : Lines(item.note, width) * NoteLine(); }
 
+// A text style with another colour (a profile colour such as "$FontColorGreen").
+inline std::string StyleColor(const char* style, const std::string& color) {
+	std::string out = style;
+	const auto  at  = out.find("\"fontColor\": \"");
+	if (at == std::string::npos) return out;
+	const auto from = at + 14, to = out.find('"', from);
+	return to == std::string::npos ? out : out.replace(from, to - from, color);
+}
+
 // Where a Tiles component's tiles go (y from its top), and its height.
 struct Placed {
 	int x, y, w, h, row, tile;
@@ -692,10 +711,11 @@ inline std::vector<Placed> PlaceTiles(const std::vector<TileRow>& rows, int cell
 	int                 y       = 0;
 	for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
 		const auto& row      = rows[static_cast<std::size_t>(r)];
-		bool        labelled = false;
-		for (const auto& tile : row.tiles) labelled = labelled || !tile.label.empty();
+		int         lines = 0;
+		for (const auto& tile : row.tiles)
+			if (!tile.label.empty()) lines = std::max(lines, std::max(1, tile.labelLines));
 		if (!row.header.empty()) out.push_back({ left, y, columns * cell, TileHeader, r, -1 }), y += TileHeader;
-		const int label = labelled ? TileLabel : 0;
+		const int label = lines * TileLabel;
 		int       col = 0, line = 0;
 		for (int t = 0; t < static_cast<int>(row.tiles.size()); ++t) {
 			const auto& tile = row.tiles[static_cast<std::size_t>(t)];
@@ -974,7 +994,11 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 		tiles.kind = Item::Kind::Tiles;
 		Area at    = a;
 		at.right   = a.left + item.itemGrid->columns * item.cellSize;
-		return Draw(tiles, i, y, origin, room, at);
+		if (item.itemGrid->drop) { // under the tiles' buttons: a click off any tile
+			const int top = std::max(y, 0), bottom = std::min(y + HeightOf(item, width), room);
+			if (bottom > top) out += QuietButton(n + "Drop", a.left, top, at.right - a.left, bottom - top, "a.g" + id, item.itemGrid->dropTip);
+		}
+		return out + Draw(tiles, i, y, origin, room, at);
 	}
 	if (AboveOf(item, width)) { // the label on its own line, the control under it
 		auto rest = item;
@@ -1236,7 +1260,9 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 			const auto tn = n + "T" + std::to_string(k++);
 			const int  tx = a.left + p.x;
 			if (p.tile < 0) {
-				out += D2RGui::Text(tn, tx, ty, p.w, TileHeader - 14, rows[static_cast<std::size_t>(p.row)].header, Style::Axis);
+				const auto& row = rows[static_cast<std::size_t>(p.row)];
+				const std::string style = row.headerColor.empty() ? std::string(Style::Axis) : StyleColor(Style::Axis, row.headerColor);
+				out += D2RGui::Text(tn, tx, ty, p.w, TileHeader - 14, row.header, style.c_str());
 				out += Image(tn + "R", tx, ty + TileHeader - 14, StashKit::Divider(p.w));
 				continue;
 			}
@@ -1244,7 +1270,11 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 			if (tile.slot) out += Image(tn + "S", tx, ty, StashKit::Slot(p.w, p.h));
 			if (tile.draw) out += tile.draw({ .name = tn + "D", .x = tx, .y = ty, .width = p.w, .height = p.h });
 			else if (!tile.sprite.empty()) out += Image(tn + "A", tx, ty, tile.sprite);
-			if (!tile.label.empty()) out += D2RGui::Text(tn + "N", tx - 30, ty - TileLabel, p.w + 60, TileLabel, tile.label, Style::SmallValue);
+			if (!tile.label.empty()) {
+				const int lh = std::max(1, tile.labelLines) * TileLabel;
+				const std::string style = tile.labelColor.empty() ? std::string(Style::SmallValue) : StyleColor(Style::SmallValue, tile.labelColor);
+				out += D2RGui::Text(tn + "N", tx - 30, ty - lh, p.w + 60, lh, tile.label, style.c_str(), tile.labelTip);
+			}
 			const std::string cmd = tile.click ? "a.k" + id + ":" + std::to_string(p.row) + ":" + std::to_string(p.tile) : std::string();
 			out += QuietButton(tn + "H", tx, ty, p.w, p.h, cmd, tile.tooltip);
 			if (tile.rightClick || tile.middleClick || tile.hover) {
@@ -1447,8 +1477,8 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 		if (item.kind == Item::Kind::ItemGrid && item.itemGrid) { // the real grid, outside the clip, off screen unless all of it shows
 			const auto& g     = *item.itemGrid;
 			const int   at    = y - scroll, gw = g.columns * item.cellSize, gh = g.rows * item.cellSize;
-			const bool  shown = at >= 0 && at + gh <= room;
-			const int   gx = shown ? in.left : -20000, gy = a.top + at;
+			const bool  shown = g.fixed || (at >= 0 && at + gh <= room);
+			const int   gx = !shown ? -20000 : g.fixed ? g.x : in.left, gy = g.fixed ? g.y : a.top + at;
 			if (g.host) {
 				const int   priority = (s.onOver ? OverPriority : s.window.priority) - 1;
 				std::string layout   = Panel("@PANEL@", FrameX() + gx, FrameY() + gy, gw, gh, "@GRID@", priority, LeftAnchor);
@@ -1881,6 +1911,9 @@ inline void OnCommand(const std::string& command) {
 			if (const auto& click = rows[static_cast<std::size_t>(r)].tiles[static_cast<std::size_t>(t)].click) click();
 		break;
 	}
+	case 'g': // off the tiles of an item grid
+		if (item.itemGrid && item.itemGrid->drop) item.itemGrid->drop();
+		break;
 	case 'q': { // a square
 		int k = 0;
 		if (rest.size() > 1 && ParseInt(rest.substr(1), k) && k < static_cast<int>(item.squares.size()))
@@ -1966,10 +1999,10 @@ inline bool Start(const D2RL::PluginContext* context, const char* pluginId, Wind
 	s.bar->OnScroll([](int scroll) { Scroll() = scroll, Show(); });
 	SetNav();
 	if (!Hosted()) {
-		if (!s.pool.Register(Build, "View", std::max(2, s.window.views))) return false;
+		if (!s.pool.Register(Build, "View", std::max(2, s.window.views), D2RL::Panels::PanelFlags::CloseOnEscape, s.window.page, s.window.pageGrid)) return false;
 		s.pool.OnShown([] { SyncCells(), TypeFocus(); });
 		if (s.window.overStash) {
-			if (s.over.Register(Build, "Over", 4)) s.over.OnShown([] { SyncCells(), TypeFocus(); });
+			if (s.over.Register(Build, "Over", 4, D2RL::Panels::PanelFlags::CloseOnEscape, s.window.page, s.window.pageGrid)) s.over.OnShown([] { SyncCells(), TypeFocus(); });
 			else Log(true, "d2r-gui: no panels for the window over the stash; it closes the stash instead");
 		}
 	}
@@ -2073,6 +2106,20 @@ inline void OpenOn(Page page) {
 inline void SetMenus(std::vector<Menu> menus) {
 	Detail::Get().window.menus = std::move(menus);
 	Detail::SetNav();
+	Refresh();
+}
+
+// UI thread: Frame::Own's frame moved or changed (a compact layout, the menu
+// and page columns swapped): the window, its scroll bar and an ItemGrid host's
+// layout follow at once.
+inline void SetFrame(OwnFrame frame) {
+	using namespace Detail;
+	auto& s      = Get();
+	s.window.own = std::move(frame);
+	const Area a = AreaOf(s.window.frame);
+	s.bar        = std::make_unique<ScrollBar>("abar", a.bar, 30, 30, FrameX(), FrameY());
+	s.bar->OnScroll([](int scroll) { Scroll() = scroll, Show(); });
+	s.hostGrid.clear();
 	Refresh();
 }
 

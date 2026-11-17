@@ -28,3 +28,8 @@
 * Long tooltips wrap over several lines instead of running off the screen.
 * App windows can have a frame of the plugin's own art and size (Frame::Own), with the menus where the frame says.
 * App::ItemGrid puts the page's real item grid on a page, with pictures over it, or sends a Player Page Host area its place.
+* App windows can show the plugin's own player page in their item grid (window.page, window.pageGrid).
+* ItemGrid can stay at a fixed place while its tiles scroll, and sends a command for clicks off its tiles.
+* Tile labels can wrap over several lines, take a colour and a tooltip; tile row titles take a colour.
+* Tabs can show item art, look see-through, leave a gap before a group and pad their badge.
+* App::SetFrame moves or changes an own frame at runtime.

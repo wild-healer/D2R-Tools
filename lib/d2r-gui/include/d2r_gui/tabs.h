@@ -22,7 +22,12 @@ struct Tab {
 	std::string tooltip; // its tooltip (text or "@<id>:<key>")
 	std::string command; // what a click sends
 	std::string sprite;  // instead of `icon`: any sprite name (escaped, as SpriteName gives), drawn at iconSize, e.g. item art
-	std::string badge;   // a sprite drawn over the button under the icon (a progress ring), `size` square
+	std::string badge;   // a sprite drawn over the button under the icon (a progress ring), `size` + 2 * badgePad square
+	int         badgePad = 0; // how far the badge reaches past the button on each side
+	std::string art;     // instead of `icon`: an item art path (raw, as in the game's files), artWidth x artHeight cells of artUnit, scaled to iconSize
+	int         artWidth = 1, artHeight = 1, artUnit = 98;
+	bool        seeThrough = false; // the icon or art drawn see-through (ethereal items' look)
+	int         gapBefore = 0;      // more room before this tab (a new group)
 	bool        shown = true;
 };
 
@@ -47,17 +52,25 @@ inline int Length(std::size_t count, const Look& look = {}) { return count ? sta
 inline std::string Bar(const std::string& name, int x, int y, const std::vector<Tab>& tabs, int current, const Look& look = {}) {
 	std::string out;
 	const int   inset = (look.size - look.iconSize) / 2;
-	int         slot  = 0;
+	int         slot  = 0, extra = 0; // extra: the gaps before groups so far
 	for (std::size_t i = 0; i < tabs.size(); ++i) {
 		if (!tabs[i].shown) continue;
 		const bool on = static_cast<int>(i) == current;
 		const auto n  = name + std::to_string(i);
-		const int  tx = TabX(x, slot, look), ty = TabY(y, slot, look);
+		extra += tabs[i].gapBefore;
+		const int  tx = TabX(x, slot, look) + (look.vertical ? 0 : extra), ty = TabY(y, slot, look) + (look.vertical ? extra : 0);
 		++slot;
 		out += Button(n, tx, ty, StashKit::SlotButton(look.size, look.size, on), { .normal = 0, .pressed = 2, .hovered = 1 }, tabs[i].command, tabs[i].tooltip, look.size, look.size);
-		if (!tabs[i].badge.empty()) out += Image(n + "Badge", tx, ty, tabs[i].badge);
+		if (!tabs[i].badge.empty()) out += Image(n + "Badge", tx - tabs[i].badgePad, ty - tabs[i].badgePad, tabs[i].badge);
+		const std::string look2 = tabs[i].seeThrough ? R"(, "transparency": 0.55)" : "";
+		if (!tabs[i].art.empty()) {
+			const int    w = std::max(1, tabs[i].artWidth), h = std::max(1, tabs[i].artHeight), unit = std::max(1, tabs[i].artUnit);
+			const double scale = static_cast<double>(look.iconSize) / (std::max(w, h) * unit);
+			out += ScaledImage(n + "Icon", tx + inset + static_cast<int>((look.iconSize - w * unit * scale) / 2), ty + inset + static_cast<int>((look.iconSize - h * unit * scale) / 2), scale, Path(tabs[i].art), look2);
+			continue;
+		}
 		const auto icon = !tabs[i].sprite.empty() ? tabs[i].sprite : Icons::Sprite(tabs[i].icon.c_str(), look.iconSize, on ? look.current : look.icon);
-		if (!icon.empty()) out += Image(n + "Icon", tx + inset, ty + inset, icon);
+		if (!icon.empty()) out += Image(n + "Icon", tx + inset, ty + inset, icon, look2);
 	}
 	return out;
 }
