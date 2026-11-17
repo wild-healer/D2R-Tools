@@ -37,3 +37,4 @@
 * Windows choose their tab bars' look (window.menuLook, Menu.pageLook); tabs can spread over a length with gaps between groups.
 * Own frames can have a stone cover over their picture and a scroll bar of their own place and size (window.barLook for its art).
 * Tiles take a look (Item.Looks / ItemGridSpec.look): label box, margin and font size, gaps, row title height, font, place and divider.
+* Table values are centred under their column titles (the first column stays left); GridColumn.align picks another side.

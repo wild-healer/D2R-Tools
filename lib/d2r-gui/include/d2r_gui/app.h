@@ -228,6 +228,7 @@ struct GridCell {
 struct GridColumn {
 	std::string title;
 	int         width = 0; // 0: the room left, shared
+	const char* align = nullptr; // its title and cells: "left", "center" or "right" (default: the first column left, the others centred)
 };
 
 // A part of a ring chart.
@@ -777,6 +778,11 @@ constexpr int AboveLine = 46, GridLine = 56, CardInset = 26;
 // own text box in its colour.
 inline constexpr const char* CodeMark = "\xC3\xBF" "c";
 inline bool HasCodes(const std::string& text) { return text.find(CodeMark) != std::string::npos; }
+// The text without its colour codes.
+inline std::string Uncoded(std::string text) {
+	for (auto at = text.find(CodeMark); at != std::string::npos; at = text.find(CodeMark, at)) text.erase(at, 4);
+	return text;
+}
 
 inline std::string ColorJson(const std::string& color) { return !color.empty() && color[0] == '{' ? color : "\"" + color + "\""; }
 
@@ -1059,11 +1065,17 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 		if (!item.label.empty()) out += D2RGui::Text(n + "T", a.left, at, width, 60, item.label, Style::Label, item.tooltip), at += 64;
 		const auto widths = GridWidths(item.gridColumns2, width);
 		int        x      = a.left;
+		const auto alignOf = [&](int c) -> std::string {
+			const char* align = item.gridColumns2[static_cast<std::size_t>(c)].align;
+			return align ? align : c == 0 ? "left" : "center";
+		};
 		for (int c = 0; c < static_cast<int>(widths.size()); ++c) {
 			const auto& title = item.gridColumns2[static_cast<std::size_t>(c)].title;
 			const int   w     = widths[static_cast<std::size_t>(c)];
 			const auto  shown = FitWidth(title, w - 20, true);
-			out += D2RGui::Text(n + "H" + std::to_string(c), x + 10, at, w - 20, 52, shown, Style::Axis, shown != title ? title : std::string());
+			std::string style = Style::Axis;
+			if (const auto h = alignOf(c); h != "center") style.replace(style.find("\"h\": \"center\""), 13, "\"h\": \"" + h + "\"");
+			out += D2RGui::Text(n + "H" + std::to_string(c), x + (alignOf(c) == "left" ? 14 : 10), at, w - 20, 52, shown, style.c_str(), shown != title ? title : std::string());
 			x += w;
 		}
 		out += Image(n + "HR", a.left, at + 50, StashKit::Divider(width));
@@ -1081,10 +1093,14 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 				const int         room  = x + w - tx - 12;
 				const std::string base  = cell.color.empty() ? "$FontColorLightGold" : cell.color;
 				const std::string cname = rn + "C" + std::to_string(c);
-				if (HasCodes(cell.text)) out += RichText(cname, tx, at, room, GridLine, cell.text, base, false, false, nullptr, cell.tooltip);
-				else {
+				const std::string h     = alignOf(c);
+				if (HasCodes(cell.text)) {
+					const int used = std::min(room, Font::TextWidth(Uncoded(cell.text), false));
+					const int sx   = h == "center" ? tx + (room - used) / 2 : h == "right" ? tx + room - used : tx;
+					out += RichText(cname, sx, at, room - (sx - tx), GridLine, cell.text, base, false, false, nullptr, cell.tooltip);
+				} else {
 					const auto shown = FitWidth(cell.text, room, false);
-					const auto style = std::string(R"({"fontColor": )") + ColorJson(base) + R"(, "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": "left", "v": "center"}})";
+					const auto style = std::string(R"({"fontColor": )") + ColorJson(base) + R"(, "pointSize": "$SmallFontSize", "dropShadow": "$DefaultDropShadow", "alignment": {"h": ")" + h + R"(", "v": "center"}})";
 					out += D2RGui::Text(cname, tx, at, room + 10, GridLine, shown, style.c_str(), !cell.tooltip.empty() ? cell.tooltip : (shown != cell.text ? cell.text : std::string()));
 				}
 				x += w;
