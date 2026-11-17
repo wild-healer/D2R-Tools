@@ -478,6 +478,7 @@ struct Window {
 	std::string                       restartNote = "* applies after a restart";
 	int                               views       = 16; // panels in the pool
 	int                               priority    = 10;
+	double                            wheelRight  = 0.45; // the wheel scrolls the window left of this share of the game window's width
 	bool                              mouseAlways = false; // `mouse` (and the hook) from the first game on, not from the first open
 	bool                              overStash   = false; // opened while the stash is open: over it (priority 130), the stash left open, closing with it as the cube does
 
@@ -1679,7 +1680,7 @@ inline void Hook() {
 	auto& s = Get();
 	if (s.hooked || Hosted()) return;
 	s.hooked = true;
-	WindowHook::Start({ .active = [] { return Get().open.load(); }, .wheel = Wheel, .extra = Mouse });
+	WindowHook::Start({ .active = [] { return Get().open.load(); }, .wheel = Wheel, .wheelRight = Get().window.wheelRight, .extra = Mouse });
 	s.bar->Attach();
 }
 

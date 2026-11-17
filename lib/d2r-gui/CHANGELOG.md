@@ -33,3 +33,4 @@
 * Tile labels can wrap over several lines, take a colour and a tooltip; tile row titles take a colour.
 * Tabs can show item art, look see-through, leave a gap before a group and pad their badge.
 * App::SetFrame moves or changes an own frame at runtime.
+* window.wheelRight sets how far across the screen the wheel scrolls the window.
