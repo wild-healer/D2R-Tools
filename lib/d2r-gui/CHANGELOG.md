@@ -26,3 +26,5 @@
 * Table and list rows have flat stripes behind them instead of a button sprite.
 * Cards are a flat dark panel with a thin line around it instead of a bevelled box sprite.
 * Long tooltips wrap over several lines instead of running off the screen.
+* App windows can have a frame of the plugin's own art and size (Frame::Own), with the menus where the frame says.
+* App::ItemGrid puts the page's real item grid on a page, with pictures over it, or sends a Player Page Host area its place.

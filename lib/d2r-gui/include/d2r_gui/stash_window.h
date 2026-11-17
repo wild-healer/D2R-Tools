@@ -92,8 +92,8 @@ inline std::string FrameSprite() {
 // "@PANEL@"), the title, then `children` (rects in the window). The close
 // button sends `closeCommand` to the plugin (commands.h), or, when it is
 // empty, closes the panel as the game's own close buttons do.
-inline std::string Layout(const std::string& panelName, const std::string& title, const std::string& closeCommand, const std::string& children, int priority = 10) {
-	std::string c = ClickCatcher("PanelClickCatcher", 0, 0, Width, Height);
+inline std::string Layout(const std::string& panelName, const std::string& title, const std::string& closeCommand, const std::string& children, int priority = 10, const std::string& under = {}) {
+	std::string c = ClickCatcher("PanelClickCatcher", 0, 0, Width, Height) + under; // under: widgets below the background
 	if (const auto frame = FrameSprite(); !frame.empty()) c += Image("Background", 0, 0, frame);
 	c += R"(, {"type": "TextBoxWidget", "name": "Title", "fields": {)" + Rect(0, TitleY, Width, TitleHeight) + R"(, "text": )" + Json(GameText(title))
 	   + R"(, "style": {"fontColor": "$FontColorGoldYellow", "pointSize": 52, "dropShadow": "$DefaultDropShadow", "alignment": {"h": "center", "v": "center"}}}})";

@@ -56,6 +56,8 @@
 //   List(rows, onClick)                 rows: icon, two lines, a value or button, a gear
 //   Cells(text)                         the window's ItemCells, a text beside each
 //   HostGrid(columns, rows)             the Player Page Host area's grid (window.host)
+//   ItemGrid(spec)                      the page's real item grid (items dragged in
+//                                       and out), tiles drawn over it, or a host's grid
 //   Tiles(rows)                         rows of item tiles (any size in cells, a label
 //                                       above, left/right/middle clicks, hover; App::Reveal)
 //   Chart(slices, size, big, small)     a ring chart with text in it
@@ -69,6 +71,9 @@
 // puts an icon button before a field; App::PickIcon shows a grid of icons to
 // pick from. List rows can be a tree (indent, an open/close arrow, a check box
 // that can be partly ticked) and carry buttons (.confirm: a second click).
+//
+// window.frame = Frame::Own with window.own: a frame of the plugin's own art
+// (its size, place, components' area, title, close button and menus' places).
 //
 // window.overStash: opened while the stash is open, the window goes over it
 // (the stash stays open under it, as under the cube) and closes with it.
@@ -92,6 +97,7 @@
 #include "left_panel.h"
 #include "menus.h"
 #include "panel_pool.h"
+#include "png.h"
 #include "scroll_bar.h"
 #include "stash_kit.h"
 #include "stash_window.h"
@@ -222,7 +228,7 @@ struct Square {
 };
 
 struct Item {
-	enum class Kind { Section, Text, Check, Choice, Number, Position, Table, Field, Value, Action, Adder, List, Cells, HostGrid, Tiles, Chart, Squares, Legend, Buttons, Grid, Bullet, CardStart, CardEnd, Custom };
+	enum class Kind { Section, Text, Check, Choice, Number, Position, Table, Field, Value, Action, Adder, List, Cells, HostGrid, ItemGrid, Tiles, Chart, Squares, Legend, Buttons, Grid, Bullet, CardStart, CardEnd, Custom };
 	Kind        kind = Kind::Text;
 	std::string label, tooltip, note, button, hint, value;
 	bool        restart = false, confirm = false, arrow = false, draft = false, clearable = false, filter = false, warn = false, above = false;
@@ -252,6 +258,7 @@ struct Item {
 	std::function<void(int row)>             pick;
 	std::string                              empty;    // List: shown when there is no row
 	std::function<std::string(int cell)>     cellText; // Cells
+	std::shared_ptr<const struct ItemGridSpec> itemGrid; // ItemGrid
 	int*                                     gridColumns = nullptr;
 	int*                                     gridRows    = nullptr;
 	std::function<std::string(const Place&)> custom;
@@ -324,6 +331,28 @@ inline Item Adder(std::string label, std::string count, std::function<void()> ad
 inline Item List(std::function<std::vector<Row>()> rows, std::function<void(int row)> pick = {}) { return { .kind = Item::Kind::List, .rows = std::move(rows), .pick = std::move(pick) }; }
 inline Item Cells(std::function<std::string(int cell)> text = {}) { return { .kind = Item::Kind::Cells, .cellText = std::move(text) }; }
 inline Item HostGrid(int* columns, int* rows) { return { .kind = Item::Kind::HostGrid, .gridColumns = columns, .gridRows = rows }; }
+// The page's real item grid: the game's InventoryGridWidget, columns x rows
+// cells of 98 at the area's left, that players drag items in and out of
+// (Gui::TileGrid::Wrap finds it by `fields`, e.g. TileGrid::MarkerFields).
+struct ItemGridSpec {
+	std::string                           name;    // the widget's name, fixed ("<plugin id>/Grid")
+	int                                   columns = 16, rows = 16;
+	std::string                           fields;  // more of its fields
+	bool                                  hidden = false; // under the window's background: only pictures show (tiles)
+	std::function<std::vector<TileRow>()> tiles;   // drawn over it from its corner, 98 a cell (Tiles' rows; tile.column places them)
+	int                                   height = 0; // the row's height (0: the grid's, or the tiles' when taller)
+	// With a Player Page Host area: the host's grid is used, not one of the
+	// window's own. `host` gets the area's layout (a panel at the grid's place
+	// under the window, "@PANEL@" and "@GRID@") each time it moves, for
+	// Host->setAreaLayout.
+	std::function<void(const std::string& layout)> host;
+};
+inline Item ItemGrid(ItemGridSpec spec) {
+	Item item { .kind = Item::Kind::ItemGrid, .cellSize = 98 };
+	item.tileRows = spec.tiles;
+	item.itemGrid = std::make_shared<const ItemGridSpec>(std::move(spec));
+	return item;
+}
 // A read-only table: a title, column headers, rows of text cells.
 inline Item Grid(std::string title, std::vector<GridColumn> columns, std::vector<std::vector<GridCell>> rows) {
 	Item item { .kind = Item::Kind::Grid, .label = std::move(title) };
@@ -389,7 +418,23 @@ struct Menu {
 	Content           header, footer;
 };
 
-enum class Frame { Stash, Character };
+enum class Frame { Stash, Character, Own };
+
+// A frame of the plugin's own art (Frame::Own; panel units).
+struct OwnFrame {
+	const unsigned char* png = nullptr; // the picture (a PNG compiled into the plugin) and its end
+	const unsigned char* pngEnd = nullptr;
+	int  width = 0, height = 0;          // the panel
+	int  x = 236, y = -651;              // its place from the left panel anchor
+	int  artX = 0, artY = 0;             // the picture's place in the panel
+	int  left = 0, top = 0, right = 0, bottom = 0; // the components' area
+	int  bar = 0;                        // the scroll bar's x (0: right + 10)
+	int  titleX = 0, titleY = 74, titleWidth = 0, titleHeight = 84; // the title (titleWidth 0: the panel's)
+	int  closeX = -1, closeY = 9;        // the close button (-1: none)
+	bool menusPlaced = false;            // the menus and pages where these say, not in rows over the area:
+	int  menuX = 0, menuY = 0, pageX = 0, pageY = 0;
+	bool menusVertical = false, pagesVertical = true;
+};
 
 struct InventoryLink {
 	std::string sprite, tooltip; // the button's sprite (frames 0 normal, 1 pressed, 3 hovered; 52 x 60)
@@ -408,6 +453,7 @@ struct HostView {
 struct Window {
 	std::string                       title;
 	Frame                             frame = Frame::Stash;
+	OwnFrame                          own;            // Frame::Own's
 	std::vector<Menu>                 menus; // or one page:
 	std::vector<Item>                 items;
 	Content                           content;
@@ -441,15 +487,23 @@ struct Area {
 	int left, top, right, bottom, bar;
 };
 
+inline const OwnFrame& Own();
 inline Area AreaOf(Frame frame) {
 	if (frame == Frame::Character) return { 105, 180, 1044, 1360, 1054 };
+	if (frame == Frame::Own) {
+		const auto& o = Own();
+		return { o.left, o.top, o.right, o.bottom, o.bar ? o.bar : o.right + 10 };
+	}
 	return { StashWindow::InnerX + 30, StashWindow::InnerY + 12, StashWindow::InnerX + StashWindow::InnerWidth - 60, StashWindow::InnerY + StashWindow::InnerHeight - 20,
 		     StashWindow::InnerX + StashWindow::InnerWidth - 50 };
 }
 
 constexpr int RowHeight = 70, BoxHeight = 56, LineHeight = 52, ListLines = 10, ListRow = 80, WheelStep = 120, ListAt = 12;
 constexpr int TableTitle = 64, TableHead = 72, TableLine = 84, TableCheck = 79, ArrowSize = 56, NoticeHeight = 50, BackHeight = 120;
-constexpr int PanelW = StashWindow::Width, PanelH = StashWindow::Height;
+inline int PanelW();
+inline int PanelH();
+inline int FrameX();
+inline int FrameY();
 constexpr int HeaderBase = 1000, FooterBase = 2000;
 
 struct Level {
@@ -504,6 +558,7 @@ struct State {
 	std::optional<Picker>      picker;
 	std::string                draft;    // a Draft field's text while typing
 	std::string                original; // a field's text when typing began
+	std::string                hostGrid; // the last layout sent to an ItemGrid's host
 };
 
 inline State& Get() {
@@ -512,6 +567,38 @@ inline State& Get() {
 }
 
 inline bool Hosted() { return Get().window.host.has_value(); }
+inline bool OwnFramed() { return !Hosted() && Get().window.frame == Frame::Own; }
+inline const OwnFrame& Own() { return Get().window.own; }
+inline int PanelW() { return OwnFramed() ? Own().width : StashWindow::Width; }
+inline int PanelH() { return OwnFramed() ? Own().height : StashWindow::Height; }
+inline int FrameX() { return OwnFramed() ? Own().x : StashWindow::X; }
+inline int FrameY() { return OwnFramed() ? Own().y : StashWindow::Y; }
+
+// Frame::Own's picture as a sprite, registered the first time (empty if it could not be).
+inline std::string OwnSprite() {
+	static std::mutex lock;
+	static bool       made = false, failed = false;
+	std::lock_guard   guard(lock);
+	if (!made && !failed) {
+		Picture picture;
+		const auto& o = Own();
+		if (!o.png || !o.pngEnd || !DecodePng(o.png, o.pngEnd, picture) || !RegisterSprite("a-frame", { picture })) failed = true;
+		else made = true;
+	}
+	return made ? SpriteName("a-frame") : std::string();
+}
+
+// Frame::Own's panel: `under` below its picture, then the title, the close button and `children`.
+inline std::string OwnLayout(const std::string& panelName, const std::string& title, const std::string& children, int priority, const std::string& under) {
+	const auto& o = Own();
+	std::string c = ClickCatcher("PanelClickCatcher", 0, 0, o.width, o.height) + under;
+	if (const auto sprite = OwnSprite(); !sprite.empty()) c += Image("Background", o.artX, o.artY, sprite);
+	if (!title.empty() && o.titleHeight > 0)
+		c += R"(, {"type": "TextBoxWidget", "name": "Title", "fields": {)" + Rect(o.titleX, o.titleY, o.titleWidth ? o.titleWidth : o.width, o.titleHeight) + R"(, "text": )" + Json(GameText(title))
+		   + R"(, "style": {"fontColor": "$FontColorGoldYellow", "pointSize": 52, "dropShadow": "$DefaultDropShadow", "alignment": {"h": "center", "v": "center"}}}})";
+	if (o.closeX >= 0) c += CloseButton("CloseButton", o.closeX, o.closeY, "a.close");
+	return Panel(panelName, o.x, o.y, o.width, o.height, c + children, priority, LeftAnchor);
+}
 inline PanelPool& Pool() { return Get().onOver ? Get().over : Get().pool; }
 constexpr int OverPriority = 130; // over the stash: above the panels other plugins put on it (Stash Tab Dropdown: 110, 120)
 inline bool Long(const Item& item) { return item.filter || item.entries.size() > ListAt; }
@@ -787,6 +874,11 @@ inline int HeightOf(const Item& item, int width) {
 	case Item::Kind::Cells: return Get().hasCells ? (Get().window.cells->vertical ? ItemCells::Count() * ItemCells::Cell : ItemCells::Cell) + 20 : 0;
 	case Item::Kind::HostGrid: return 0; // drawn outside the scrolled part
 	case Item::Kind::Tiles: return TilesHeight(item, width);
+	case Item::Kind::ItemGrid: {
+		if (!item.itemGrid) return 0;
+		const auto& g = *item.itemGrid;
+		return std::max(g.height ? g.height : g.rows * item.cellSize, TilesHeight(item, g.columns * item.cellSize));
+	}
 	case Item::Kind::Chart: return item.size + (item.small.empty() ? 20 : 20);
 	case Item::Kind::Squares: {
 		const int count = static_cast<int>(item.squares.size()), per = std::max(1, (width + 36) / (item.size + 36));
@@ -876,6 +968,14 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 	const int         width = a.right - a.left;
 	const int         end   = item.remove ? a.right - 70 : a.right; // a remove button takes the row's end
 	std::string       out;
+	if (item.kind == Item::Kind::ItemGrid) { // its tiles, over the grid (Build places the grid)
+		if (!item.tileRows || !item.itemGrid) return {};
+		Item tiles = item;
+		tiles.kind = Item::Kind::Tiles;
+		Area at    = a;
+		at.right   = a.left + item.itemGrid->columns * item.cellSize;
+		return Draw(tiles, i, y, origin, room, at);
+	}
 	if (AboveOf(item, width)) { // the label on its own line, the control under it
 		auto rest = item;
 		rest.label.clear(), rest.restart = false;
@@ -1119,12 +1219,13 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 		const int  count = ItemCells::Count(), cell = ItemCells::Cell;
 		const int  height = vertical ? count * cell : cell;
 		// an overlay: shown only while all of it is in the room
-		if (y >= 0 && y + height <= room) s.cellsWanted = true, s.cellsX = StashWindow::X + a.left, s.cellsY = StashWindow::Y + origin + y;
+		if (y >= 0 && y + height <= room) s.cellsWanted = true, s.cellsX = FrameX() + a.left, s.cellsY = FrameY() + origin + y;
 		if (vertical && item.cellText)
 			for (int c = 0; c < count; ++c) out += D2RGui::Text(n + "C" + std::to_string(c), a.left + cell + 30, y + c * cell, width - cell - 30, cell, item.cellText(c), Style::Label);
 		break;
 	}
 	case Item::Kind::HostGrid: break; // Build draws it
+	case Item::Kind::ItemGrid: break; // drawn above as Tiles
 	case Item::Kind::Tiles: {
 		if (!item.tileRows) break;
 		const auto rows   = item.tileRows();
@@ -1213,7 +1314,7 @@ inline int DrawFixed(const std::vector<Item>& items, int base, int y, const Area
 	for (int k = 0; k < static_cast<int>(items.size()); ++k) {
 		const auto& item = items[static_cast<std::size_t>(k)];
 		if (!Visible(item)) continue;
-		out += Draw(item, base + k, y, 0, PanelH, a);
+		out += Draw(item, base + k, y, 0, PanelH(), a);
 		y += HeightOf(item, a.right - a.left);
 	}
 	return y;
@@ -1253,9 +1354,15 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 		look.pages = { .size = 76, .iconSize = 46, .gap = 12 };
 		look.menuX = a.left, look.menuY = a.top;
 		look.pageX = a.left, look.pageY = a.top;
-		if (s.window.menus.size() > 1) a.top += look.menus.size + 20, look.pageY = a.top;
-		const int m = s.nav.Menu();
-		if (m >= 0 && !s.window.menus[static_cast<std::size_t>(m)].pages.empty()) a.top += look.pages.size + 20;
+		if (OwnFramed() && Own().menusPlaced) { // where the frame says, the area as it is
+			const auto& o = Own();
+			look.menuX = o.menuX, look.menuY = o.menuY, look.pageX = o.pageX, look.pageY = o.pageY;
+			look.menus.vertical = o.menusVertical, look.pages.vertical = o.pagesVertical;
+		} else {
+			if (s.window.menus.size() > 1) a.top += look.menus.size + 20, look.pageY = a.top;
+			const int m = s.nav.Menu();
+			if (m >= 0 && !s.window.menus[static_cast<std::size_t>(m)].pages.empty()) a.top += look.pages.size + 20;
+		}
 		fixed += s.nav.Layout(look);
 	}
 	s.cellsWanted = false;
@@ -1289,7 +1396,7 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 		int at = 0;
 		for (const auto& item : v.content) {
 			if (!Visible(item)) continue;
-			if (item.kind == Item::Kind::Tiles && item.tileRows) {
+			if ((item.kind == Item::Kind::Tiles || item.kind == Item::Kind::ItemGrid) && item.tileRows) {
 				const auto rows   = item.tileRows();
 				int        height = 0;
 				for (const auto& p : PlaceTiles(rows, item.cellSize, width, height))
@@ -1315,7 +1422,7 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 		s.focus.clear();
 	}
 	scroll      = std::clamp(scroll, 0, std::max(0, total - room));
-	std::string inside;
+	std::string inside, under; // under: below the window's background (ItemGrid.hidden)
 	int         y = 0;
 	std::vector<std::pair<std::size_t, int>> cards; // open cards: where their frame goes in `inside`, their top
 	for (int i = 0; i < static_cast<int>(v.content.size()); ++i) {
@@ -1337,6 +1444,17 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 			fixed += GridLayout(item);
 			continue;
 		}
+		if (item.kind == Item::Kind::ItemGrid && item.itemGrid) { // the real grid, outside the clip, off screen unless all of it shows
+			const auto& g     = *item.itemGrid;
+			const int   at    = y - scroll, gw = g.columns * item.cellSize, gh = g.rows * item.cellSize;
+			const bool  shown = at >= 0 && at + gh <= room;
+			const int   gx = shown ? in.left : -20000, gy = a.top + at;
+			if (g.host) {
+				const int   priority = (s.onOver ? OverPriority : s.window.priority) - 1;
+				std::string layout   = Panel("@PANEL@", FrameX() + gx, FrameY() + gy, gw, gh, "@GRID@", priority, LeftAnchor);
+				if (layout != s.hostGrid) s.hostGrid = layout, g.host(layout);
+			} else (g.hidden ? under : fixed) += D2RGui::ItemGrid(g.name, gx, gy, g.columns, g.rows, g.fields);
+		}
 		const int h = HeightOf(item, inWidth), at = y - scroll;
 		y += h;
 		if (item.kind != Item::Kind::List && item.kind != Item::Kind::Cells && (at + h < 0 || at > room)) {
@@ -1355,22 +1473,22 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 		if (Long(*item)) {
 			const int lines  = static_cast<int>(DropDown::Filtered(item->entries, s.filter).size());
 			const int height = (std::min(lines, ListLines) + 1) * LineHeight;
-			const int ly     = s.dropY + BoxHeight + height > PanelH - 40 ? s.dropY - height : s.dropY + BoxHeight;
-			c += DropDown::ScrollList("Drop", s.dropX, ly, std::max(s.dropW, 520), LineHeight, ListLines, item->entries, cur, pick, "a.dclose", PanelW, PanelH, s.list.first, s.filter, "a.lf", "a.ls");
+			const int ly     = s.dropY + BoxHeight + height > PanelH() - 40 ? s.dropY - height : s.dropY + BoxHeight;
+			c += DropDown::ScrollList("Drop", s.dropX, ly, std::max(s.dropW, 520), LineHeight, ListLines, item->entries, cur, pick, "a.dclose", PanelW(), PanelH(), s.list.first, s.filter, "a.lf", "a.ls");
 		} else {
 			std::vector<std::string> choices;
 			for (const auto& entry : item->entries) choices.push_back(entry.text);
 			const int height = static_cast<int>(choices.size()) * LineHeight;
-			const int ly     = s.dropY + BoxHeight + height > PanelH - 40 ? s.dropY - height : s.dropY + BoxHeight;
-			c += DropDown::List("Drop", s.dropX, ly, s.dropW, LineHeight, choices, cur, pick, "a.dclose", PanelW, PanelH);
+			const int ly     = s.dropY + BoxHeight + height > PanelH() - 40 ? s.dropY - height : s.dropY + BoxHeight;
+			c += DropDown::List("Drop", s.dropX, ly, s.dropW, LineHeight, choices, cur, pick, "a.dclose", PanelW(), PanelH());
 		}
 	}
 	// the icon picker, over everything
 	if (s.picker) {
 		const int count = static_cast<int>(s.picker->sprites.size()), per = 6, size = 84, gap = 14;
 		const int rowsN = (count + per - 1) / per, w = per * (size + gap) + gap + 40, h = rowsN * (size + gap) + gap + 110;
-		const int px = (PanelW - w) / 2, py = std::max(200, (PanelH - h) / 2);
-		c += HitButton("PickCatch", 0, 0, PanelW, PanelH, "a.ipx");
+		const int px = (PanelW() - w) / 2, py = std::max(200, (PanelH() - h) / 2);
+		c += HitButton("PickCatch", 0, 0, PanelW(), PanelH(), "a.ipx");
 		c += Image("PickBack", px, py, Kit::Box(w, h));
 		c += D2RGui::Text("PickTitle", px, py + 10, w, 70, s.picker->title.empty() ? "Pick an icon" : s.picker->title, Style::Axis);
 		for (int k = 0; k < count; ++k) {
@@ -1381,10 +1499,11 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 		}
 	}
 	const auto title = Title();
-	if (Hosted()) return StashWindow::Layout("@PANEL@", title, "", c, s.window.priority);
+	if (Hosted()) return StashWindow::Layout("@PANEL@", title, "", c, s.window.priority, under);
 	const int priority = s.onOver ? OverPriority : s.window.priority;
+	if (OwnFramed()) return OwnLayout(panelName, title, Probe(probe) + c, priority, under);
 	if (s.window.frame == Frame::Character) return CharacterWindow::Layout(panelName, probe, title, "a.close", c, priority);
-	return StashWindow::Layout(panelName, title, "a.close", Probe(probe) + c, priority);
+	return StashWindow::Layout(panelName, title, "a.close", Probe(probe) + c, priority, under);
 }
 
 inline void SyncCells() {
@@ -1478,7 +1597,7 @@ inline void Wheel(int notches) {
 inline void TileCall(int item, int row, int tile, char what) {
 	const View  v     = Current();
 	const Item* found = ItemAt(v, item);
-	if (!found || found->kind != Item::Kind::Tiles || !found->tileRows) return;
+	if (!found || (found->kind != Item::Kind::Tiles && found->kind != Item::Kind::ItemGrid) || !found->tileRows) return;
 	const auto rows = found->tileRows();
 	if (row < 0 || row >= static_cast<int>(rows.size()) || tile < 0 || tile >= static_cast<int>(rows[static_cast<std::size_t>(row)].tiles.size())) return;
 	const auto& t = rows[static_cast<std::size_t>(row)].tiles[static_cast<std::size_t>(tile)];
@@ -1497,7 +1616,7 @@ inline bool Mouse(UINT message, WPARAM wParam, LPARAM lParam) {
 	if (!s.open || (message != WM_MOUSEMOVE && message != WM_RBUTTONDOWN && message != WM_RBUTTONUP && message != WM_MBUTTONDOWN && message != WM_MBUTTONUP)) return false;
 	const double scale = WindowHook::UiScale();
 	if (scale <= 0) return false;
-	const auto [ox, oy] = WindowHook::LeftAnchorOffset(StashWindow::X, StashWindow::Y);
+	const auto [ox, oy] = WindowHook::LeftAnchorOffset(FrameX(), FrameY());
 	const int  x = static_cast<int>((static_cast<short>(LOWORD(lParam)) - ox) / scale), y = static_cast<int>((static_cast<short>(HIWORD(lParam)) - oy) / scale);
 	int        at = -1;
 	State::Hit hit {};
@@ -1843,7 +1962,7 @@ inline bool Start(const D2RL::PluginContext* context, const char* pluginId, Wind
 	s.window = std::move(window);
 	if (!Init(context, pluginId)) return false;
 	const Area a = AreaOf(s.window.frame);
-	s.bar        = std::make_unique<ScrollBar>("abar", a.bar, 30, 30, StashWindow::X, StashWindow::Y);
+	s.bar        = std::make_unique<ScrollBar>("abar", a.bar, 30, 30, FrameX(), FrameY());
 	s.bar->OnScroll([](int scroll) { Scroll() = scroll, Show(); });
 	SetNav();
 	if (!Hosted()) {
