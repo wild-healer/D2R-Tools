@@ -38,3 +38,6 @@
 * Own frames can have a stone cover over their picture and a scroll bar of their own place and size (window.barLook for its art).
 * Tiles take a look (Item.Looks / ItemGridSpec.look): label box, margin and font size, gaps, row title height, font, place and divider.
 * Table values are centred under their column titles (the first column stays left); GridColumn.align picks another side.
+* A stash look for settings (FormLook): ticks, drop boxes, arrows, input boxes and tables of the stash kit, in a centred column with rows of a set step.
+* List rows in the stash look: small ticks and group arrows for trees, icon buttons, a red Delete before a confirmed remove, grey names and counts.
+* Pushed pages can show in place (Page.inPlace): no back arrow or title, the menus kept.

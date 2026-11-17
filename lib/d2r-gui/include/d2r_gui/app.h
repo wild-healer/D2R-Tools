@@ -165,6 +165,9 @@ struct RowButton {
 	std::string text, sprite, command, tooltip;
 	bool        confirm = false; // a second click within 10 s sends it
 	int         width   = 0;     // a text button's width (default 160); a sprite's square (default 56)
+	std::string icon;            // stash look: an icon on a slot plate (the sprite sized by the plugin, about 70% of the plate)
+	Frames      frames { .normal = 0, .pressed = 2, .hovered = 1 }; // stash look: the sprite's frames
+	std::string armedText = "Delete"; // stash look: what a confirm button shows before its second click (red)
 };
 
 struct Row {
@@ -181,6 +184,8 @@ struct Row {
 	std::string button, buttonCommand, buttonTip; // a text button on the right (sends buttonCommand)
 	std::string gear, gearTip;                    // a gear button at the far right (sends `gear`)
 	std::string command;                          // a click on the row sends it (else List's onClick)
+	int         height = 0;                       // stash look: the row's height (0: FormLook.row; under the box size: small ticks and arrows)
+	std::string textColor;                        // stash look: the name's colour (default white; "$FontColorGray" for an off row)
 };
 
 // An item tile on a Tiles page: `width` x `height` cells, its picture a
@@ -284,6 +289,8 @@ struct Item {
 	std::function<std::vector<TileRow>()>    tileRows;   // Tiles
 	int                                      cellSize = 98; // Tiles: a cell's size
 	TileLook                                 tileLook;      // Tiles, ItemGrid
+	int                                      boxWidth = 0;  // Choice in the stash look: its drop box (0: FormLook.dropWidth)
+	bool                                     first = false; // set by the library: the page's first component
 	std::vector<Slice>                       slices;     // Chart
 	int                                      size = 0;   // Chart: the ring's size; Squares: a square's
 	std::string                              big, small; // Chart: the text in the ring, under it
@@ -295,6 +302,7 @@ struct Item {
 
 	Item Tip(std::string tip) const { auto c = *this; c.tooltip = std::move(tip); return c; }
 	Item Looks(TileLook look) const { auto c = *this; c.tileLook = look; return c; } // Tiles, ItemGrid: how tiles are drawn
+	Item BoxWidth(int w) const { auto c = *this; c.boxWidth = w; return c; }         // Choice: its drop box's width (stash look)
 	Item Note(std::string n) const { auto c = *this; c.note = std::move(n); return c; }
 	Item Restart(bool on = true) const { auto c = *this; c.restart = on; return c; }
 	Item OnChange(std::function<void()> fn) const { auto c = *this; c.changed = std::move(fn); return c; }
@@ -424,8 +432,27 @@ inline Item Custom(int height, std::function<std::string(const Place&)> draw) { 
 
 using Content = std::function<std::vector<Item>()>;
 
+// How a page's settings are drawn. stash: the stash kit's ticks, drop boxes
+// and arrows in rows `row` apart, in a column `width` wide centred in the
+// area (Grail On!'s settings); else the library's default look.
+struct FormLook {
+	bool stash = false;
+	int  width = 0;         // the column (0: the whole area)
+	int  top   = 0;         // room above the first component
+	int  row   = 64;        // a row's step
+	int  box   = 56;        // a tick's, drop box's, arrow's size
+	int  font  = 30;        // names' size
+	int  sectionWidth = 0;  // a section's line and title, centred in the area (0: the column's)
+	int  sectionFont  = 32;
+	int  dropWidth    = 610; // a drop box (Item.BoxWidth changes one)
+	int  valueWidth   = 100; // a number between its arrows
+	int  labelColumn = 300, tableColumn = 230, tableRow = 72; // Table
+};
+
 struct Page {
 	Tabs::Tab         tab;             // icon and tooltip (the command is the library's)
+	std::optional<FormLook> form;      // its settings' look (else the menu's, else the window's)
+	bool              inPlace = false; // pushed: shown in the page's place, the menus kept, no back arrow or title (App::Back returns)
 	std::string       title;           // the window's title on this page (else the menu's); a pushed page's big title
 	std::string       subtitle;        // a pushed page: the line under its title
 	std::vector<Item> items;
@@ -439,6 +466,7 @@ struct Menu {
 	Tabs::Tab         tab;
 	std::string       title;
 	std::optional<Tabs::Look> pageLook; // its pages' bar (else the window's menuLook.pages)
+	std::optional<FormLook>   form;     // its pages' settings look
 	std::vector<Page> pages; // none: the menu is a page itself
 	std::vector<Item> items;
 	Content           content;
@@ -489,6 +517,7 @@ struct Window {
 	OwnFrame                          own;            // Frame::Own's
 	std::optional<Menus::Look>        menuLook;       // the menus' and pages' bars (sizes, places, steps); the area is not shrunk for them
 	std::optional<ScrollBar::Look>    barLook;        // the scroll bar's art
+	FormLook                          form;           // how settings are drawn
 	std::vector<Menu>                 menus; // or one page:
 	std::vector<Item>                 items;
 	Content                           content;
@@ -552,6 +581,7 @@ struct Level {
 struct View {
 	std::vector<Item> content, header, footer;
 	const Page*       pushed = nullptr;
+	FormLook          form;
 };
 
 struct State {
@@ -597,6 +627,8 @@ struct State {
 	std::string                draft;    // a Draft field's text while typing
 	std::string                original; // a field's text when typing began
 	std::string                hostGrid; // the last layout sent to an ItemGrid's host
+	FormLook                   form;     // the view's settings look (Build)
+	int                        outerLeft = 0, outerRight = 0; // the area before FormLook.width narrowed it
 };
 
 inline State& Get() {
@@ -655,9 +687,11 @@ inline std::vector<Item> Join(std::vector<Item> a, const Content& b) {
 inline View Current() {
 	auto& s = Get();
 	View  v;
+	v.form = s.window.form;
 	if (!s.stack.empty()) {
 		const auto& page = s.stack.back().page;
 		v.pushed         = &page;
+		v.form           = page.form ? *page.form : s.window.form;
 		v.content        = page.content ? page.content() : page.items;
 		v.header         = Join(Join({}, s.window.header), page.header);
 		v.footer         = Join(Join({}, page.footer), s.window.footer);
@@ -674,10 +708,12 @@ inline View Current() {
 	const auto& menu = s.window.menus[static_cast<std::size_t>(m)];
 	if (p >= 0 && p < static_cast<int>(menu.pages.size())) {
 		const auto& page = menu.pages[static_cast<std::size_t>(p)];
+		v.form           = page.form ? *page.form : menu.form ? *menu.form : s.window.form;
 		v.content        = page.content ? page.content() : page.items;
 		v.header         = Join(Join(std::move(v.header), menu.header), page.header);
 		v.footer         = Join(Join({}, page.footer), menu.footer);
 	} else {
+		if (menu.form) v.form = *menu.form;
 		v.content = menu.content ? menu.content() : menu.items;
 		v.header  = Join(std::move(v.header), menu.header);
 		v.footer  = Join({}, menu.footer);
@@ -909,7 +945,31 @@ inline int RowHeightOf(const Row& row, int width) {
 	return std::max(80, 50 + lines * 32 + 8);
 }
 
+inline int StashHeight(const Item& item, int width) {
+	const auto& f = Get().form;
+	switch (item.kind) {
+	case Item::Kind::Section: return (item.first ? 0 : 8 + StashKit::SectionHeight(f.sectionWidth ? f.sectionWidth : width) + 10) + 64;
+	case Item::Kind::Check:
+	case Item::Kind::Choice:
+	case Item::Kind::Number:
+	case Item::Kind::Position: return f.row + NoteHeight(item, width);
+	case Item::Kind::Table: return (item.label.empty() ? 0 : f.row) + 50 + static_cast<int>(item.rowNames.size()) * (f.tableRow + 6);
+	case Item::Kind::Field:
+	case Item::Kind::Action:
+	case Item::Kind::Adder:
+	case Item::Kind::Value: return f.row + NoteHeight(item, width);
+	case Item::Kind::List: {
+		int h = 0;
+		for (const auto& row : item.rows ? item.rows() : std::vector<Row> {}) h += row.height ? row.height : f.row;
+		return h ? h : (item.empty.empty() ? 0 : f.row);
+	}
+	default: return -1;
+	}
+}
+
 inline int HeightOf(const Item& item, int width) {
+	if (Get().form.stash)
+		if (const int h = StashHeight(item, width); h >= 0) return h;
 	if (AboveOf(item, width)) return AboveLine + HeightOf([&] { auto c = item; c.label.clear(), c.restart = false; return c; }(), width);
 	switch (item.kind) {
 	case Item::Kind::Legend: return 60;
@@ -1016,6 +1076,212 @@ inline std::string NoteText(const std::string& name, const Item& item, int x, in
 	return D2RGui::Text(name, x, y, width, NoteHeight(item, width), item.note, Style::Comment);
 }
 
+// The stash look's settings (FormLook.stash); empty for the kinds it leaves to Draw.
+inline std::string DrawStash(const Item& item, int i, int y, int origin, const Area& a) {
+	auto&             s = Get();
+	const auto&       f = s.form;
+	const std::string n = "I" + std::to_string(i), id = std::to_string(i);
+	const int         width = a.right - a.left, end = a.right, box = f.box;
+	const std::string tip   = item.tooltip;
+	const auto name = [&](const std::string& key, int x, int w, const std::string& text, const std::string& command) {
+		std::string out = TextBox(key, x, y, w, box, text, { .color = "$FontColorWhite", .size = f.font });
+		out += QuietButton(key + "H", x, y, w, box, command, tip);
+		return out;
+	};
+	const auto arrow = [&](const std::string& key, int x, bool up, const std::string& command, const std::string& help) {
+		return SpriteButton(key, x, y, box, box, StashKit::Arrow(up, box), { .normal = 0, .pressed = 2, .hovered = 1 }, command, help);
+	};
+	const auto reset = [&](const std::string& key, int x, const std::string& command) {
+		if (StashKit::Refresh(box).empty()) return SpriteButton(key, x, y, 120, box, StashKit::PlainButton(120, box), { .normal = 0, .pressed = 1, .hovered = 3 }, command, "Back to the default", { .text = "Reset" });
+		return SpriteButton(key, x, y, box, box, StashKit::Refresh(box), StashKit::RefreshFrames(), command, "Back to the default");
+	};
+	const int   valueW = f.valueWidth, step = (box + 8);
+	std::string out;
+	switch (item.kind) {
+	case Item::Kind::Section: {
+		const int sw = f.sectionWidth ? f.sectionWidth : width;
+		const int sx = s.outerLeft + (s.outerRight - s.outerLeft - sw) / 2;
+		int       ty = y;
+		if (!item.first) {
+			out += Image(n + "R", sx, y + 8, StashKit::Section(sw));
+			ty += 8 + StashKit::SectionHeight(sw) + 10;
+		}
+		out += TextBox(n, sx, ty, sw, 56, item.label, { .color = "$FontColorGoldYellow", .size = f.sectionFont, .h = "center" });
+		if (!tip.empty()) out += QuietButton(n + "H", sx, ty, sw, 56, {}, tip);
+		return out;
+	}
+	case Item::Kind::Check: {
+		const std::string cmd = "a.c" + id;
+		out += SpriteButton(n, a.left, y, box, box, StashKit::Tick(item.flag.Get(), box), { .normal = 0, .pressed = 2, .hovered = 1 }, cmd, tip);
+		out += name(n + "L", a.left + box + 20, end - a.left - box - 20, LabelText(item), cmd);
+		break;
+	}
+	case Item::Kind::Choice: {
+		const int bw = item.boxWidth ? item.boxWidth : f.dropWidth;
+		out += name(n + "L", a.left, end - bw - a.left - 20, LabelText(item), {});
+		out += SpriteButton(n, end - bw, y, bw, box, StashKit::DropBox(bw, box), { .normal = 0, .pressed = 1, .hovered = 3 }, "a.d" + id, tip, { .text = Shown(item), .color = "$FontColorLightGold", .size = f.font });
+		if (s.drop == i) s.dropX = end - bw, s.dropY = origin + y, s.dropW = bw;
+		break;
+	}
+	case Item::Kind::Number: {
+		const double value = item.number.Get();
+		const auto   shown = item.format ? item.format(value) : Decimal(value, item.decimals);
+		const auto   help  = StepTip(item);
+		const int    resetW = item.reset ? (StashKit::Refresh(box).empty() ? 120 : box) + 20 : 0;
+		int          at     = end - resetW - (step + valueW + step);
+		out += name(n + "L", a.left, at - a.left - 20, LabelText(item), {});
+		out += arrow(n + "D", at, false, "a.n" + id + "-", help), at += step;
+		out += TextBox(n + "V", at, y, valueW, box, shown, { .color = "$FontColorWhite", .size = f.font, .h = "center" }), at += valueW;
+		out += arrow(n + "U", at, true, "a.n" + id + "+", help), at += step;
+		if (item.reset) out += reset(n + "Z", at + 20 - 8, "a.z" + id);
+		break;
+	}
+	case Item::Kind::Position: {
+		const auto help   = StepTip(item);
+		const int  axisW  = 30 + step + valueW + step + 20;
+		const int  resetW = item.reset ? (StashKit::Refresh(box).empty() ? 120 : box) : 0;
+		int        at     = end - 2 * axisW - resetW;
+		out += name(n + "L", a.left, at - a.left - 20, LabelText(item), {});
+		for (const char axis : { 'X', 'Y' }) {
+			const std::string ax(1, axis), cmd = std::string("a.") + (axis == 'X' ? "h" : "v") + id;
+			out += TextBox(n + ax + "A", at, y, 30, box, ax, { .color = "$FontColorGoldYellow", .size = f.font, .h = "center" }), at += 30;
+			out += arrow(n + ax + "D", at, false, cmd + "-", help), at += step;
+			out += TextBox(n + ax + "V", at, y, valueW, box, Decimal(axis == 'X' ? item.px.Get() : item.py.Get(), 0), { .color = "$FontColorWhite", .size = f.font, .h = "center" }), at += valueW;
+			out += arrow(n + ax + "U", at, true, cmd + "+", help), at += step + 20;
+		}
+		if (item.reset) out += reset(n + "Z", at, "a.z" + id);
+		break;
+	}
+	case Item::Kind::Table: {
+		int at = y;
+		if (!item.label.empty()) out += TextBox(n + "T", a.left, at, width, box, LabelText(item), { .color = "$FontColorWhite", .size = f.font }), at += f.row;
+		const int columns = std::max<int>(1, static_cast<int>(item.columns.size()));
+		const int label   = std::min(f.labelColumn, width / 3), cw = std::min(f.tableColumn, (width - label) / columns);
+		const int left    = a.left, tableW = label + cw * columns;
+		for (int c = 0; c < static_cast<int>(item.columns.size()); ++c)
+			out += TextBox(n + "H" + std::to_string(c), left + label + c * cw, at, cw, 44, item.columns[static_cast<std::size_t>(c)], { .color = "$FontColorGoldYellow", .size = f.font, .h = "center" });
+		at += 50;
+		for (int r = 0; r < static_cast<int>(item.rowNames.size()); ++r, at += f.tableRow + 6) {
+			const auto rn = n + "R" + std::to_string(r);
+			out += Image(rn + "B", left, at, StashKit::TableRow(tableW, f.tableRow));
+			for (int c = 0; c < columns; ++c) out += Image(rn + "L" + std::to_string(c), left + label + c * cw - 2, at + 7, StashKit::TableColumn(f.tableRow - 14));
+			out += TextBox(rn, left + 28, at, label - 40, f.tableRow, item.rowNames[static_cast<std::size_t>(r)], { .color = "$FontColorWhite", .size = f.font });
+			for (int c = 0; c < static_cast<int>(item.columns.size()); ++c) {
+				const bool        on  = item.cell && item.cell(r, c);
+				const std::string cn  = rn + "C" + std::to_string(c), cmd = "a.t" + id + ":" + std::to_string(r) + ":" + std::to_string(c);
+				const int         x   = left + label + c * cw + (cw - box) / 2, cy = at + (f.tableRow - box) / 2;
+				const std::string why = item.disabled ? item.disabled(r, c) : std::string();
+				if (!why.empty()) out += Image(cn, x, cy, StashKit::Tick(on, box), R"(, "transparency": 0.5)") + QuietButton(cn + "H", x, cy, box, box, {}, why);
+				else out += SpriteButton(cn, x, cy, box, box, StashKit::Tick(on, box), { .normal = 0, .pressed = 2, .hovered = 1 }, cmd, tip);
+			}
+		}
+		return out;
+	}
+	case Item::Kind::Field: {
+		const std::string key    = "a.f" + id;
+		const bool        typing = TextInput::Key() == key;
+		int               start  = a.left;
+		if (!item.icon.empty()) { // an icon button first
+			out += SpriteButton(n + "Ic", a.left, y, box, box, StashKit::SlotButton(box, box), { .normal = 0, .pressed = 2, .hovered = 1 }, "a.i" + id, "Change the icon");
+			out += Image(n + "Im", a.left + 8, y + 8, item.icon);
+			start += box + 20;
+		}
+		if (!item.label.empty()) {
+			const int nameW = std::min(500, (end - start) / 3);
+			out += name(n + "L", start, nameW, LabelText(item), {});
+			start += nameW + 20;
+		}
+		const int         right = item.clearable ? end - box - 12 : end;
+		const std::string text  = typing && item.draft ? s.draft : item.text.Get();
+		const bool        empty = text.empty() && !typing;
+		out += Image(n + "Frame", start, y, StashKit::InputBox(right - start, box));
+		out += TextBox(n, start + 20, y, right - start - 40, box, empty ? (item.hint.empty() ? std::string() : item.hint) : Fit(text, right - start - 40, typing) + (typing ? "|" : ""),
+		               { .color = empty ? "$FontColorGray" : "$FontColorWhite", .size = f.font });
+		out += HitButton(n + "Hit", start, y, right - start, box, "type" + key, item.tooltip.empty() ? (item.draft ? "Click to type; Enter saves, Esc cancels" : "Click to type") : item.tooltip);
+		if (item.clearable && !text.empty()) out += SpriteButton(n + "C", end - box, y, box, box, StashKit::Remove(box), { .normal = 0, .pressed = 1, .hovered = 3 }, "a.e" + id, "Clear");
+		break;
+	}
+	case Item::Kind::Action: {
+		const bool        armed = s.armed == i && GetTickCount64() < s.armedUntil;
+		const std::string help  = !tip.empty() ? tip : (item.confirm ? "Click twice to run" : std::string());
+		if (!item.icon.empty()) { // an icon button at the row's end
+			out += name(n + "L", a.left, end - box - a.left - 20, LabelText(item), {});
+			out += SpriteButton(n, end - box, y, box, box, StashKit::SlotButton(box, box), { .normal = 0, .pressed = 2, .hovered = 1 }, "a.b" + id, armed ? "Click again to confirm" : help);
+			out += Image(n + "Im", end - box + 8, y + 8, item.icon);
+			break;
+		}
+		const int w = item.label.empty() ? end - a.left : 300;
+		if (!item.label.empty()) out += name(n + "L", a.left, end - w - a.left - 20, LabelText(item), {});
+		out += SpriteButton(n, end - w, y, w, box, StashKit::PlainButton(w, box), { .normal = 0, .pressed = 1, .hovered = 3 }, "a.b" + id, armed ? "Click again to confirm" : help,
+		                    { .text = armed ? std::string("Sure?") : item.button, .color = armed ? "$FontColorLightRed" : "$FontColorLightGold", .size = f.font });
+		break;
+	}
+	case Item::Kind::Adder:
+		out += SpriteButton(n, a.left, y, box, box, StashKit::Add(box, box), { .normal = 0, .pressed = 2, .hovered = 1 }, "a.b" + id, tip.empty() ? "Add" : tip);
+		out += name(n + "L", a.left + box + 20, end - a.left - box - 20 - 300, LabelText(item), "a.b" + id);
+		if (!item.value.empty()) out += TextBox(n + "V", end - 300, y, 300, box, item.value, { .color = "$FontColorGray", .size = f.font - 4, .h = "right" });
+		break;
+	case Item::Kind::Value:
+		out += name(n + "L", a.left, width / 2, LabelText(item), {});
+		out += TextBox(n + "V", a.left + width / 2, y, width / 2, box, item.value, { .color = "$FontColorGray", .size = f.font - 4, .h = "right" });
+		break;
+	case Item::Kind::List: {
+		const auto rows = item.rows ? item.rows() : std::vector<Row> {};
+		if (rows.empty() && !item.empty.empty()) out += TextBox(n + "E", a.left, y, width, f.row, item.empty, { .color = "$FontColorGray", .size = f.font - 4 });
+		int ry = y;
+		for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
+			const auto&       row   = rows[static_cast<std::size_t>(r)];
+			const int         h     = row.height ? row.height : f.row;
+			const bool        small = h < box + 4;
+			const int         mark  = small ? std::min(36, h - 4) : box, my = ry + (h - mark) / 2;
+			const auto        rn    = n + "R" + std::to_string(r);
+			const std::string click = !row.command.empty() ? row.command : item.pick ? "a.r" + id + ":" + std::to_string(r) : std::string();
+			int               x     = a.left + row.indent * 44, right = end;
+			if (row.expander >= 0) out += SpriteButton(rn + "E", x, my, mark, mark, StashKit::GroupArrow(row.expander == 1, mark), { .normal = 0, .pressed = 2, .hovered = 1 }, row.expandCommand, row.expander ? "Close" : "Open"), x += mark + 8;
+			if (row.check >= 0) {
+				const std::string sprite = small ? StashKit::Ticks(row.check == 0 ? 0 : row.check == 1 ? 1 : 2, mark) : StashKit::Tick(row.check == 1, mark);
+				out += SpriteButton(rn + "C", x, my, mark, mark, sprite, { .normal = 0, .pressed = 2, .hovered = 1 }, row.checkCommand, row.checkTip);
+				x += mark + 20;
+			}
+			if (!row.icon.empty()) out += Image(rn + "I", x, ry + (h - 40) / 2, row.icon), x += 52;
+			for (int b = 0; b < static_cast<int>(row.buttons.size()); ++b) { // right to left
+				const auto&       button = row.buttons[static_cast<std::size_t>(b)];
+				const std::string cmd    = "a.w" + id + ":" + std::to_string(r) + ":" + std::to_string(b), bn = rn + "W" + std::to_string(b);
+				const bool        armed  = button.confirm && s.armedCommand == cmd && GetTickCount64() < s.armedUntil;
+				const int         size   = button.width > 0 && (button.text.empty() || !button.sprite.empty() || !button.icon.empty()) ? button.width : mark;
+				if (armed) {
+					out += SpriteButton(bn, right - 120, my, 120, mark, StashKit::PlainButton(120, mark), { .normal = 0, .pressed = 1, .hovered = 3 }, cmd, "Click again to confirm", { .text = button.armedText, .color = "$FontColorLightRed", .size = f.font - 4 });
+					right -= 132;
+				} else if (!button.icon.empty()) {
+					out += SpriteButton(bn, right - size, ry + (h - size) / 2, size, size, StashKit::SlotButton(size, size), { .normal = 0, .pressed = 2, .hovered = 1 }, cmd, button.tooltip);
+					out += Image(bn + "Im", right - size + size * 15 / 100, ry + (h - size) / 2 + size * 15 / 100, button.icon);
+					right -= size + 12;
+				} else if (!button.sprite.empty()) {
+					out += SpriteButton(bn, right - size, ry + (h - size) / 2, size, size, button.sprite, button.frames, cmd, button.tooltip);
+					right -= size + 12;
+				} else {
+					const int bw = button.width > 0 ? button.width : 160;
+					out += SpriteButton(bn, right - bw, my, bw, mark, StashKit::PlainButton(bw, mark), { .normal = 0, .pressed = 1, .hovered = 3 }, cmd, button.tooltip, { .text = button.text, .color = "$FontColorLightGold", .size = f.font - 4 });
+					right -= bw + 12;
+				}
+			}
+			if (!row.value.empty()) {
+				out += TextBox(rn + "V", right - 260, ry, 250, h, row.value, { .color = "$FontColorGray", .size = f.font - 4, .h = "right" });
+				if (!row.valueTip.empty()) out += QuietButton(rn + "VT", right - 260, ry, 250, h, {}, row.valueTip);
+				right -= 270;
+			}
+			out += TextBox(rn + "T", x, ry, right - x - 10, h, row.text, { .color = row.textColor.empty() ? "$FontColorWhite" : row.textColor, .size = small ? f.font - 4 : f.font });
+			if (!click.empty() || !row.tooltip.empty()) out += QuietButton(rn + "H", x, ry, right - x - 10, h, click, row.tooltip);
+			ry += h;
+		}
+		return out;
+	}
+	default: return {};
+	}
+	out += NoteText(n + "N", item, a.left, y + f.row - 10, width);
+	return out;
+}
+
 // One component at `y` in its region (the content's clip, or the panel for a
 // fixed header or footer): `origin` is the region's panel y, `room` its height.
 inline std::string Draw(const Item& item, int i, int y, int origin, int room, const Area& a) {
@@ -1036,6 +1302,8 @@ inline std::string Draw(const Item& item, int i, int y, int origin, int room, co
 		}
 		return out + Draw(tiles, i, y, origin, room, at);
 	}
+	if (s.form.stash)
+		if (auto stash = DrawStash(item, i, y, origin, a); !stash.empty()) return stash;
 	if (AboveOf(item, width)) { // the label on its own line, the control under it
 		auto rest = item;
 		rest.label.clear(), rest.restart = false;
@@ -1423,10 +1691,16 @@ inline bool AnyRestart(const View& v) {
 inline std::string Build(const std::string& panelName, const std::string& probe) {
 	auto&       s     = Get();
 	Area        a     = AreaOf(Hosted() ? Frame::Stash : s.window.frame);
-	const int   width = a.right - a.left;
-	const View  v     = Current();
+	int         width = a.right - a.left;
+	View        v     = Current();
 	std::string fixed;
-	if (v.pushed) {
+	s.form = v.form;
+	for (auto& item : v.content)
+		if (Visible(item)) {
+			item.first = true; // the first component (a section there has no line above it)
+			break;
+		}
+	if (v.pushed && !v.pushed->inPlace) {
 		// a pushed page: a back arrow, its title and the line under it
 		fixed += Button("Back", a.left, a.top + 22, Kit::Native::LeftArrow, { 0, 1, 3 }, "a.back", v.pushed->backTip);
 		fixed += D2RGui::Text("PageName", a.left + 60, a.top, width - 120, 90, v.pushed->title, Style::Name);
@@ -1452,6 +1726,9 @@ inline std::string Build(const std::string& panelName, const std::string& probe)
 		}
 		fixed += s.nav.Layout(look);
 	}
+	s.outerLeft = a.left, s.outerRight = a.right;
+	if (v.form.width > 0 && v.form.width < width) a.left += (width - v.form.width) / 2, a.right = a.left + v.form.width, width = v.form.width; // the form's column, centred
+	a.top += v.form.top;
 	s.cellsWanted = false;
 	{
 		std::lock_guard guard(s.hitLock);
