@@ -35,7 +35,7 @@ namespace Gui  = D2RGui;
 namespace App  = D2RGui::App;
 
 constexpr const char* PluginId      = "wild-healers-charm-inventory";
-constexpr const char* PluginVersion = "1.1.2-dev-3";
+constexpr const char* PluginVersion = "1.1.2-dev-4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -150,22 +150,19 @@ bool IsLocalPlayer(void* unit) noexcept {
 	return id == localId;
 }
 
-// ---- diagnostic (1.1.2-dev-2): the charm check's answers where the game
-// adds or removes a charm's stats ----
-// The game adds a charm's stats when the check says yes as the charm arrives
-// (item add, call at exe+0x475102), takes them off when it says yes as the
-// charm leaves (removals, 0x46E931 and 0x46EAAB), and the server's refresh
-// (0x470D9A) attaches the charms that say yes. Each answer from those sites is
-// logged with the item, its page and cell; "unbalanced" marks a removal of
-// stats this log never saw added (or an add of stats already added). At most
-// 20 lines a second and 400 in all.
+// ---- diagnostic (1.1.2-dev-2 to -4): the charm check's answers where the
+// game adds or removes a charm's stats ----
+// Sites: item add (call at exe+0x475102), removals (0x46E931, 0x46EAAB), the
+// server's refresh (0x470D9A, called often: only a new answer is logged).
+// Each line has the item, its page and cell. At most 20 lines a second and
+// 600 in all.
 constexpr std::uint64_t StatSites[] { 0x475102, 0x46E931, 0x46EAAB, 0x470D9A };
 constexpr const char*   StatSiteNames[] { "add", "remove", "remove", "refresh" };
 constexpr std::size_t   UnitClass = 0x04, UnitPath = 0x38, PathX = 0x10, PathY = 0x14;
-constexpr int           DiagMaxLines = 400, DiagPerSecond = 20, DiagItems = 256;
+constexpr int           DiagMaxLines = 600, DiagPerSecond = 20, DiagItems = 256;
 struct DiagItem {
 	const void* item;
-	int         attached; // adds minus removals seen with a yes
+	int         answer, page, x, y; // the last answer (-1: none yet) and where the item was
 };
 SRWLOCK  DiagLock = SRWLOCK_INIT;
 DiagItem DiagTable[DiagItems] {};
@@ -195,28 +192,26 @@ void Diagnose(void* item, void* unit, std::int32_t answer, const void* returnAdd
 	if (!slot)
 		for (auto& d : DiagTable)
 			if (!d.item) {
-				slot = &d, *slot = { item, 0 };
+				slot = &d, *slot = { item, -1, -1, -1, -1 };
 				break;
 			}
-	const char* mark = "";
-	if (slot && site == 3) slot->attached = answer ? 1 : 0;
-	else if (slot && answer) {
-		if (site == 0) {
-			if (slot->attached > 0) mark = " UNBALANCED (added twice)";
-			slot->attached += 1;
-		} else {
-			if (slot->attached <= 0) mark = " UNBALANCED (removed, never added)";
-			slot->attached -= 1;
-		}
-	}
+	// Logged: an add or removal of a charm that counts, is on the page or
+	// counted before; a refresh whose answer is not the item's last one.
+	// "CHANGED" marks a new answer for an item that has not moved.
+	const int   last    = slot ? slot->answer : -1;
+	const bool  same    = slot && slot->page == page && slot->x == x && slot->y == y;
+	const bool  changed = last >= 0 && last != (answer ? 1 : 0);
+	const char* mark    = changed && same ? " CHANGED (same place)" : changed ? " (moved)" : "";
+	const bool  wanted  = site == 3 ? changed || (last < 0 && page == CustomPage) : answer || page == CustomPage || last == 1;
+	if (slot) slot->answer = answer ? 1 : 0, slot->page = page, slot->x = x, slot->y = y;
 	const ULONGLONG now = GetTickCount64() / 1000;
 	if (now != DiagSecond) DiagSecond = now, DiagSecondLines = 0;
-	const bool write = DiagLines < DiagMaxLines && DiagSecondLines < DiagPerSecond && (site != 3 || page == CustomPage);
+	const bool write = DiagLines < DiagMaxLines && DiagSecondLines < DiagPerSecond && wanted;
 	if (write) ++DiagLines, ++DiagSecondLines;
 	const int lines = DiagLines;
 	ReleaseSRWLockExclusive(&DiagLock);
 	if (!write) return;
-	Log(*mark != 0, "diag: %s (exe+0x%llX) item %u class %u at %p of player %u%s: page %d cell %d,%d -> %s%s", StatSiteNames[site], static_cast<unsigned long long>(rva), id, classId, item, owner,
+	Log(changed && same, "diag: %s (exe+0x%llX) item %u class %u at %p of player %u%s: page %d cell %d,%d -> %s%s", StatSiteNames[site], static_cast<unsigned long long>(rva), id, classId, item, owner,
 	    IsLocalPlayer(unit) ? " (local)" : "", page, x, y, answer ? "counts" : "doesn't count", mark);
 	if (lines == DiagMaxLines) Log(false, "diag: %d lines logged, no more this session", DiagMaxLines);
 }
