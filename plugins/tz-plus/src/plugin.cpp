@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.101";
+constexpr const char* PluginVersion = "0.0.102";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2734,7 +2734,7 @@ constexpr std::size_t    MonStatsRow = 0x1FC;
 constexpr int            ZoneArea    = 2304; // map size of every zone: rooms x room width x room height (Pit, Crypt, Cave in Hell)
 constexpr int            SafeRadius  = 30;   // no monster spawns this close to the zone's entry portal
 constexpr std::uintptr_t DefSizeX = 12, DefSizeY = 24;
-constexpr std::uintptr_t DefQuest = 0, DefQuestEx = 4, DefLayer = 8, DefDrlg = 48, DefType = 52, DefDepend = 44, DefVis = 72, DefWarp = 104;
+constexpr std::uintptr_t DefQuest = 0, DefQuestEx = 4, DefLayer = 8, DefDrlg = 48, DefType = 52, DefDepend = 44, DefVis = 72, DefWarp = 104, DefSubType = 0x38;
 constexpr int            MonSlots = 25, ZoneMonsters = 8;
 // Automap layers of our levels: past the game's 0-99 (the character's .map file has a 100-entry table, HookLayerSave/Load keep
 // ours out of it), a new number for each zone opened so an old zone's map never shows up again.
@@ -4326,9 +4326,15 @@ std::uint64_t BuildZoneLevel(std::uint8_t mode, void* level, MazeBuildFn build, 
 		OutdoorTrace.fetch_add(1);
 	}
 	const bool bare = outdoor && (BuildingKind == KindEntry || BuildingKind == KindExit);
+	// The area's tile substitutions (LevelDefs SubType +0x38, LvlSub.txt type 6 for act 1: Stone, Trees, Puddles, Swamp, Wild
+	// Objects, D2MOO DRLGTILESUB_PickSubThemes) put rock and tree clusters on the plain ground: none in the entry and exit areas.
+	std::int32_t* subType = bare && defs ? reinterpret_cast<std::int32_t*>(defs + tmpl * DefRow + DefSubType) : nullptr;
+	const std::int32_t savedSub = subType ? *subType : -1;
+	if (subType) *subType = -1;
 	if (bare) SetWildTiles(WildTilesFloor);
 	const std::uint64_t result = build(mode, level);
 	if (bare) SetWildTiles(WildTilesGame);
+	if (subType) *subType = savedSub;
 	if (outdoor) OutdoorTrace.fetch_sub(1);
 	BuildingKind = -1;
 	SetField<std::int32_t>(level, 0x1F8, id);
