@@ -45,7 +45,7 @@
 namespace {
 
 constexpr const char* PluginId      = "i-hate-tomls";
-constexpr const char* PluginVersion = "1.1.1-dev-5";
+constexpr const char* PluginVersion = "1.1.1-dev-6";
 constexpr const char* CommandPrefix = "i-hate-tomls/Cmd-";
 
 const D2RL::PluginInfo Info {
@@ -267,6 +267,7 @@ struct OwnWindow {
 	std::string        plugin;
 	PluginMenu::OpenFn open {};
 	void*              user {};
+	std::string        hub; // its slug on the D2RLoader Hub, when not built from its name
 };
 
 std::vector<Client>    Clients;
@@ -892,7 +893,10 @@ std::vector<Entry> Entries() {
 	for (auto& e : list) {
 		e.mode = WindowOf(e.id) ? Mode::Window : ClientIndex(e.id) >= 0 ? Mode::Menu : !e.config.empty() ? Mode::Toml : Mode::None;
 		const int client = ClientIndex(e.id);
-		e.slug = client >= 0 && !Clients[static_cast<std::size_t>(client)].hub.empty() ? Clients[static_cast<std::size_t>(client)].hub : Hub::SlugOf(e.name);
+		const OwnWindow* window = WindowOf(e.id);
+		e.slug = client >= 0 && !Clients[static_cast<std::size_t>(client)].hub.empty() ? Clients[static_cast<std::size_t>(client)].hub
+		       : window && !window->hub.empty()                                       ? window->hub
+		                                                                               : Hub::SlugOf(e.name);
 	}
 	// I Hate TOMLs first, then by name
 	std::sort(list.begin(), list.end(), [](const Entry& a, const Entry& b) {
@@ -1080,14 +1084,15 @@ void Join() {
 } // namespace Self
 
 uint64_t __cdecl RegisterInterface(const D2RL::PluginContext* caller, const PluginMenu::InterfaceInfo* info) noexcept {
-	if (!caller || !caller->pluginId || !info || info->structSize < sizeof(PluginMenu::InterfaceInfo) || !info->open) {
+	if (!caller || !caller->pluginId || !info || info->structSize < PluginMenu::InterfaceInfoMinSize || !info->open) {
 		Log(true, "a plugin's settings window was refused: incomplete");
 		return 0;
 	}
 	const uint64_t handle = NextHandle++;
 	std::erase_if(Clients, [&](const Client& c) { return c.plugin == caller->pluginId; });
 	std::erase_if(Windows, [&](const OwnWindow& w) { return w.plugin == caller->pluginId; });
-	Windows.push_back({ handle, caller->pluginId, info->open, info->user });
+	const bool hasHub = info->structSize >= offsetof(PluginMenu::InterfaceInfo, hub) + sizeof(info->hub) && info->hub && info->hub[0];
+	Windows.push_back({ handle, caller->pluginId, info->open, info->user, hasHub ? std::string(info->hub) : std::string() });
 	Log(false, "%s declared its own settings window", caller->pluginId);
 	QueueRefresh();
 	return handle;

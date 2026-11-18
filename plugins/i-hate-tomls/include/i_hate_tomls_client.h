@@ -89,9 +89,12 @@ using OpenFn = void(__cdecl*)(void* user) noexcept;
 struct InterfaceInfo {
 	uint32_t structSize;
 	uint32_t flags;
-	OpenFn   open;
-	void*    user;
+	OpenFn      open;
+	void*       user;
+	const char* hub; // its slug on the D2RLoader Hub, when not built from its name (null: built); newer than I Hate TOMLs 1.1.1
 };
+// Without `hub` (headers up to I Hate TOMLs 1.1.1): still taken.
+inline constexpr uint32_t InterfaceInfoMinSize = static_cast<uint32_t>(sizeof(uint32_t) * 2 + sizeof(OpenFn) + sizeof(void*));
 
 // "settings-menu" version 1. New fields go at the end.
 struct Service {
@@ -115,9 +118,10 @@ class Connection {
 	}
 
 	// For a plugin with its own settings window: the menu lists it with an
-	// Open button that calls open(user).
-	bool StartInterface(const D2RL::PluginContext* context, OpenFn open, void* user) noexcept {
-		interface_ = { sizeof(InterfaceInfo), 0, open, user };
+	// Open button that calls open(user). `hub`: its slug on the D2RLoader Hub
+	// when it isn't built from the plugin's name (see INTEGRATION.md).
+	bool StartInterface(const D2RL::PluginContext* context, OpenFn open, void* user, const char* hub = nullptr) noexcept {
+		interface_ = { sizeof(InterfaceInfo), 0, open, user, hub };
 		return Begin(context);
 	}
 

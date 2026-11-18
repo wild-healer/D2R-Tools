@@ -152,6 +152,8 @@ A plugin that already has its own settings window declares it instead of a schem
 void __cdecl OpenMyWindow(void* user) noexcept { /* open the plugin's window */ }
 
 Menu.StartInterface(context, OpenMyWindow, nullptr);
+// or, with its Hub address (see "Update check"):
+Menu.StartInterface(context, OpenMyWindow, nullptr, "my-plugin-slug");
 ```
 
 The list shows it with a blue gem. Its gear button closes the menu and calls `OpenMyWindow` on the
@@ -164,7 +166,9 @@ It finds the page by building the Hub's address from the plugin's name: lowercas
 of other characters turned into one `-` ("Wild Healer's Charm Inventory" becomes
 `wild-healer-s-charm-inventory`). The Hub keeps the address from the plugin's first upload, so a
 plugin that was renamed since, or whose address differs for another reason, gives its own with
-`hub = "<slug>"` at the top of its schema.
+`hub = "<slug>"` at the top of its schema; a plugin with its own window passes it as the last
+argument of `Menu.StartInterface` (needs a header newer than I Hate TOMLs 1.1.1; older I Hate TOMLs
+ignore it).
 
 ## Checklist
 
@@ -172,5 +176,6 @@ plugin that was renamed since, or whose address differs for another reason, give
 - [ ] Every `key` in the schema is answered by get and accepted by set.
 - [ ] Set applies the value, saves the plugin's TOML, and refuses bad values with a reason.
 - [ ] `Menu.ValueChanged(key)` wherever the plugin changes a setting itself.
-- [ ] `hub = "..."` if the plugin's Hub address isn't built from its current name.
+- [ ] `hub = "..."` (or `StartInterface`'s `hub` argument) if the plugin's Hub address isn't built
+      from its current name.
 - [ ] The plugin still works with I Hate TOMLs removed.
