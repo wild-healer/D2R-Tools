@@ -50,7 +50,7 @@ dice roll.
 Settings, in game with I Hate TOMLs or in `d2rloader/config/smarter-mercenaries.toml`:
 `enabled`, `rogue`, `desert_mercenary`, `iron_wolf`, `barbarian`, `leash` (14),
 `engage_range` (10), `danger_range` (10), all 4 to 24, `protect_range` (5, 2 to
-12), `safe_life` (35), `safe_burst` (25), both 10 to 90, `safe_window` (2, 1 to 5), `log` (decisions to
+12), `safe_life` (35), `safe_burst` (25), both 10 to 90, `safe_window` (2, 1 to 5), `log` (off; decisions to
 `mods/D2RMM/d2rloader/logs/smarter-mercenaries.log`, plus a line every few seconds per mercenary on whether the new AI ran).
 
 How it works (Steam 3.3.94995): hooks the Hireable think function

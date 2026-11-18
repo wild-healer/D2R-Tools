@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.36";
+constexpr const char* PluginVersion = "0.0.37";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -81,7 +81,7 @@ struct Settings {
 	std::atomic<int>  safeBurst { 25 }; // ... or when it loses this percent of its life
 	std::atomic<int>  safeWindow { 2 }; // ... within this many seconds
 	std::atomic<int>  protect { 5 };    // melee mercenaries regroup on you when enemies get this close to you
-	std::atomic<bool> log { true };     // one line per decision change (test builds)
+	std::atomic<bool> log { false };    // one line per decision change (test builds; costs time with many monsters)
 } Config;
 
 // ---- native layout (Steam 3.3.94995) ----
@@ -361,11 +361,15 @@ int LifePercent(void* unit) noexcept {
 constexpr std::size_t MaxCandidates = 96;
 constexpr int         MaxScanDistance = 30;
 
+// One look around per think, shared by everything in it (0.0.36 looked
+// twice and asked the game for positions and distances over and over).
 struct Scan {
 	void*       merc;
 	std::size_t count;
 	void*       units[MaxCandidates];
-	int         distance[MaxCandidates];
+	int         distance[MaxCandidates];  // to the mercenary
+	int         fromOwner[MaxCandidates]; // to you (INT_MAX: no owner given)
+	int         x[MaxCandidates], y[MaxCandidates];
 };
 
 void* __cdecl Collect(void* game, void* unit, void* other, void* arg) noexcept {
@@ -381,10 +385,22 @@ void* __cdecl Collect(void* game, void* unit, void* other, void* arg) noexcept {
 	return nullptr; // keep scanning
 }
 
-void Gather(void* game, void* merc, Scan& scan) noexcept {
+bool Position(void* unit, int& x, int& y) noexcept;
+
+void Gather(void* game, void* merc, Scan& scan, void* owner = nullptr) noexcept {
 	scan.merc  = merc;
 	scan.count = 0;
 	(void)FindTarget(game, merc, &scan, &Collect, 1);
+	std::size_t kept = 0;
+	for (std::size_t index = 0; index < scan.count; ++index) {
+		int x = 0, y = 0;
+		if (!Position(scan.units[index], x, y)) continue; // no place in the world: nothing to fight
+		scan.units[kept] = scan.units[index], scan.distance[kept] = scan.distance[index];
+		scan.x[kept] = x, scan.y[kept] = y;
+		scan.fromOwner[kept] = owner ? Distance(owner, scan.units[index]) : INT_MAX;
+		++kept;
+	}
+	scan.count = kept;
 }
 
 // Hostile units within `radius` of `center` (center not counted).
@@ -445,12 +461,12 @@ thread_local View Now {};
 // Set by ChooseTarget: a ranged mercenary saw targets, but only behind walls.
 bool OnlyBlocked = false;
 
-bool Position(void* unit, int& x, int& y) noexcept;
-
-void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
+// `given`: the think's own scan (made with you as owner); none: looks itself.
+void* ChooseTarget(void* game, void* merc, void* owner, Role role, const Scan* given = nullptr) noexcept {
 	OnlyBlocked = false;
-	Scan scan;
-	Gather(game, merc, scan);
+	Scan        own;
+	if (!given) Gather(game, merc, own, owner);
+	const Scan& scan = given ? *given : own;
 	if (!scan.count) return nullptr;
 	const bool     melee    = role == Role::Desert || role == Role::BashBarb || role == Role::FrenzyBarb;
 	// You're backing off: melee mercenaries come with you, whatever is on them
@@ -463,25 +479,22 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 	const int      engage   = Config.engage.load();
 	const unsigned elements = ElementsOf(merc, role);
 	void* const    wanted   = SkillTarget(game, owner); // what you're attacking
-	void*          best     = nullptr;
-	int            bestScore = INT_MAX;
+	int            ox = 0, oy = 0;
+	const bool     ownerPlaced = Position(owner, ox, oy);
+	// Scores first, the missile line check after (it is the costly part):
+	// only the best ones get it, until one has a clear shot.
+	int            scores[MaxCandidates];
+	std::size_t    order[MaxCandidates], ranked = 0;
 	for (std::size_t index = 0; index < scan.count; ++index) {
 		void* const unit        = scan.units[index];
 		const int   fromMerc    = scan.distance[index];
-		const int   fromOwner   = Distance(owner, unit);
+		const int   fromOwner   = scan.fromOwner[index];
 		void* const itsTarget   = SkillTarget(game, unit);
 		const bool  selfDefense = itsTarget == merc && fromMerc <= 6;
 		// Protecting you: melee only looks at what is right around you.
 		if (melee && Now.protect) {
 			if (fromOwner > Config.protect.load() + 2 && !(selfDefense && fromMerc <= 2)) continue;
 		} else if ((fromOwner > leash || (melee && fromMerc > (Now.intent == Intent::Retreat && Now.retreatMs >= 500 ? 3 : engage))) && !selfDefense) continue;
-		// Ranged: only targets it can shoot from where it stands (missile line,
-		// as the game's own ranged target choice checks), so it never runs
-		// around looking for a shot.
-		if (!melee && Blocked(unit, merc, 4)) {
-			OnlyBlocked = true;
-			continue;
-		}
 		// Barbarians intercept: the monster closest to you counts most, so they
 		// meet threats before they reach you. Everyone else: closest to itself.
 		const bool tank = role == Role::BashBarb || role == Role::FrenzyBarb;
@@ -493,9 +506,8 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 		// Where you're going: monsters ahead of you count more when you push
 		// in, monsters left behind count less when you back off.
 		if (Now.intent == Intent::Advance || Now.intent == Intent::Retreat) {
-			int ox = 0, oy = 0, ux = 0, uy = 0;
-			if (Position(owner, ox, oy) && Position(unit, ux, uy)) {
-				const double dx = ux - ox, dy = uy - oy, length = std::sqrt(dx * dx + dy * dy);
+			if (ownerPlaced) {
+				const double dx = scan.x[index] - ox, dy = scan.y[index] - oy, length = std::sqrt(dx * dx + dy * dy);
 				const double ahead = length > 0 ? (dx * Now.hx + dy * Now.hy) / length : 0;
 				if (Now.intent == Intent::Advance && ahead > 0.5) score -= 20;
 				if (Now.intent == Intent::Retreat && ahead < 0 && itsTarget != owner && itsTarget != merc) score += 40;
@@ -504,10 +516,25 @@ void* ChooseTarget(void* game, void* merc, void* owner, Role role) noexcept {
 		if (itsTarget == owner) score -= melee ? 60 : 40;
 		if (itsTarget == merc) score -= 20;
 		if (ImmuneToAll(unit, elements)) score += role == Role::IronWolf ? 200 : 30;
-		if (score < bestScore) bestScore = score, best = unit;
+		scores[index] = score, order[ranked++] = index;
 	}
-	if (best) OnlyBlocked = false;
-	return best;
+	// Best score first. Ranged: only targets it can shoot from where it
+	// stands (missile line, as the game's own ranged target choice checks),
+	// so it never runs around looking for a shot.
+	for (std::size_t done = 0; done < ranked; ++done) {
+		std::size_t pick = done;
+		for (std::size_t other = done + 1; other < ranked; ++other)
+			if (scores[order[other]] < scores[order[pick]]) pick = other;
+		std::swap(order[done], order[pick]);
+		void* const unit = scan.units[order[done]];
+		if (!melee && Blocked(unit, merc, 4)) {
+			OnlyBlocked = true;
+			continue;
+		}
+		OnlyBlocked = false;
+		return unit;
+	}
+	return nullptr;
 }
 
 // ---- actions ----
@@ -836,7 +863,7 @@ void ChooseSides(OwnerState& state, int ox, int oy, double nx, double ny) noexce
 	}
 	if (count && flip < keep) {
 		state.mirror = -state.mirror;
-		Log(false, "mv %lu sides: new heading (%.2f,%.2f), lanes flip to keep %d mercenaries on their side (cost %.0f vs %.0f)",
+		if (Config.log.load(std::memory_order_relaxed)) Log(false, "mv %lu sides: new heading (%.2f,%.2f), lanes flip to keep %d mercenaries on their side (cost %.0f vs %.0f)",
 		    static_cast<unsigned long>(now % 1000000), nx, ny, count, flip, keep);
 	}
 }
@@ -1066,8 +1093,8 @@ Intent ReadIntent(void* owner, const OwnerState& state, const Scan& scan) noexce
 	int    count = 0;
 	const int leash = Config.leash.load();
 	for (std::size_t index = 0; index < scan.count; ++index) {
-		int x = 0, y = 0;
-		if (!Position(scan.units[index], x, y) || Cheb(x, y, ox, oy) > leash) continue;
+		const int x = scan.x[index], y = scan.y[index];
+		if (Cheb(x, y, ox, oy) > leash) continue;
 		cx += x - ox, cy += y - oy, ++count;
 	}
 	if (!count) return Intent::Travel;
@@ -1147,6 +1174,15 @@ bool CrowdControl(void* game, void* merc, Role role, void* target) noexcept {
 	}
 }
 
+// 16 directions around a point (cos, sin), for the place searches below.
+struct RingTable {
+	double value[16][2];
+	RingTable() noexcept {
+		for (int step = 0; step < 16; ++step) value[step][0] = std::cos(step * 3.14159265358979 / 8.0), value[step][1] = std::sin(step * 3.14159265358979 / 8.0);
+	}
+	const double* operator[](int step) const noexcept { return value[step]; }
+} const Ring;
+
 // Getting surrounded: monsters within 4 on every side but one narrow gap
 // (melee: 4 monsters and no gap of 120 degrees; ranged: 3 and 150). It moves
 // out to the free spot with the most room, toward you.
@@ -1160,8 +1196,8 @@ bool BreakOut(void* game, void* merc, void* owner, const Scan& scan, Role role) 
 	double angles[MaxCandidates];
 	int    count = 0;
 	for (std::size_t index = 0; index < scan.count; ++index) {
-		int x = 0, y = 0;
-		if (scan.distance[index] > 4 || !Position(scan.units[index], x, y) || (x == mx && y == my)) continue;
+		const int x = scan.x[index], y = scan.y[index];
+		if (scan.distance[index] > 4 || (x == mx && y == my)) continue;
 		angles[count++] = std::atan2(double(y - my), double(x - mx));
 	}
 	if (count < (melee ? 4 : 3)) return false;
@@ -1169,19 +1205,21 @@ bool BreakOut(void* game, void* merc, void* owner, const Scan& scan, Role role) 
 	double gap = angles[0] + 2 * 3.14159265358979 - angles[count - 1];
 	for (int index = 1; index < count; ++index) gap = std::max(gap, angles[index] - angles[index - 1]);
 	if (gap >= (melee ? 2.09 : 2.62)) return false;
+	// Only monsters within 16 can be the closest one to a way out (the ring
+	// itself is within 4, the ways out within 6).
+	int nx[MaxCandidates], ny[MaxCandidates], close = 0;
+	for (std::size_t index = 0; index < scan.count; ++index)
+		if (Cheb(scan.x[index], scan.y[index], mx, my) <= 16) nx[close] = scan.x[index], ny[close] = scan.y[index], ++close;
 	double bestScore = -1e9;
 	int    bx = 0, by = 0;
 	for (const double radius : { 4.0, 6.0 })
 		for (int step = 0; step < 16; ++step) {
-			const double angle = step * 3.14159265358979 / 8.0;
-			const int    x = mx + static_cast<int>(std::lround(radius * std::cos(angle))), y = my + static_cast<int>(std::lround(radius * std::sin(angle)));
-			if (GridAt(merc, x, y, GridWall)) continue;
-			double room = 1e9;
-			for (std::size_t index = 0; index < scan.count; ++index) {
-				int ux = 0, uy = 0;
-				if (Position(scan.units[index], ux, uy)) room = std::min(room, std::sqrt(double(ux - x) * (ux - x) + double(uy - y) * (uy - y)));
-			}
-			if (room < 3.0) continue;
+			const int x = mx + static_cast<int>(std::lround(radius * Ring[step][0])), y = my + static_cast<int>(std::lround(radius * Ring[step][1]));
+			double    least = 1e18;
+			for (int index = 0; index < close && least >= 9.0; ++index)
+				least = std::min(least, double(nx[index] - x) * (nx[index] - x) + double(ny[index] - y) * (ny[index] - y));
+			if (least < 9.0 || GridAt(merc, x, y, GridWall)) continue; // under 3 from a monster, or a wall
+			const double room = std::sqrt(least);
 			const double score = room * 3.0 - std::sqrt(double(x - ox) * (x - ox) + double(y - oy) * (y - oy)) * 0.7;
 			if (score > bestScore) bestScore = score, bx = x, by = y;
 		}
@@ -1319,27 +1357,39 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 // False when where it stands already does. `scale` widens the room (safe mode).
 bool Reposition(void* game, void* merc, void* owner, const Scan& scan, Role role, double scale = 1.0) noexcept {
 	int ox = 0, oy = 0, mx = 0, my = 0;
-	if (!Position(owner, ox, oy) || !Position(merc, mx, my)) return false;
+	if (!scan.count || !Position(owner, ox, oy) || !Position(merc, mx, my)) return false;
 	const double base   = Config.danger.load();
 	const double tether = base + 4.0;
+	// Only monsters that can be inside the range of a place it may pick (all
+	// within the tether of you) or of where it stands count: the others
+	// change nothing, and with many monsters around they cost the most.
+	const double most  = (base + 4.0) * scale; // the widest any room gets (see Exclusion)
+	const double reach = tether + 1.0 + most;
 	int    ex[MaxCandidates], ey[MaxCandidates], count = 0;
-	double room[MaxCandidates], widest = 0;
-	for (std::size_t index = 0; index < scan.count; ++index)
-		if (Position(scan.units[index], ex[count], ey[count])) {
-			room[count] = Exclusion(scan.units[index], base) * scale;
-			widest      = std::max(widest, room[count]);
-			++count;
-		}
+	double inverse[MaxCandidates], widest = 0; // 1 / room squared
+	for (std::size_t index = 0; index < scan.count; ++index) {
+		const int    x = scan.x[index], y = scan.y[index];
+		const double room = Exclusion(scan.units[index], base) * scale; // also keeps its speed up to date
+		const double toOwner = std::sqrt(double(x - ox) * (x - ox) + double(y - oy) * (y - oy));
+		const double toMerc  = std::sqrt(double(x - mx) * (x - mx) + double(y - my) * (y - my));
+		if (toOwner > reach && toMerc > most) continue;
+		ex[count] = x, ey[count] = y, inverse[count] = 1.0 / (room * room);
+		widest    = std::max(widest, room);
+		++count;
+	}
 	if (!count) return false;
 	// How much room a place has: under 1, a monster is inside its range.
-	const auto slack = [&](double x, double y) {
-		double least = 1e9;
-		for (int index = 0; index < count; ++index)
-			least = std::min(least, std::sqrt((ex[index] - x) * (ex[index] - x) + (ey[index] - y) * (ey[index] - y)) / room[index]);
-		return least;
+	// Squared all the way (one square root at the end); it stops counting
+	// once the place is worse than `floor`.
+	const auto slack = [&](double x, double y, double floor) {
+		double least = 1e18;
+		const double stop = floor * floor;
+		for (int index = 0; index < count && least >= stop; ++index)
+			least = std::min(least, ((ex[index] - x) * (ex[index] - x) + (ey[index] - y) * (ey[index] - y)) * inverse[index]);
+		return std::sqrt(least);
 	};
 	const auto fromOwner = [&](double x, double y) { return std::sqrt((x - ox) * (x - ox) + (y - oy) * (y - oy)); };
-	const double here = slack(mx, my);
+	const double here = slack(mx, my, 0.0);
 	// A little looser for where it already stands: no hopping between two nearly equal places.
 	if (here >= 0.9 && fromOwner(mx, my) <= tether) return Mv(merc, " safe: current place ok (%d monsters, room %.1f, slack %.2f)", count, widest, here), false;
 	double bestScore = 1e9, bestSlack = here + 0.15;
@@ -1347,14 +1397,15 @@ bool Reposition(void* game, void* merc, void* owner, const Scan& scan, Role role
 	bool   clear = false, fallback = false;
 	for (double radius = 2.0; radius <= tether + 0.01; radius += 1.5)
 		for (int step = 0; step < 16; ++step) {
-			const double angle = step * 3.14159265358979 / 8.0;
-			const int    x = ox + static_cast<int>(std::lround(radius * std::cos(angle))), y = oy + static_cast<int>(std::lround(radius * std::sin(angle)));
-			if (GridAt(merc, x, y, GridWall)) continue;
-			const double roomy = slack(x, y);
+			const int    x = ox + static_cast<int>(std::lround(radius * Ring[step][0])), y = oy + static_cast<int>(std::lround(radius * Ring[step][1]));
+			const double score = radius + std::sqrt(double(x - mx) * (x - mx) + double(y - my) * (y - my)) * 0.7;
+			// Once a clear place is found only a closer clear one can win.
+			if (clear && score >= bestScore) continue;
+			const double roomy = slack(x, y, clear ? 1.0 : std::min(1.0, bestSlack));
 			if (roomy >= 1.0) {
-				const double score = radius + std::sqrt(double(x - mx) * (x - mx) + double(y - my) * (y - my)) * 0.7;
-				if (score < bestScore) bestScore = score, bx = x, by = y, clear = true;
-			} else if (roomy > bestSlack) bestSlack = roomy, fx = x, fy = y, fallback = true;
+				if (GridAt(merc, x, y, GridWall)) continue;
+				bestScore = score, bx = x, by = y, clear = true;
+			} else if (!clear && roomy > bestSlack && !GridAt(merc, x, y, GridWall)) bestSlack = roomy, fx = x, fy = y, fallback = true;
 		}
 	if (!clear) {
 		if (!fallback) return Mv(merc, " safe: no better place (%d monsters, slack here %.2f)", count, here), false;
@@ -1467,7 +1518,7 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	std::uint16_t params[4] {};
 	Params(tick, params);
 	Scan scan;
-	Gather(game, merc, scan);
+	Gather(game, merc, scan, owner);
 	// What you're doing and how things stand, for the choices below.
 	Now        = {};
 	Now.intent = ReadIntent(owner, ownerState, scan);
@@ -1487,9 +1538,9 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	}
 	Now.hx = ownerState.hx, Now.hy = ownerState.hy;
 	for (std::size_t index = 0; index < scan.count; ++index)
-		if (Distance(owner, scan.units[index]) <= Config.protect.load()) Now.protect = true;
+		if (scan.fromOwner[index] <= Config.protect.load()) Now.protect = true;
 	Now.safe = UpdateSafe(merc, role);
-	void* const target  = ChooseTarget(game, merc, owner, role);
+	void* const target  = ChooseTarget(game, merc, owner, role, &scan);
 	const bool  blocked = OnlyBlocked;
 	Mv(merc, " view: you %s (%lu ms)%s%s", IntentName(Now.intent), static_cast<unsigned long>(Now.retreatMs), Now.protect ? ", enemies on you" : "", Now.safe ? ", it is in safe mode" : "");
 	if (Now.safe) return SafeThink(game, merc, owner, mercState, sx, sy, walking, target, role, scan, tick, params);
@@ -1527,7 +1578,7 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	int   nearOwner = INT_MAX, nearMerc = INT_MAX;
 	void* closest   = nullptr;
 	for (std::size_t index = 0; index < scan.count; ++index) {
-		nearOwner = std::min(nearOwner, Distance(owner, scan.units[index]));
+		nearOwner = std::min(nearOwner, scan.fromOwner[index]);
 		if (scan.distance[index] < nearMerc) nearMerc = scan.distance[index], closest = scan.units[index];
 	}
 	// Pushing in, they hold the formation a little longer; backing off, they
@@ -1535,13 +1586,22 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	// hit and run, unless something is in their face.
 	const int  dangerRange = Config.danger.load(std::memory_order_relaxed) - (Now.intent == Intent::Advance ? 3 : 0);
 	// Also whenever a monster is well inside its own range, whatever you do.
-	const bool trigger     = (Now.intent != Intent::Retreat && nearOwner <= dangerRange) || nearMerc <= Config.danger.load() * 7 / 10;
+	const bool threat      = nearMerc <= Config.danger.load() * 7 / 10;
+	// Only while it has something to shoot: up to 0.0.36 a monster it could
+	// not shoot (behind a wall, past the leash) left near you after its
+	// target died kept it standing where it was, out of the formation, until
+	// you went more than 6 past the danger range.
+	const bool trigger     = (Now.intent != Intent::Retreat && nearOwner <= dangerRange && target) || threat;
 	// It stays in positioning for 2 seconds after the last reason for it:
 	// a moment out of it sent it to its formation spot next to you, and the
 	// next moment back out to a safe distance (in and out every time you moved).
 	Vitals&    vitals      = VitalsOf(merc);
 	if (trigger) vitals.dangerUntil = GetTickCount() + 2000;
 	if (Now.intent == Intent::Retreat && !trigger) vitals.dangerUntil = 0; // backing off: it comes with you
+	if (!target && !threat && vitals.dangerUntil) {
+		vitals.dangerUntil = 0; // its target is dead and nothing is on it: back into the formation
+		Mv(merc, " ranged: nothing left to shoot, regroups");
+	}
 	const bool danger      = trigger || static_cast<std::int32_t>(vitals.dangerUntil - GetTickCount()) > 0;
 	if (Now.intent == Intent::Retreat && closest && nearMerc <= 3 && !walking) {
 		DeleteEvent(game, merc, 2, 0);

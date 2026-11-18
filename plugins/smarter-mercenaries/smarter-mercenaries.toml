@@ -41,4 +41,4 @@ safe_burst = 25
 safe_window = 2
 
 # Write mercenary decisions to the plugin log.
-log = true
+log = false
