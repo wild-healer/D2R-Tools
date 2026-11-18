@@ -35,7 +35,7 @@ namespace Gui  = D2RGui;
 namespace App  = D2RGui::App;
 
 constexpr const char* PluginId      = "wild-healers-charm-inventory";
-constexpr const char* PluginVersion = "1.1.2-dev-4";
+constexpr const char* PluginVersion = "1.1.2-dev-5";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -154,12 +154,12 @@ bool IsLocalPlayer(void* unit) noexcept {
 // game adds or removes a charm's stats ----
 // Sites: item add (call at exe+0x475102), removals (0x46E931, 0x46EAAB), the
 // server's refresh (0x470D9A, called often: only a new answer is logged).
-// Each line has the item, its page and cell. At most 20 lines a second and
+// Each line has the item, its page and cell. At most 100 lines a second and
 // 600 in all.
 constexpr std::uint64_t StatSites[] { 0x475102, 0x46E931, 0x46EAAB, 0x470D9A };
 constexpr const char*   StatSiteNames[] { "add", "remove", "remove", "refresh" };
 constexpr std::size_t   UnitClass = 0x04, UnitPath = 0x38, PathX = 0x10, PathY = 0x14;
-constexpr int           DiagMaxLines = 600, DiagPerSecond = 20, DiagItems = 256;
+constexpr int           DiagMaxLines = 600, DiagPerSecond = 100, DiagItems = 256;
 struct DiagItem {
 	const void* item;
 	int         answer, page, x, y; // the last answer (-1: none yet) and where the item was

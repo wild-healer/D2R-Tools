@@ -1,5 +1,9 @@
 # Wild Healer's Charm Inventory 1.1.2: release texts
 
+## Test build 1.1.2-dev-5 (not released, diagnostic)
+
+1.1.2-dev-4 with up to 100 diagnostic lines a second (20 cut off the charms added while a character loads).
+
 ## Test build 1.1.2-dev-4 (not released, diagnostic)
 
 1.1.2-dev-3 with a quieter diagnostic: the frequent refresh is logged only when its answer changes, so the log lasts the whole session.
