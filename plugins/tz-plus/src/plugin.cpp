@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.102";
+constexpr const char* PluginVersion = "0.0.103";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -338,6 +338,8 @@ struct GameMods {
 	bool                exitDone = false;
 	bool                heraldDone = false; // the dungeon's herald (made once a player reaches the dungeon's end)
 	void*               heraldRoom = nullptr; // its stairs room (Room2), picked when the first player comes into the dungeon
+	std::uint32_t       heraldMissile = 0; // the herald's arrival (the game's herald spawner missile), its unit id
+	int                 heraldWait = 0;    // frames until the herald comes out of it
 	int                 heraldX = 0, heraldY = 0;
 	std::uint32_t       exitPortalId = 0;
 	bool                roranDone = false; // Roran Stronghammer is in Harrogath
@@ -2725,7 +2727,7 @@ constexpr int            ZoneDensity = 3000; // fallback density (a template wit
 // A zone's density is its dungeon's own (Levels MonDen: Pit 600, Tower Cellar 1024, Stony Tomb 2200: tombs have more walls, so the
 // game gives them more spawn tries for the same monsters per room) x DensityScale %, then scaled by the picks' group sizes.
 constexpr int            DensityScale = 125;
-constexpr int            DungeonDensity = 150; // a zone's dungeon vs its outdoor area
+constexpr int            DungeonDensity = 225; // a zone's dungeon vs its outdoor area (0.0.103: x1.5)
 constexpr int            OutdoorDensity = 400; // the outdoor area: 4x the monsters (0.0.97: 40x40 area, density doubled again)
 constexpr int            OutdoorElites = 150, DungeonElites = 200; // elite packs vs the template level's own (%)
 constexpr int            GroupRef = 25;      // x10: the average group (with minions) ZoneDensity is tuned for; zones of bigger groups get fewer of them
@@ -3738,7 +3740,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		                       freeRoom ? "" : " (no free spot)");
 	g->zonesUsed += ZoneParts;
 	g->zoneId = id, g->level2Id = id + 2, g->exitPortal = nullptr, g->exitPortalId = 0, g->single = ZoneSingle[id - base].load();
-	g->exitX = g->exitY = 0, g->exitDone = false, g->heraldDone = false, g->heraldRoom = nullptr, g->heraldX = g->heraldY = 0;
+	g->exitX = g->exitY = 0, g->exitDone = false, g->heraldDone = false, g->heraldRoom = nullptr, g->heraldX = g->heraldY = 0, g->heraldMissile = 0, g->heraldWait = 0;
 	g->portal   = portal;
 	g->portalId = portal ? Field<std::uint32_t>(portal, 8) : 0;
 	ZonePortalOpen = portal != nullptr;
@@ -3876,13 +3878,37 @@ void DropBonus(void* game, void* unit) noexcept {
 	if (LootLogs.fetch_add(1) < 60) Log(false, "loot: bonus %s from monster %u (class %u)", code, Field<std::uint32_t>(unit, 8), Field<std::uint32_t>(unit, 4));
 }
 
+// The extra rolls drop no potions: the TC drop's item maker (D2R+0x444680 (game, monster, item id, ...), called at D2R+0x4410C7
+// from the TC roll D2R+0x4404F0 = D2MOO D2GAME_DropTC; a null item is a skipped pick) returns nothing for a potion while they roll.
+constexpr std::uint64_t TcItemCall = 0x4410C7, TcItemRva = 0x444680;
+using TcItemFn = void* (*)(void* game, void* monster, int item, std::uint64_t a4, std::uint64_t a5, std::uint64_t a6) noexcept;
+using ItemIdFn = int (*)(std::uint8_t mode, std::uint32_t code) noexcept; // D2R+0x313EF0
+thread_local bool ExtraRolling = false;
+constexpr const char* PotionCodes[] { "hp1", "hp2", "hp3", "hp4", "hp5", "mp1", "mp2", "mp3", "mp4", "mp5", "rvs", "rvl", "yps", "vps", "wms" };
+std::atomic<int> PotionSkips { 0 };
+void* HookTcItem(void* game, void* monster, int item, std::uint64_t a4, std::uint64_t a5, std::uint64_t a6) noexcept {
+	if (ExtraRolling && game) {
+		const std::uint8_t mode = Field<std::uint8_t>(game, 0x106);
+		for (const char* code : PotionCodes) {
+			const std::uint32_t value = static_cast<std::uint8_t>(code[0]) | static_cast<std::uint8_t>(code[1]) << 8 | static_cast<std::uint8_t>(code[2]) << 16 | 0x20u << 24;
+			if (At<ItemIdFn>(0x313EF0)(mode, value) == item) {
+				if (PotionSkips.fetch_add(1, std::memory_order_relaxed) < 10) Log(false, "loot: extra roll potion %s skipped", code);
+				return nullptr;
+			}
+		}
+	}
+	return At<TcItemFn>(TcItemRva)(game, monster, item, a4, a5, a6);
+}
+
 std::uint64_t HookDropTreasure(void* game, void* unit, int ignoreNoDrop, void* modeChange) noexcept {
 	const std::uint64_t result = DropTreasureOrig(game, unit, ignoreNoDrop, modeChange);
 	if (ignoreNoDrop || !game || !unit || Field<std::uint32_t>(unit, 0) != 1 || !InZoneLevel(unit)) return result;
 	const auto* data   = Field<std::uint8_t*>(unit, 0x10);
 	const bool  herald = data && (Field<std::uint16_t>(data, 0x1A) & 0x200);
 	const int   extra  = herald ? ExtraDropsHerald : At<IsSpecialFn>(0x38E0E0)(unit, true) ? ExtraDropsElite : ExtraDropsNormal;
+	ExtraRolling = true;
 	for (int i = 0; i < extra; ++i) DropTreasureOrig(game, unit, ignoreNoDrop, modeChange);
+	ExtraRolling = false;
 	if (herald && LootLogs.fetch_add(1) < 60) Log(false, "loot: herald %u dropped %d more times", Field<std::uint32_t>(unit, 8), extra);
 	if (static_cast<int>(LootRandom() % 1000) < BonusDropPerMille) DropBonus(game, unit);
 	return result;
@@ -3892,8 +3918,11 @@ std::uint64_t HookDropTreasure(void* game, void* unit, int ignoreNoDrop, void* m
 // does) at the dungeon's far stairs (the stairs room farthest from the first player in it), one of the zone's monster types.
 // The maker needs the level's region to be terrorized (D2R+0x489B70) and a herald tier (game +0x1A5C4, 1 here when none).
 using HeraldMakerFn = bool (*)(void* game, int x, int y, std::int16_t monster, void* room) noexcept;
-constexpr std::uint64_t HeraldMakerRva = 0x498810;
+constexpr std::uint64_t HeraldMakerRva = 0x498810, CreateMissileRva = 0x5371A0;
+using SpotMissileFn = void* (*)(void* game, void* params) noexcept;
+constexpr int HeraldSpawnerMissile = 737, HeraldDelay = 100; // frames (25 a second): after the arrival's orb (frame 95), before its end (125)
 void ZoneHerald(std::uint8_t* game) noexcept;
+void ZoneHeraldArrive(std::uint8_t* game) noexcept;
 
 // A zone's exit area (its own small level, east of the outdoor area): 3 golden chests (Objects 397, sparkly chest) in its middle.
 // Set up once, the first frame a player is in one of the zone's levels.
@@ -3951,7 +3980,7 @@ void ZoneExitArea(std::uint8_t* game) noexcept {
 constexpr int HeraldReach = 40; // subtiles from the end's stairs room centre: a player this close makes the herald
 void ZoneHerald(std::uint8_t* game) noexcept {
 	GameMods* g = ModsOf(game);
-	if (!g || !g->zoneId || g->heraldDone) return;
+	if (!g || !g->zoneId || g->heraldDone || g->heraldWait > 0) return;
 	auto* client = Field<std::uint8_t*>(game, GameClients);
 	for (int guard = 0; client && guard < 64; ++guard, client = Field<std::uint8_t*>(client, ClientNext)) {
 		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
@@ -3977,33 +4006,60 @@ void ZoneHerald(std::uint8_t* game) noexcept {
 		}
 		const long long dx = g->heraldX - at.x, dy = g->heraldY - at.y;
 		if (dx * dx + dy * dy > static_cast<long long>(HeraldReach) * HeraldReach) continue;
-		g->heraldDone = true;
-		auto*      stairs = static_cast<std::uint8_t*>(g->heraldRoom);
-		const auto mode   = Field<std::uint8_t>(game, GameMode);
-		if (!Field<void*>(stairs, 0x58)) At<ActivateRoomFn>(0x3289A0)(mode, stairs);
-		void* stairsRoom = Field<void*>(stairs, 0x58);
-		if (!stairsRoom) return Log(true, "zones: herald: its room could not be loaded");
-		Coord spot { g->heraldX, g->heraldY };
-		void* free = nullptr;
-		At<FindFreeSpotFn>(0x517F90)(game, stairsRoom, &spot, 2, 0x400, &free, 4, 100); // as for the chests
-		if (!free) return Log(true, "zones: herald: no free spot near %d,%d", spot.x, spot.y);
-		// One of the zone's monster types (those the game made in it so far).
-		std::vector<int> classes;
-		AcquireSRWLockShared(&g->modLock);
-		for (const auto& [cls, made] : g->zoneClasses)
-			if (made > 0) classes.push_back(cls);
-		ReleaseSRWLockShared(&g->modLock);
-		if (classes.empty()) return Log(true, "zones: herald: no monster type for it");
-		const auto monster = static_cast<std::int16_t>(classes[LootRandom() % classes.size()]);
-		auto&      tier    = *reinterpret_cast<std::int32_t*>(game + 0x1A5C4);
-		const int  before  = tier;
-		if (tier < 1) tier = 1;
-		const bool made = At<HeraldMakerFn>(HeraldMakerRva)(game, spot.x, spot.y, monster, free);
-		if (before < 1) tier = before;
-		Log(!made, "zones: herald (monster %d) at the dungeon's end (level %d), %d,%d: %s", monster, g->zoneId + KindDungeon, spot.x, spot.y,
-		    made ? "made" : "refused by the game (level not terrorized?)");
+		// Its arrival first, as the game's heralds come: the herald spawner missile (Missiles 737: mist, lightning bolts, then an
+		// orb at its 95th frame), made like the game makes any missile (D2R+0x5371A0 (game, params) = D2MOO
+		// MISSILES_CreateMissileFromParams; params +0 flags (1: at +0x24 x, +0x28 y), +8 owner, +0x20 missile). The herald comes
+		// out at HeraldDelay frames and the missile is removed before its end (its end, D2RCore's hit function 49, would make a
+		// herald of its own).
+		g->heraldWait = HeraldDelay;
+		alignas(8) std::uint8_t params[0x100] {};
+		SetField<std::uint32_t>(params, 0, 1), SetField<void*>(params, 8, player), SetField<std::int32_t>(params, 0x20, HeraldSpawnerMissile);
+		SetField<std::int32_t>(params, 0x24, g->heraldX), SetField<std::int32_t>(params, 0x28, g->heraldY);
+		if (!Field<void*>(g->heraldRoom, 0x58)) At<ActivateRoomFn>(0x3289A0)(Field<std::uint8_t>(game, GameMode), g->heraldRoom);
+		void* missile = At<SpotMissileFn>(CreateMissileRva)(game, params);
+		g->heraldMissile = missile ? Field<std::uint32_t>(missile, 8) : 0;
+		Log(!missile, "zones: herald: arriving at %d,%d%s", g->heraldX, g->heraldY, missile ? "" : " (no arrival missile)");
 		return;
 	}
+}
+
+// The herald comes out of its arrival (ZoneHerald started it), once a frame.
+void ZoneHeraldArrive(std::uint8_t* game) noexcept {
+	GameMods* g = ModsOf(game);
+	if (!g || !g->zoneId || g->heraldDone || g->heraldWait <= 0 || --g->heraldWait > 0) return;
+	g->heraldDone = true;
+	if (g->heraldMissile) {
+		if (void* missile = At<FindUnitFn>(0x48FE80)(game, 3, g->heraldMissile)) {
+			if (void* room = At<UnitRoomFn>(0x34B440)(missile)) At<RoomUnitGoneFn>(0x2EF4D0)(room, 3, g->heraldMissile);
+			At<RemoveUnitFn>(0x48FAA0)(game, missile);
+		}
+		g->heraldMissile = 0;
+	}
+	auto*      stairs = static_cast<std::uint8_t*>(g->heraldRoom);
+	const auto mode   = Field<std::uint8_t>(game, GameMode);
+	if (!stairs) return;
+	if (!Field<void*>(stairs, 0x58)) At<ActivateRoomFn>(0x3289A0)(mode, stairs);
+	void* stairsRoom = Field<void*>(stairs, 0x58);
+	if (!stairsRoom) return Log(true, "zones: herald: its room could not be loaded");
+	Coord spot { g->heraldX, g->heraldY };
+	void* free = nullptr;
+	At<FindFreeSpotFn>(0x517F90)(game, stairsRoom, &spot, 2, 0x400, &free, 4, 100); // as for the chests
+	if (!free) return Log(true, "zones: herald: no free spot near %d,%d", spot.x, spot.y);
+	// One of the zone's monster types (those the game made in it so far).
+	std::vector<int> classes;
+	AcquireSRWLockShared(&g->modLock);
+	for (const auto& [cls, made] : g->zoneClasses)
+		if (made > 0) classes.push_back(cls);
+	ReleaseSRWLockShared(&g->modLock);
+	if (classes.empty()) return Log(true, "zones: herald: no monster type for it");
+	const auto monster = static_cast<std::int16_t>(classes[LootRandom() % classes.size()]);
+	auto&      tier    = *reinterpret_cast<std::int32_t*>(game + 0x1A5C4);
+	const int  before  = tier;
+	if (tier < 1) tier = 1;
+	const bool made = At<HeraldMakerFn>(HeraldMakerRva)(game, spot.x, spot.y, monster, free);
+	if (before < 1) tier = before;
+	Log(!made, "zones: herald (monster %d) at the dungeon's end (level %d), %d,%d: %s", monster, g->zoneId + KindDungeon, spot.x, spot.y,
+	    made ? "made" : "refused by the game (level not terrorized?)");
 }
 
 void OpenExitPortal(std::uint8_t* game) noexcept {
@@ -4353,15 +4409,24 @@ std::uint64_t BuildZoneLevel(std::uint8_t mode, void* level, MazeBuildFn build, 
 // the game's random direction: one winding corridor, no side branches. When the newest room is boxed in (8 refusals in a row),
 // the game's own random room is used once (a short branch). (0.0.98 went east/south only from a first room moved to the
 // box's corner: the cave pieces opened onto nothing.)
-constexpr std::uint64_t MazeAddCall = 0x3E97C9, MazeAddRva = 0x3E77A0;
+constexpr std::uint64_t MazeAddCall = 0x3E97C9, MazeAddRva = 0x3E77A0, MazePickRva = 0x3EB960;
 using MazeAddFn = void* (*)(void* room, int direction, int merge) noexcept;
 thread_local int LinearRefused = 0, LinearBranches = 0;
 void* HookMazeAdd(void* room, int direction, int merge) noexcept {
 	auto* level = room ? Field<std::uint8_t*>(room, 0x90) : nullptr;
 	if (BuildingKind == KindDungeon && level) {
 		if (Field<std::int32_t>(level, 8) == 1) LinearRefused = 0, LinearBranches = 0; // the first room only: a new build
-		if (auto* last = Field<std::uint8_t*>(level, 0x10); last && LinearRefused < 8) {
-			if (void* added = At<MazeAddFn>(MazeAddRva)(last, direction, merge)) return LinearRefused = 0, added;
+		auto* last  = Field<std::uint8_t*>(level, 0x10);
+		auto* maze  = last ? Field<std::uint8_t*>(last, 0x40) : nullptr;
+		const bool fixed = maze && (Field<std::uint32_t>(maze, 0x10) & 2); // a room with its own map (the game never grows from one)
+		if (last && !fixed && LinearRefused < 8) {
+			if (void* added = At<MazeAddFn>(MazeAddRva)(last, direction, merge)) {
+				// The caller picks the tiles again for the room it chose and the new one (D2R+0x3EB960 (room, 1), the openings
+				// from the room's neighbours): the room we grew from needs it too, else it keeps its old openings (0.0.100: the
+				// first room opened bottom right while the second expected a bottom left one).
+				if (last != room) At<void (*)(void*, int) noexcept>(MazePickRva)(last, 1);
+				return LinearRefused = 0, added;
+			}
 			++LinearRefused;
 			return nullptr; // the game rolls again
 		}
@@ -4580,7 +4645,7 @@ void TrackMeetings(std::uint8_t* game) noexcept {
 
 std::uint64_t HookFrameCall(void* game) noexcept {
 	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), TrackMeetings(static_cast<std::uint8_t*>(game)),
-		          ZoneExitArea(static_cast<std::uint8_t*>(game)), ZoneHerald(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
+		          ZoneExitArea(static_cast<std::uint8_t*>(game)), ZoneHerald(static_cast<std::uint8_t*>(game)), ZoneHeraldArrive(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
 	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
@@ -4776,6 +4841,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		if (!context->InstallInlineHook(DropTreasureRva, DropTreasureBytes.data(), static_cast<std::uint32_t>(DropTreasureBytes.size()), reinterpret_cast<void*>(&HookDropTreasure), &original) || !original)
 			Log(true, "TZ Plus %s: no extra loot in the zones, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(DropTreasureRva));
 		else DropTreasureOrig = reinterpret_cast<DropTreasureFn>(original);
+		if (!PatchCall(TcItemCall, TcItemRva, reinterpret_cast<const void*>(&HookTcItem))) Log(true, "TZ Plus %s: extra rolls may drop potions (D2R+0x%llX)", PluginVersion, static_cast<unsigned long long>(TcItemCall));
 		original = nullptr;
 		if (!context->InstallInlineHook(ThinkRva, ThinkBytes.data(), static_cast<std::uint32_t>(ThinkBytes.size()), reinterpret_cast<void*>(&HookThink), &original) || !original)
 			Log(true, "TZ Plus %s: Teleportation off, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(ThinkRva));
