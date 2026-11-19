@@ -55,7 +55,7 @@
 namespace {
 
 constexpr const char* PluginId      = "smarter-mercenaries";
-constexpr const char* PluginVersion = "0.0.37";
+constexpr const char* PluginVersion = "0.0.38";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1312,7 +1312,7 @@ bool KeepFormation(void* game, void* merc, void* owner, MercState& state, int x,
 	// When you stop, a mercenary that ran a little ahead with you stays
 	// where it is instead of running back to the exact spot (a run there and
 	// a run back looked like a zig-zag).
-	const int tolerance = 3;
+	const int tolerance = 2; // 3 up to 0.0.37: most stood 3 off their spot, which looked loose
 	if (loose <= 0 && (away == 0 || (away <= tolerance && (state.front || Cheb(mx, my, ox, oy) <= closeEnough) && !Crowded(state, ox, oy)))) {
 		if (running && walking) return Mv(merc, " form: at spot (away %d), keeps running with you", away), true; // keep the run going, the spot moves on
 		state.moving = false;
@@ -1596,13 +1596,16 @@ void Think(void* game, void* merc, void* owner, void* tick, Role role) noexcept 
 	// a moment out of it sent it to its formation spot next to you, and the
 	// next moment back out to a safe distance (in and out every time you moved).
 	Vitals&    vitals      = VitalsOf(merc);
-	if (trigger) vitals.dangerUntil = GetTickCount() + 2000;
+	if (trigger) vitals.dangerUntil = (GetTickCount() + 2000) | 1; // never 0
 	if (Now.intent == Intent::Retreat && !trigger) vitals.dangerUntil = 0; // backing off: it comes with you
 	if (!target && !threat && vitals.dangerUntil) {
 		vitals.dangerUntil = 0; // its target is dead and nothing is on it: back into the formation
 		Mv(merc, " ranged: nothing left to shoot, regroups");
 	}
-	const bool danger      = trigger || static_cast<std::int32_t>(vitals.dangerUntil - GetTickCount()) > 0;
+	// 0 means no hold. Up to 0.0.37 a 0 counted as "in the future" once the
+	// PC had been on for more than 24.8 days (the tick count past 2^31), so
+	// ranged mercenaries stayed in positioning for good, monsters or not.
+	const bool danger      = trigger || (vitals.dangerUntil && static_cast<std::int32_t>(vitals.dangerUntil - GetTickCount()) > 0);
 	if (Now.intent == Intent::Retreat && closest && nearMerc <= 3 && !walking) {
 		DeleteEvent(game, merc, 2, 0);
 		if (Escape(game, merc, closest, 5, 1)) return Note(merc, role, closest, -16, "backs off with you, away from a monster in its face");
