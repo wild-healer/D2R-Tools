@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.107";
+constexpr const char* PluginVersion = "0.0.108";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2115,6 +2115,8 @@ void StartDisplay(const D2RL::PluginContext* context) noexcept {
 namespace Gui = D2RGui;
 namespace App = D2RGui::App;
 
+void ProbeClientRecords() noexcept; // 0.0.108 recycle probe
+
 // This game, as lines (UI thread).
 std::vector<std::string> GameLines() {
 	std::vector<std::string> lines;
@@ -2878,6 +2880,7 @@ void StartWindow(const D2RL::PluginContext* context) noexcept {
 		.tick     = [] {
             if (!InGame.load()) return;
             RoranTalkTick();
+            ProbeClientRecords();
             if (const std::string name = CharacterName(); !name.empty() && name != OfferCharacter) LoadOfferings(name), App::Refresh();
 		},
 		.mouse = OnGameMessage,
@@ -4954,8 +4957,61 @@ void SuperiorRewards(std::uint8_t* game) noexcept {
 	GiveRewards(game, *g, true);
 }
 
+// 0.0.108 probe (slot recycling research): the act's level records of our zone levels (drlg+0x868 list, next +0x1B8, id +0x1F8,
+// active +0xC, first room +0x10, inactive frames +0x1FC), logged when they change, for the server and the client copy.
+std::string ZoneLevelRecords(void* drlg) noexcept {
+	std::string out;
+	const int base = ZoneBase.load(std::memory_order_relaxed);
+	if (!drlg || base <= 0) return out;
+	auto* level = Field<std::uint8_t*>(drlg, 0x868);
+	for (int guard = 0; level && guard < 1000; ++guard, level = Field<std::uint8_t*>(level, 0x1B8)) {
+		const int id = Field<std::int32_t>(level, 0x1F8);
+		if (id < base || id >= base + ZoneSlots) continue;
+		char part[48];
+		std::snprintf(part, sizeof(part), "%s%d:%s%s", out.empty() ? "" : " ", id, Field<std::int32_t>(level, 0xC) ? "active" : "idle",
+		              Field<void*>(level, 0x10) ? "+rooms" : "");
+		out += part;
+	}
+	return out.empty() ? "none" : out;
+}
+
+void* DrlgOfUnit(void* unit) noexcept {
+	void* room  = unit ? At<UnitRoomFn>(0x34B440)(unit) : nullptr;
+	auto* room2 = room ? Field<std::uint8_t*>(room, 0x18) : nullptr;
+	auto* level = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
+	return level ? Field<void*>(level, 0x1C8) : nullptr;
+}
+
+void ProbeRecords(const char* side, void* drlg, std::string& last) noexcept {
+	if (!drlg) return;
+	std::string now = ZoneLevelRecords(drlg);
+	if (now == last) return;
+	last = std::move(now);
+	Log(false, "recycle probe, %s level records: %s", side, last.c_str());
+}
+
+void ProbeServerRecords(std::uint8_t* game) noexcept {
+	static int frames = 0;
+	static std::string last;
+	if (++frames % 25) return;
+	auto* client = Field<std::uint8_t*>(game, GameClients);
+	void* player = client && Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
+	ProbeRecords("server", DrlgOfUnit(player), last);
+}
+
+void ProbeClientRecords() noexcept {
+	static std::uint64_t next = 0;
+	static std::string last;
+	const std::uint64_t now = GetTickCount64();
+	if (now < next) return;
+	next = now + 1000;
+	const int index = At<LocalIndexFn>(0x8B2D0)();
+	if (index < 0 || index >= 8) return;
+	ProbeRecords("client", DrlgOfUnit(At<PlayerByIndexFn>(0x9A480)(index)), last);
+}
+
 std::uint64_t HookFrameCall(void* game) noexcept {
-	if (game) ServerGame.store(static_cast<std::uint8_t*>(game));
+	if (game) ServerGame.store(static_cast<std::uint8_t*>(game)), ProbeServerRecords(static_cast<std::uint8_t*>(game));
 	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), TrackMeetings(static_cast<std::uint8_t*>(game)),
 		          ZoneExitArea(static_cast<std::uint8_t*>(game)), ZoneHerald(static_cast<std::uint8_t*>(game)), ZoneHeraldArrive(static_cast<std::uint8_t*>(game)), PassageHerald(static_cast<std::uint8_t*>(game)), SuperiorRewards(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
