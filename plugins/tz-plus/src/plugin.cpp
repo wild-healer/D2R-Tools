@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.104";
+constexpr const char* PluginVersion = "0.0.105";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -326,6 +326,11 @@ struct GameMods {
 	int                 count = 0;
 	Rolled              mods[3] {};
 	int                 gold = 0, magic = 0, xp = 0; // % bonuses
+	// A superior zone (paid with the 5 Worldstone Shards): one more mod, for the zone's monsters only, and the rewards of all the
+	// mods x1.5 for the players in it; twice the density.
+	bool                superior = false;
+	Rolled              extra {};
+	int                 supGold = 0, supMagic = 0, supXp = 0;
 	std::atomic<int>    monsters { 0 };
 	std::atomic<int>    zoneCount[4] {}; // monsters of the open TZ Plus zone: trash, champions, uniques, minions
 	int                 zonesUsed = 0; // TZ Plus zones opened in this game
@@ -439,6 +444,34 @@ void Roll(GameMods& g) noexcept {
 	g.xp    = xp * XpPerPoint;
 }
 
+// A superior zone: one more mod (none of the game's, at most one aura), its tier as Roll's; the rewards of all the mods x1.5.
+constexpr int SuperiorRewardPct = 150, SuperiorDensityPct = 200;
+void RollSuperior(GameMods& g) noexcept {
+	const Range& range = Ranges[g.difficulty];
+	const double p     = static_cast<double>(g.zoneLevel - range.minLevel) / (range.maxLevel - range.minLevel);
+	std::uint64_t state = g.seed ^ 0x5EB10E5ull ^ (static_cast<std::uint64_t>(std::time(nullptr)) << 24);
+	bool taken[ModCount] {}, aura = false;
+	for (int i = 0; i < g.count; ++i) taken[g.mods[i].mod] = true, aura |= Mods[g.mods[i].mod].kind == Kind::Aura;
+	const auto ok = [&](int m) { return !taken[m] && Config.allowed[m] && !ModBanned[m] && !(aura && Mods[m].kind == Kind::Aura); };
+	int total = 0;
+	for (int m = 0; m < ModCount; ++m)
+		if (ok(m)) total += Mods[m].weight;
+	g.superior = total > 0;
+	if (!g.superior) return;
+	int pick = static_cast<int>(Mix(state) % static_cast<std::uint64_t>(total));
+	for (int m = 0; m < ModCount; ++m) {
+		if (!ok(m)) continue;
+		if (pick < Mods[m].weight) {
+			g.extra = { m, std::clamp(Grow(1.0 + (range.maxTier - 1) * p, state), 1, range.maxTier) };
+			break;
+		}
+		pick -= Mods[m].weight;
+	}
+	int gold = g.extra.tier, magic = std::max(0, g.extra.tier - 1), xp = std::max(0, g.extra.tier - 2);
+	for (int i = 0; i < g.count; ++i) gold += g.mods[i].tier, magic += std::max(0, g.mods[i].tier - 1), xp += std::max(0, g.mods[i].tier - 2);
+	g.supGold = gold * GoldPerPoint * SuperiorRewardPct / 100, g.supMagic = magic * MagicPerPoint * SuperiorRewardPct / 100, g.supXp = xp * XpPerPoint * SuperiorRewardPct / 100;
+}
+
 GameMods* Find(const std::uint8_t* game) noexcept {
 	// By the game's memory and difficulty (its seed at +0x1A8 is the game's random state, it changes).
 	// Forgotten when the local player leaves a game (OnGameplayEvent).
@@ -475,9 +508,13 @@ GameMods* ModsOf(const std::uint8_t* game) noexcept {
 	return g;
 }
 
-int TierOf(const GameMods& g, int id, Kind kind = Kind::UMod) noexcept {
+bool InZoneLevel(void* unit) noexcept;
+
+// A mod's tier in this game; a superior zone's own mod counts for a unit in the zone (or with no unit: the game's shared rows).
+int TierOf(const GameMods& g, int id, Kind kind = Kind::UMod, void* unit = nullptr) noexcept {
 	for (int i = 0; i < g.count; ++i)
 		if (Mods[g.mods[i].mod].kind == kind && Mods[g.mods[i].mod].id == id) return g.mods[i].tier;
+	if (g.superior && Mods[g.extra.mod].kind == kind && Mods[g.extra.mod].id == id && (!unit || InZoneLevel(unit))) return g.extra.tier;
 	return 0;
 }
 
@@ -700,12 +737,13 @@ int GiveRewards(std::uint8_t* game, const GameMods& g, bool on, int level = -1) 
 			void* room = At<UnitRoomFn>(0x34B440)(unit);
 			if (!room || At<RoomLevelFn>(0x2EFC10)(room) != level) continue;
 		}
-		const std::int32_t gold = on ? g.gold : 0, magic = on ? g.magic : 0;
+		const bool         sup  = g.superior && InZoneLevel(unit);
+		const std::int32_t gold = on ? (sup ? g.supGold : g.gold) : 0, magic = on ? (sup ? g.supMagic : g.magic) : 0, xpBonus = on ? (sup ? g.supXp : g.xp) : 0;
 		const std::int32_t gold0 = GetBaseStat(unit, StatGoldFind), magic0 = GetBaseStat(unit, StatMagicFind);
 		const std::int32_t total0 = GetStat(unit, StatGoldFind), totalMagic0 = GetStat(unit, StatMagicFind);
 		if (gold0 != gold) SetStat(unit, StatGoldFind, gold);
 		if (magic0 != magic) SetStat(unit, StatMagicFind, magic);
-		if (GetBaseStat(unit, StatExperience) != (on ? g.xp : 0)) SetStat(unit, StatExperience, on ? g.xp : 0);
+		if (GetBaseStat(unit, StatExperience) != xpBonus) SetStat(unit, StatExperience, xpBonus);
 		if ((gold0 != gold || magic0 != magic) && RewardLogs < 24)
 			++RewardLogs, Log(false, "rewards on server player %p: gold find %d -> %d (bonus %d -> %d), magic find %d -> %d (bonus %d -> %d)", unit, total0,
 			                  GetStat(unit, StatGoldFind), gold0, gold, totalMagic0, GetStat(unit, StatMagicFind), magic0, magic);
@@ -1020,9 +1058,13 @@ void ApplyMods(std::uint8_t* game, void* unit, void* room) noexcept {
 	const int          top   = Ranges[g->difficulty].maxTier;
 	if (elite && tracedElites < 15) ++tracedElites, trace = true;
 	const int          cold0 = trace ? GetStat(unit, StatColdRes) : 0, fire0 = trace ? GetStat(unit, StatFireRes) : 0;
-	for (int i = 0; i < g->count; ++i) {
-		const Mod& mod  = Mods[g->mods[i].mod];
-		const int  tier = elite ? std::min(g->mods[i].tier + 1, top) : g->mods[i].tier;
+	Rolled list[4] {};
+	int    listed = 0;
+	for (int i = 0; i < g->count && listed < 3; ++i) list[listed++] = g->mods[i];
+	if (g->superior && InZoneLevel(unit)) list[listed++] = g->extra; // the superior zone's own mod
+	for (int i = 0; i < listed; ++i) {
+		const Mod& mod  = Mods[list[i].mod];
+		const int  tier = elite ? std::min(list[i].tier + 1, top) : list[i].tier;
 		if (boss && mod.notOnBoss) continue;
 		switch (mod.kind) {
 		case Kind::UMod: ApplyUMod(unit, mode, mod.id, tier, elite); break;
@@ -1202,7 +1244,7 @@ void TeleportWhenHit(std::uint8_t* game, void* unit, int, int hit) noexcept {
 	if (!hit || !game || !unit || !Config.enabled.load(std::memory_order_relaxed)) return;
 	GameMods* g = ModsOf(game);
 	if (!g) return;
-	int tier = TierOf(*g, 26);
+	int tier = TierOf(*g, 26, Kind::UMod, unit);
 	if (!tier) return; // a monster's own Teleportation: the game's behaviour only
 	void* room = At<UnitRoomFn>(0x34B440)(unit);
 	const int level = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
@@ -1241,7 +1283,7 @@ std::uint64_t HookCurse(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::
 	void*     unit = reinterpret_cast<void*>(c);
 	GameMods* mods = nullptr;
 	if (InTzPlusZone(game, unit, &mods)) {
-		if (int tier = TierOf(*mods, 7)) {
+		if (int tier = TierOf(*mods, 7, Kind::UMod, unit)) {
 			if (At<IsSpecialFn>(0x38E0E0)(unit, true)) tier = std::min(tier + 1, Ranges[mods->difficulty].maxTier);
 			const int before = static_cast<int>(d), after = std::clamp(before * CurseLevelPct[tier - 1] / 100, 1, 99);
 			d = static_cast<std::uint64_t>(after);
@@ -1369,7 +1411,7 @@ void HookPoison(void* attacker, void* defender, int damage, int length, int a5, 
 		if (game && ModsOf(game)) {
 			const int asked = length, rolled = damage;
 			GameMods* mods  = nullptr;
-			if (InTzPlusZone(game, attacker, &mods) && TierOf(*mods, 0, Kind::Poison)) {
+			if (InTzPlusZone(game, attacker, &mods) && TierOf(*mods, 0, Kind::Poison, attacker)) {
 				const int own = GetStat(attacker, StatPoisonLength);
 				if (own > 0 && length > own) length = own;
 			}
@@ -1445,13 +1487,13 @@ void HookMissileEvent(std::uint8_t* game, void* monster, void* missile) noexcept
 		if (const std::uint8_t* umods = At<UModListFn>(0x38E310)(monster))
 			for (int x = 0; x < 9; ++x) shots = shots || umods[x] == 29;
 		if (shots) {
-			int tier = TierOf(*mods, 29);
+			int tier = TierOf(*mods, 29, Kind::UMod, monster);
 			const std::uint8_t* md = Field<std::uint8_t*>(monster, 0x10);
 			if (md && (Field<std::uint16_t>(md, 0x1A) & 0xC)) tier = std::min(3, tier + 1); // champions and uniques: one tier higher
 			if (tier && extrasSeen >= 2) ++depth, ExtraShots(game, monster, missile, tier), --depth; // only where the game's spread its own two
 		}
 	}
-	const bool poison = TierOf(*mods, 0, Kind::Poison) != 0;
+	const bool poison = TierOf(*mods, 0, Kind::Poison, monster) != 0;
 	if (poison) {
 		const std::int32_t low = GetStat(monster, StatPoisonMin), high = GetStat(monster, StatPoisonMax), length = GetStat(monster, StatPoisonLength);
 		if (high > 0) {
@@ -2075,6 +2117,77 @@ std::vector<std::string> GameLines() {
 
 extern std::atomic<bool> PortalRequested, CloseRequested;
 
+// ---- superior zones: paid with one of each of the 5 Worldstone Shards (inventory, cube or stashes) ----
+// Checked on the UI thread when asked (Roran's menu); the shards are destroyed on the game thread once the portal is open.
+const D2RL::InventoryService* InventoryApi {};
+const D2RL::ItemService*      ItemsApi {};
+const D2RL::ThreadService*    ThreadsApi {};
+constexpr const char*         ShardCodes[5] { "xa1", "xa2", "xa3", "xa4", "xa5" };
+constexpr const char*         ShardNames[5] { "Western", "Eastern", "Southern", "Deep", "Northern" };
+std::atomic<bool>             SuperiorPending { false };
+SRWLOCK                       ShardLock = SRWLOCK_INIT;
+D2RL::PlayerHandle            ShardPlayer {};
+D2RL::ItemHandle              ShardItems[5] {};
+
+struct ShardScan {
+	D2RL::ItemHandle found[5] {};
+};
+D2RL::Inventory::IterationAction __cdecl ScanShard(const D2RL::PluginContext*, const D2RL::Items::ItemInfo* item, void* userData) noexcept {
+	auto* scan = static_cast<ShardScan*>(userData);
+	for (int i = 0; item && i < 5; ++i)
+		if (!scan->found[i] && item->code == D2RL::Items::MakeItemCode(ShardCodes[i][0], ShardCodes[i][1], ShardCodes[i][2], ' ')) scan->found[i] = item->handle;
+	return D2RL::Inventory::IterationAction::Continue;
+}
+
+// UI thread: the local player's 5 shards kept for the payment; else what is missing.
+bool FindShards(std::string& problem) noexcept {
+	if (!D2RL::HasInventoryServiceField(InventoryApi, D2RL::InventoryServiceRequiredSize) || !D2RL::HasItemServiceField(ItemsApi, D2RL::ItemServiceRequiredSize) ||
+	    !D2RL::HasThreadServiceField(ThreadsApi, D2RL::ThreadServiceRequiredSize))
+		return problem = "Superior zones need a newer D2RLoader (inventory, item and thread services)", false;
+	D2RL::PlayerHandle player {};
+	if (InventoryApi->getLocalPlayer(Context, &player) != D2RL::Inventory::Result::Success) return problem = "Superior zones: no player", false;
+	namespace Items = D2RL::Items;
+	const D2RL::Inventory::ItemFilter filter {
+		.structSize    = D2RL::Inventory::ItemFilterSize,
+		.containerMask = Items::ContainerBit(Items::ItemContainer::Inventory) | Items::ContainerBit(Items::ItemContainer::Cube) |
+		                 Items::ContainerBit(Items::ItemContainer::PersonalStash) | Items::ContainerBit(Items::ItemContainer::SharedStash),
+	};
+	ShardScan scan;
+	if (InventoryApi->forEachInventoryItem(Context, player, &filter, ScanShard, &scan) != D2RL::Inventory::Result::Success)
+		return problem = "Superior zones: your items could not be read", false;
+	std::string missing;
+	for (int i = 0; i < 5; ++i)
+		if (!scan.found[i]) missing += (missing.empty() ? "" : ", ") + std::string(ShardNames[i]);
+	if (!missing.empty()) return problem = "A superior zone takes one of each Worldstone Shard. Missing: " + missing + ".", false;
+	AcquireSRWLockExclusive(&ShardLock);
+	ShardPlayer = player;
+	for (int i = 0; i < 5; ++i) ShardItems[i] = scan.found[i];
+	ReleaseSRWLockExclusive(&ShardLock);
+	return true;
+}
+
+void __cdecl DestroyShards(const D2RL::PluginContext* context, void*) noexcept {
+	AcquireSRWLockExclusive(&ShardLock);
+	const D2RL::PlayerHandle player = ShardPlayer;
+	D2RL::ItemHandle         items[5];
+	for (int i = 0; i < 5; ++i) items[i] = ShardItems[i], ShardItems[i] = {};
+	ReleaseSRWLockExclusive(&ShardLock);
+	int paid = 0;
+	for (int i = 0; i < 5; ++i) {
+		if (!items[i]) continue;
+		const auto result = ItemsApi->destroyItem(context, player, items[i], D2RL::Items::SocketedItemPolicy::DestroyContents);
+		if (result == D2RL::Items::Result::Success) ++paid;
+		else Log(true, "superior zone: the %s Worldstone Shard could not be taken (result %u)", ShardNames[i], static_cast<unsigned>(result));
+	}
+	Log(false, "superior zone: %d of 5 Worldstone Shards paid", paid);
+}
+
+// Game thread (the zone portal just opened): the shards go.
+void PayShards() noexcept {
+	if (!ThreadsApi || ThreadsApi->runOnGameThread(Context, DestroyShards, nullptr) != D2RL::Threads::Result::Success)
+		Log(true, "superior zone: the shards could not be taken (no game thread)");
+}
+
 std::string TierText(const int (&v)[3], const char* unit) {
 	char line[64];
 	std::snprintf(line, sizeof(line), "%d%s / %d%s / %d%s", v[0], unit, v[1], unit, v[2], unit);
@@ -2178,6 +2291,13 @@ std::vector<App::Item> GameItems() {
 		out.push_back(App::Bullet("Rewards: " + Paint::Gold("+" + std::to_string(g->gold) + "% gold find") + ", " + Paint::Blue("+" + std::to_string(g->magic) + "% magic find") + ", "
 		                              + Paint::Green("+" + std::to_string(g->xp) + "% experience"),
 		                          IconOf("gold-stack", { 240, 200, 80 })));
+		if (g->superior) {
+			const Mod& m = Mods[g->extra.mod];
+			out.push_back(App::Bullet(Paint::Orange("Superior zone") + " open: in it, " + Paint::Gold(std::string(m.name) + (m.kind == Kind::Aura ? " aura " : " ") + Roman(g->extra.tier)) +
+			                              " too, twice the monsters, and " + Paint::Gold("+" + std::to_string(g->supGold) + "% gold find") + ", " +
+			                              Paint::Blue("+" + std::to_string(g->supMagic) + "% magic find") + ", " + Paint::Green("+" + std::to_string(g->supXp) + "% experience"),
+			                          IconOf("crystal-cluster", { 200, 120, 240 })));
+		}
 	} else out.push_back(App::Bullet(InGame ? "No TZ Plus mods in this game" : "Not in a game", IconOf("info")));
 	ReleaseSRWLockShared(&Lock);
 	out.push_back(App::CardEnd());
@@ -2226,8 +2346,11 @@ std::vector<App::Item> RuleItems() {
 	out.push_back(App::Bullet("Every monster rolls its drops " + Paint::Gold("once more") + ", elites " + Paint::Gold("twice more") + ", and the dungeon's " + Paint::Orange("herald") +
 	                              " (it appears when you reach the dungeon's end) " + Paint::Gold("four times more") + ".",
 	                          IconOf("swap-bag", { 240, 200, 80 })));
-	out.push_back(App::Bullet("Every monster has a " + Paint::Gold("1% chance") + " to drop a rune (at Hell's rune odds).", IconOf("gem-pendant", { 120, 170, 240 })));
+	out.push_back(App::Bullet("Every monster has a " + Paint::Gold("1% chance") + " to drop a flawless gem or a rune (even odds; the rune at Hell's rune odds).", IconOf("gem-pendant", { 120, 170, 240 })));
 	out.push_back(App::Bullet("No chipped, flawed or plain gems, and only the best potions (Super Healing and Mana, Full Rejuvenation); the extra rolls drop no potions.", IconOf("swap-bag")));
+	out.push_back(App::Bullet(Paint::Orange("Superior zone") + ": pay Roran one of each of the 5 Worldstone Shards. Twice the monsters, one more mod (in that zone only) and "
+	                              + Paint::Gold("x1.5 rewards") + " there.",
+	                          IconOf("crystal-cluster", { 200, 120, 240 })));
 	out.push_back(App::Bullet("Offer runes (Offering tab) to ban a mod or a monster family from your zones.", IconOf("rune-stone")));
 	out.push_back(App::Bullet(Paint::Red("Beware: ") + "these zones mix monsters from every act with this game's mods. Some combinations can be deadly, even for a strong character.",
 	                          IconOf("hazard-sign", { 230, 90, 60 })));
@@ -2426,7 +2549,7 @@ constexpr std::uint64_t NpcMenuBuildRva = 0x1147A0, UiOpenRva = 0xCD7C0, NpcCanc
 constexpr std::uint64_t MenuTextCall = 0x114CDC, StringByIndexRva = 0x3E2B730, NpcPacketCall = 0x10E2AD, SendPacket5Rva = 0xEC6E0;
 constexpr std::size_t   NpcMenuRow = 0x48;
 constexpr std::uint32_t RoranMenuClass = 534; // act5pow
-constexpr std::uint16_t TextPortal = 0xF7A0, TextRules = 0xF7A1;
+constexpr std::uint16_t TextPortal = 0xF7A0, TextRules = 0xF7A1, TextSuperior = 0xF7A2;
 std::atomic<std::uint32_t> RoranUnitId { 0 }, RoranTalkId { 0 };
 bool                       MenuHooked = false;
 
@@ -2436,6 +2559,7 @@ using SendPacket5Fn  = void (*)(std::uint8_t command, std::uint32_t value) noexc
 const char* HookMenuText(std::uint32_t index) noexcept {
 	if (index == TextPortal) return ZonePortalOpen.load() ? "Close the portal" : "Open a portal to a terror zone";
 	if (index == TextRules) return "Rules and offerings";
+	if (index == TextSuperior) return "Open a superior terror zone (5 Worldstone Shards)";
 	return At<const char* (*)(std::uint32_t) noexcept>(StringByIndexRva)(index);
 }
 
@@ -2450,6 +2574,12 @@ void HookNpcPacket(std::uint8_t command, std::uint32_t value) noexcept {
 bool __cdecl RoranPortal(std::uint8_t a) noexcept {
 	const bool result = At<MenuCallbackFn>(NpcCancelRva)(a);
 	Gui::Commands::Post(ZonePortalOpen.load() ? "zone-close" : "zone-open");
+	return result;
+}
+
+bool __cdecl RoranSuperior(std::uint8_t a) noexcept {
+	const bool result = At<MenuCallbackFn>(NpcCancelRva)(a);
+	Gui::Commands::Post("zone-open-superior");
 	return result;
 }
 
@@ -2483,11 +2613,12 @@ bool RoranMenuRow() noexcept {
 	std::uint8_t* row = fresh + count * NpcMenuRow;
 	std::memcpy(row, larzuk, NpcMenuRow);
 	SetField<std::int16_t>(row, 0, static_cast<std::int16_t>(RoranMenuClass));
-	SetField<std::uint32_t>(row, 4, 3); // 2 lines + Cancel
+	SetField<std::uint32_t>(row, 4, 4); // 3 lines + Cancel
 	for (int i = 0; i < 5; ++i) SetField<std::uint16_t>(row, 8 + i * 2, 0), SetField<const void*>(row, 0x18 + i * 8, nullptr);
-	SetField<std::uint16_t>(row, 8, TextPortal), SetField<std::uint16_t>(row, 10, TextRules);
+	SetField<std::uint16_t>(row, 8, TextPortal), SetField<std::uint16_t>(row, 10, TextSuperior), SetField<std::uint16_t>(row, 12, TextRules);
 	SetField<const void*>(row, 0x18, reinterpret_cast<const void*>(&RoranPortal));
-	SetField<const void*>(row, 0x20, reinterpret_cast<const void*>(&RoranRules));
+	SetField<const void*>(row, 0x20, reinterpret_cast<const void*>(&RoranSuperior));
+	SetField<const void*>(row, 0x28, reinterpret_cast<const void*>(&RoranRules));
 	SetField<std::uint8_t*>(vec, 0, fresh);
 	SetField<std::uint64_t>(vec, 0x10, count + 1);
 	SetField<std::uint64_t>(vec, 8, count + 1);
@@ -2687,6 +2818,13 @@ bool OnWindowCommand(const std::string& command) {
 	}
 	if (command == "zone-open") return ApplyBans(), PortalRequested = true, true; // the monster bans need the game's texts: resolved here
 	if (command == "zone-close") return CloseRequested = true, true;
+	if (command == "zone-open-superior") {
+		std::string problem;
+		if (ZonePortalOpen.load()) problem = "A zone portal is already open: close it first.";
+		if (problem.empty() && FindShards(problem)) return ApplyBans(), SuperiorPending = true, PortalRequested = true, true;
+		App::Go(0), App::Open(), App::Notice(problem, true);
+		return true;
+	}
 	return false;
 }
 
@@ -2709,6 +2847,7 @@ void StartWindow(const D2RL::PluginContext* context) noexcept {
 		.mouse = OnGameMessage,
 	};
 	RegisterRoranLook(context);
+	InventoryApi = Query<D2RL::InventoryService>("inventory"), ItemsApi = Query<D2RL::ItemService>("item"), ThreadsApi = Query<D2RL::ThreadService>("thread");
 	if (!App::Start(context, PluginId, std::move(window))) return Log(true, "the TZ Plus window is off: a service it needs is missing");
 	LoadOfferings({});
 }
@@ -3596,6 +3735,7 @@ void RebuildRegion(std::uint8_t* game, std::uint8_t mode, int id, std::uint64_t&
 }
 
 void OpenZonePortal(std::uint8_t* game) noexcept {
+	const bool superior = SuperiorPending.exchange(false); // paid: the shards go once the portal is open
 	const int base = ZoneBase.load();
 	if (base <= 0) return SetPortalResult("TZ Plus zones: not available (the level tables could not be extended, see the log)");
 	const int  difficulty = Field<std::uint8_t>(game, GameDifficulty);
@@ -3680,6 +3820,13 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 					std::uint8_t* row = Banks[bank].levels + id * LevelRow;
 					SetField<std::int32_t>(row, LvDen + i * 4, Field<std::int32_t>(row, LvDen + i * 4) * OutdoorDensity / 100);
 				}
+			// A superior zone: twice the density in the outdoor area and the dungeon.
+			if (superior && Banks[bank].levels)
+				for (const int lvl : { id, id + 1 })
+					for (int i = 0; i < 3; ++i) {
+						std::uint8_t* row = Banks[bank].levels + lvl * LevelRow;
+						SetField<std::int32_t>(row, LvDen + i * 4, Field<std::int32_t>(row, LvDen + i * 4) * SuperiorDensityPct / 100);
+					}
 		}
 	}
 	ForcedCount = 0;
@@ -3701,7 +3848,9 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	for (int i = 0; i < 4; ++i) g->zoneGen[i] = g->zoneSeen[i] = g->zoneKilled[i] = 0;
 	ReleaseSRWLockExclusive(&g->modLock);
 	Roll(*g);
-	const std::string mods = Describe(*g);
+	g->superior = false;
+	if (superior) RollSuperior(*g);
+	const std::string mods = Describe(*g) + (g->superior ? std::string("; superior: ") + Mods[g->extra.mod].name + " " + Roman(g->extra.tier) : std::string());
 	ReleaseSRWLockExclusive(&Lock);
 	SetConstants(*g, mode);
 	GiveRewards(game, *g, difficulty == 2);
@@ -3751,6 +3900,8 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		ZonePortals[PortalCursor++ % 64] = { Field<std::uint32_t>(portal, 8), id + KindEntry };
 		ReleaseSRWLockExclusive(&PortalLock);
 	}
+	if (portal && superior) PayShards();
+	else if (superior) Log(true, "zones: superior zone not opened, the shards stay");
 	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d) with its %s (level %d, our %d), monsters [%s], density %d/%d, Hell elite packs %d-%d/%d-%d; new mods: %s",
 	                g->zonesUsed / ZoneParts, ZoneSlots / ZoneParts, id, LevelName(Banks[mode], tmpl).c_str(), tmpl, LevelName(Banks[mode], dungeon).c_str(), dungeon, id + 1,
 	                monsters.c_str(), Field<std::int32_t>(Banks[mode].levels + id * LevelRow, LvDen + 8),
@@ -3834,7 +3985,7 @@ int ExitLogs = 0;
 // The game's monster drop (D2R+0x447B80 (game, monster, ignoreNoDrop, modeChange) = D2MOO MONSTERMODE_DropTreasure: picks the
 // monster's TC (normal, champion, unique, quest) and rolls it once; reached from the death (D2R+0x447B24, ignoreNoDrop 0) or Find
 // Item (D2R+0x446E80, 1)). In a zone a death rolls it again: once for any monster, twice for elites, four times for a herald
-// (MonsterData +0x1A word bit 0x200, set by the herald maker). Then 1% for a rune (at the
+// (MonsterData +0x1A word bit 0x200, set by the herald maker). Then 1% for a flawless gem or a rune (half each; the rune at the
 // game's own odds within Hell's "Runes 17"), dropped as the quests drop a given item: the monster's drop code (unit +0x118,
 // D2R+0x34F390) set, D2R+0x43FBF0 (game, monster, quality 2 normal, &item level, 0, -1, 0), the code put back.
 constexpr std::uint64_t DropTreasureRva = 0x447B80, DropByCodeRva = 0x43FBF0;
@@ -3843,6 +3994,7 @@ using DropTreasureFn = std::uint64_t (*)(void* game, void* unit, int ignoreNoDro
 using DropByCodeFn   = std::uint64_t (*)(void* game, void* unit, int quality, int* itemLevel, void* a5, int a6, int a7) noexcept;
 DropTreasureFn DropTreasureOrig {};
 constexpr int  ExtraDropsNormal = 1, ExtraDropsElite = 2, ExtraDropsHerald = 4, BonusDropPerMille = 10;
+constexpr const char* FlawlessGems[] { "gzv", "glw", "glg", "glr", "glb", "skl", "gly" };
 // Hell "Runes 17" odds per rune r01-r33 (parts per million, from the TC chain without NoDrop).
 constexpr int RuneOdds[33] { 23057, 15371, 57642, 38428, 80699, 53799, 115284, 76856, 115284, 76856, 89083, 59389, 53450, 35633, 29694, 19796, 15672,
                              10448, 8054,  5369,  4083,  2722,  2777,   1851,  1958,   1305,  1375,  917,   1017,  678,   757,   505,   193 };
@@ -3861,7 +4013,8 @@ bool InZoneLevel(void* unit) noexcept {
 
 void DropBonus(void* game, void* unit) noexcept {
 	char code[5] {};
-	{
+	if (LootRandom() % 2) std::snprintf(code, sizeof(code), "%s", FlawlessGems[LootRandom() % std::size(FlawlessGems)]);
+	else {
 		int total = 0;
 		for (const int w : RuneOdds) total += w;
 		int pick = static_cast<int>(LootRandom() % static_cast<std::uint64_t>(total)), rune = 0;
@@ -4654,9 +4807,17 @@ void TrackMeetings(std::uint8_t* game) noexcept {
 	}
 }
 
+// The superior zone's rewards follow the players in and out of it (Hell: the rewards are game-wide), twice a second.
+void SuperiorRewards(std::uint8_t* game) noexcept {
+	GameMods* g = ModsOf(game);
+	static int frames = 0;
+	if (!g || !g->superior || g->difficulty != 2 || ++frames % 12) return;
+	GiveRewards(game, *g, true);
+}
+
 std::uint64_t HookFrameCall(void* game) noexcept {
 	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), TrackMeetings(static_cast<std::uint8_t*>(game)),
-		          ZoneExitArea(static_cast<std::uint8_t*>(game)), ZoneHerald(static_cast<std::uint8_t*>(game)), ZoneHeraldArrive(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
+		          ZoneExitArea(static_cast<std::uint8_t*>(game)), ZoneHerald(static_cast<std::uint8_t*>(game)), ZoneHeraldArrive(static_cast<std::uint8_t*>(game)), SuperiorRewards(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
 	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
