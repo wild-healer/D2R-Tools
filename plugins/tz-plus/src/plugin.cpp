@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.108";
+constexpr const char* PluginVersion = "0.0.109";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1813,6 +1813,7 @@ void UseRoranLook() noexcept;
 bool RoranMenuRow() noexcept;
 extern bool MenuHooked;
 std::atomic<void*> RoranServer { nullptr }; // his server unit (this game)
+void ForgetClosingPortal() noexcept; // the game is gone
 std::atomic<bool> ZonePortalOpen { false }; // this game has an open TZ Plus zone portal (the barbarian offers to close it)
 
 void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
@@ -1821,7 +1822,7 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 	switch (event->kind) {
 	case EventKind::GameJoined: InGame = true, CurrentLevel = -1, UseRoranLook(), (MenuHooked && RoranMenuRow()); break;
 	case EventKind::GameLeft: {
-		RoranServer = nullptr;
+		RoranServer = nullptr, ForgetClosingPortal();
 		InGame = false, CurrentLevel = -1, ZonePortalOpen = false;
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
 		for (GameMods* g : Games)
@@ -2385,7 +2386,7 @@ std::vector<App::Item> RuleItems() {
 	                              " (it appears when you reach the dungeon's end) " + Paint::Gold("four times more") + ".",
 	                          IconOf("swap-bag", { 240, 200, 80 })));
 	out.push_back(App::Bullet("Every monster has a " + Paint::Gold("1% chance") + " to drop a flawless gem or a rune (even odds; the rune at Hell's rune odds).", IconOf("gem-pendant", { 120, 170, 240 })));
-	out.push_back(App::Bullet("No chipped, flawed or plain gems, no inferior items or throwing potions, only the best potions (Super Healing and Mana, Full Rejuvenation), and gold in fewer, 3x bigger piles; the extra rolls drop no potions.", IconOf("swap-bag")));
+	out.push_back(App::Bullet("No chipped, flawed or plain gems, no inferior items or throwing potions, only the best potions (Super Healing and Mana, Full Rejuvenation), and gold in fewer, 5x bigger piles; the extra rolls drop no potions.", IconOf("swap-bag")));
 	out.push_back(App::Bullet(Paint::Orange("Superior zone") + ": pay Roran one of each of the 5 Worldstone Shards. Twice the monsters, one more mod (in that zone only), a second herald guarding the passage to the chests, and "
 	                              + Paint::Gold("x1.5 rewards") + " there.",
 	                          IconOf("crystal-cluster", { 200, 120, 240 })));
@@ -2627,6 +2628,21 @@ bool __cdecl RoranRules(std::uint8_t a) noexcept {
 	return result;
 }
 
+// Roran's menu lines: no superior zone line while a zone portal is open (one portal at a time). UI thread, before a menu opens.
+std::uint8_t* RoranRow = nullptr;
+void SyncRoranMenu() noexcept {
+	static int shown = -1;
+	if (!RoranRow) return;
+	const bool open = ZonePortalOpen.load();
+	if (shown == static_cast<int>(open)) return;
+	shown = open;
+	const std::uint16_t texts[3] { TextPortal, open ? TextRules : TextSuperior, open ? std::uint16_t(0) : TextRules };
+	const void* calls[3] { reinterpret_cast<const void*>(&RoranPortal), open ? reinterpret_cast<const void*>(&RoranRules) : reinterpret_cast<const void*>(&RoranSuperior),
+		                   open ? nullptr : reinterpret_cast<const void*>(&RoranRules) };
+	for (int i = 0; i < 3; ++i) SetField<std::uint16_t>(RoranRow, 8 + i * 2, texts[i]), SetField<const void*>(RoranRow, 0x18 + i * 8, calls[i]);
+	SetField<std::uint32_t>(RoranRow, 4, open ? 3 : 4); // lines + Cancel
+}
+
 // Our row in the game's menu table (once: a copy of the table one row longer, the old one left as it is).
 bool RoranMenuRow() noexcept {
 	static int state = 0; // 1 done, -1 failed
@@ -2657,6 +2673,7 @@ bool RoranMenuRow() noexcept {
 	SetField<const void*>(row, 0x18, reinterpret_cast<const void*>(&RoranPortal));
 	SetField<const void*>(row, 0x20, reinterpret_cast<const void*>(&RoranSuperior));
 	SetField<const void*>(row, 0x28, reinterpret_cast<const void*>(&RoranRules));
+	RoranRow = row;
 	SetField<std::uint8_t*>(vec, 0, fresh);
 	SetField<std::uint64_t>(vec, 0x10, count + 1);
 	SetField<std::uint64_t>(vec, 8, count + 1);
@@ -2879,6 +2896,7 @@ void StartWindow(const D2RL::PluginContext* context) noexcept {
 		.command  = OnWindowCommand,
 		.tick     = [] {
             if (!InGame.load()) return;
+            SyncRoranMenu();
             RoranTalkTick();
             ProbeClientRecords();
             if (const std::string name = CharacterName(); !name.empty() && name != OfferCharacter) LoadOfferings(name), App::Refresh();
@@ -3976,14 +3994,40 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 using RemoveUnitFn   = void (*)(void* game, void* unit) noexcept;
 using RoomUnitGoneFn = void (*)(void* room, int type, std::uint32_t id) noexcept; // D2R+0x48FAA0 (the game removes a portal it could not link this way)
 
+// A closed zone portal first plays its closing animation (object mode 3, "S1", as the game's own portals when they collapse,
+// D2R+0x34E5F0 = UNITS_ChangeAnimMode), then goes away PortalCloseFrames later.
+using AnimModeFn = int (*)(void* unit, int mode) noexcept;
+constexpr int PortalCloseFrames = 30;
+struct ClosingPortal {
+	void*         game = nullptr;
+	std::uint32_t id   = 0;
+	int           wait = 0;
+} Closing;
+
+void RemovePortalUnit(std::uint8_t* game, std::uint32_t id) noexcept {
+	void* portal = At<FindUnitFn>(0x48FE80)(game, 2, id);
+	if (!portal) return;
+	// Like the game does for a portal it drops (D2R+0x435EB0): tell the room's clients the unit is gone, then remove it.
+	if (void* room = At<UnitRoomFn>(0x34B440)(portal)) At<RoomUnitGoneFn>(0x2EF4D0)(room, 2, id);
+	At<RemoveUnitFn>(0x48FAA0)(game, portal);
+}
+
+void ForgetClosingPortal() noexcept { Closing = {}; }
+
+void ClosingPortalTick(std::uint8_t* game) noexcept {
+	if (!Closing.id || Closing.game != game || --Closing.wait > 0) return;
+	RemovePortalUnit(game, Closing.id);
+	Closing = {};
+}
+
 void CloseZonePortal(std::uint8_t* game) noexcept {
 	GameMods* g = ModsOf(game);
 	if (!g || !g->portal) return ZonePortalOpen = false, SetPortalResult("TZ Plus zones: no zone portal is open in this game");
 	void* portal = At<FindUnitFn>(0x48FE80)(game, 2, g->portalId);
 	if (portal == g->portal) {
-		// Like the game does for a portal it drops (D2R+0x435EB0): tell the room's clients the unit is gone, then remove it.
-		if (void* room = At<UnitRoomFn>(0x34B440)(portal)) At<RoomUnitGoneFn>(0x2EF4D0)(room, 2, g->portalId);
-		At<RemoveUnitFn>(0x48FAA0)(game, portal);
+		if (Closing.id && Closing.game == game) RemovePortalUnit(game, Closing.id); // an older one still closing
+		At<AnimModeFn>(0x34E5F0)(portal, 3);
+		Closing = { game, g->portalId, PortalCloseFrames };
 	}
 	WriteZoneStats(*g, true);
 	g->portal = nullptr, g->portalId = 0, ZonePortalOpen = false;
@@ -4108,7 +4152,7 @@ constexpr const char* ZoneBannedCodes[] { "gcv", "gcw", "gcg", "gcr", "gcb", "sk
                                           "gsv", "gsw", "gsg", "gsr", "gsb", "sku", "gsy", "hp1", "hp2", "hp3", "hp4", "mp1", "mp2", "mp3", "mp4", "rvs",
                                           "gpl", "gps", "gpm", "opl", "ops", "opm" }; // + throwing potions (0.0.106)
 // Gold in the zones: 1 pile in GoldEvery, GoldEvery times bigger (the TC drop scales the pile after the maker, D2R+0x4410D8).
-constexpr int GoldEvery = 3, StatGold = 14;
+constexpr int GoldEvery = 5, StatGold = 14;
 bool ItemIs(std::uint8_t mode, int item, const char* code) noexcept {
 	const std::uint32_t value = static_cast<std::uint8_t>(code[0]) | static_cast<std::uint8_t>(code[1]) << 8 | static_cast<std::uint8_t>(code[2]) << 16 | 0x20u << 24;
 	return At<ItemIdFn>(0x313EF0)(mode, value) == item;
@@ -5011,7 +5055,7 @@ void ProbeClientRecords() noexcept {
 }
 
 std::uint64_t HookFrameCall(void* game) noexcept {
-	if (game) ServerGame.store(static_cast<std::uint8_t*>(game)), ProbeServerRecords(static_cast<std::uint8_t*>(game));
+	if (game) ServerGame.store(static_cast<std::uint8_t*>(game)), ProbeServerRecords(static_cast<std::uint8_t*>(game)), ClosingPortalTick(static_cast<std::uint8_t*>(game));
 	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), TrackMeetings(static_cast<std::uint8_t*>(game)),
 		          ZoneExitArea(static_cast<std::uint8_t*>(game)), ZoneHerald(static_cast<std::uint8_t*>(game)), ZoneHeraldArrive(static_cast<std::uint8_t*>(game)), PassageHerald(static_cast<std::uint8_t*>(game)), SuperiorRewards(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
