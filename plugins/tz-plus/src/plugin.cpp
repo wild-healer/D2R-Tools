@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.106";
+constexpr const char* PluginVersion = "0.0.107";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1848,17 +1848,25 @@ void AppendText(void* text, const std::string& line) noexcept {
 	At<AppendCharFn>(AppendCharRva)(text, '\n');
 }
 
+// The local player stands in the open superior zone (client side: its level id).
+bool InSuperiorZone(const GameMods& g, int level) noexcept {
+	const int base = ZoneBase.load(std::memory_order_relaxed);
+	return g.superior && g.zoneId && base > 0 && level >= g.zoneId && level < g.zoneId + ZoneParts;
+}
+
 // Our lines: one per mod, then the rewards.
 std::vector<std::string> ModLines() noexcept {
 	std::vector<std::string> lines;
 	if (!Config.show || !Config.enabled || !InGame) return lines;
 	AcquireSRWLockShared(&Lock);
 	if (const GameMods* g = Last; g && g->count > 0) {
+		const bool sup = InSuperiorZone(*g, CurrentLevel);
 		for (int i = 0; i < g->count; ++i) lines.push_back(std::string(Mods[g->mods[i].mod].name) + " " + Roman(g->mods[i].tier));
+		if (sup) lines.push_back(std::string(Mods[g->extra.mod].name) + " " + Roman(g->extra.tier) + " (superior)");
 		char line[64];
-		std::snprintf(line, sizeof(line), "+%d%% Gold Find", g->gold), lines.push_back(line);
-		std::snprintf(line, sizeof(line), "+%d%% Magic Find", g->magic), lines.push_back(line);
-		std::snprintf(line, sizeof(line), "+%d%% Experience", g->xp), lines.push_back(line);
+		std::snprintf(line, sizeof(line), "+%d%% Gold Find", sup ? g->supGold : g->gold), lines.push_back(line);
+		std::snprintf(line, sizeof(line), "+%d%% Magic Find", sup ? g->supMagic : g->magic), lines.push_back(line);
+		std::snprintf(line, sizeof(line), "+%d%% Experience", sup ? g->supXp : g->xp), lines.push_back(line);
 	}
 	ReleaseSRWLockShared(&Lock);
 	return lines;
@@ -1879,7 +1887,10 @@ void ShowRewards(int level) noexcept {
 	if (!player) return;
 	int difficulty = 0, gold = 0, magic = 0, xp = 0;
 	AcquireSRWLockShared(&Lock);
-	if (const GameMods* g = Last) difficulty = g->difficulty, gold = g->gold, magic = g->magic, xp = g->xp;
+	if (const GameMods* g = Last) {
+		const bool sup = InSuperiorZone(*g, level);
+		difficulty = g->difficulty, gold = sup ? g->supGold : g->gold, magic = sup ? g->supMagic : g->magic, xp = sup ? g->supXp : g->xp;
+	}
 	ReleaseSRWLockShared(&Lock);
 	if (!difficulty) return;
 	const bool on = difficulty == 2 || (level > 0 && At<InZoneListFn>(InZoneListRva)(level));
@@ -1996,6 +2007,7 @@ GameString* WriteNames(GameString* out, std::uint8_t flag, const std::uint8_t* l
 	if (const GameMods* g = Last) {
 		difficulty = g->difficulty;
 		for (int i = 0; i < g->count; ++i) entries[n++] = { g->mods[i].mod, g->mods[i].tier };
+		if (InSuperiorZone(*g, CurrentLevel) && n < ModCount) entries[n++] = { g->extra.mod, g->extra.tier };
 	}
 	ReleaseSRWLockShared(&Lock);
 	// Elites: only in terror zones (normal monsters only come here with the terror state).
@@ -2115,6 +2127,10 @@ std::vector<std::string> GameLines() {
 		for (int i = 0; i < g->count; ++i) lines.push_back(std::string(Mods[g->mods[i].mod].name) + " " + Roman(g->mods[i].tier));
 		char line[96];
 		std::snprintf(line, sizeof(line), "+%d%% Gold Find, +%d%% Magic Find, +%d%% Experience", g->gold, g->magic, g->xp), lines.push_back(line);
+		if (g->superior) {
+			lines.push_back(std::string("Superior zone: ") + Mods[g->extra.mod].name + " " + Roman(g->extra.tier) + " too");
+			std::snprintf(line, sizeof(line), "In it: +%d%% Gold Find, +%d%% Magic Find, +%d%% Experience", g->supGold, g->supMagic, g->supXp), lines.push_back(line);
+		}
 	} else lines.push_back(InGame ? "No TZ Plus mods in this game" : "Not in a game");
 	ReleaseSRWLockShared(&Lock);
 	return lines;
@@ -3533,7 +3549,7 @@ std::uint64_t HookPortalLevel(void* unit) noexcept {
 }
 
 void SetPortalResult(const char* format, ...) noexcept {
-	char    line[300] {};
+	char    line[600] {};
 	va_list args;
 	va_start(args, format);
 	std::vsnprintf(line, sizeof(line), format, args);
