@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.105";
+constexpr const char* PluginVersion = "0.0.106";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -346,6 +346,10 @@ struct GameMods {
 	std::uint32_t       heraldMissile = 0; // the herald's arrival (the game's herald spawner missile), its unit id
 	int                 heraldWait = 0;    // frames until the herald comes out of it
 	int                 heraldX = 0, heraldY = 0;
+	// A superior zone's second herald: in the outdoor area, at the passage to the exit area (the chests).
+	bool                passDone = true;
+	int                 passWait = 0, passX = 0, passY = 0;
+	std::uint32_t       passMissile = 0;
 	std::uint32_t       exitPortalId = 0;
 	bool                roranDone = false; // Roran Stronghammer is in Harrogath
 	int                 roranTries = 0;
@@ -586,6 +590,7 @@ constexpr int    ZoneSlots = 30; // ZoneParts levels a zone
 // outdoor areas joined to the outdoor one by the game's own passages: the entry (where the portal arrives) and the exit (chests).
 constexpr int    ZoneParts = 5, KindMain = 0, KindDungeon = 1, KindStandIn = 2, KindEntry = 3, KindExit = 4;
 constexpr int    MainWidth = 80, MainHeight = 40; // tiles, the outdoor area: 80 west-east (entry and exit on its short sides) x 40
+constexpr int    PassageInset = 3; // tiles: a superior zone's passage herald, inside the outdoor area from the exit area
 constexpr int    SmallArea = 24; // tiles, the entry and exit areas' size (levels come in 8-tile cells; border pieces that don't fit are skipped, HookBorderPlace)
 thread_local int  BuildingKind = -1;   // the kind of zone level being built (outdoor build steps skipped for the small areas)
 thread_local bool OwnObject    = false; // our own objects (golden chests), let through the small areas' object block
@@ -2127,7 +2132,6 @@ constexpr const char*         ShardNames[5] { "Western", "Eastern", "Southern", 
 std::atomic<bool>             SuperiorPending { false };
 SRWLOCK                       ShardLock = SRWLOCK_INIT;
 D2RL::PlayerHandle            ShardPlayer {};
-D2RL::ItemHandle              ShardItems[5] {};
 
 struct ShardScan {
 	D2RL::ItemHandle found[5] {};
@@ -2139,53 +2143,69 @@ D2RL::Inventory::IterationAction __cdecl ScanShard(const D2RL::PluginContext*, c
 	return D2RL::Inventory::IterationAction::Continue;
 }
 
-// UI thread: the local player's 5 shards kept for the payment; else what is missing.
-bool FindShards(std::string& problem) noexcept {
-	if (!D2RL::HasInventoryServiceField(InventoryApi, D2RL::InventoryServiceRequiredSize) || !D2RL::HasItemServiceField(ItemsApi, D2RL::ItemServiceRequiredSize) ||
-	    !D2RL::HasThreadServiceField(ThreadsApi, D2RL::ThreadServiceRequiredSize))
-		return problem = "Superior zones need a newer D2RLoader (inventory, item and thread services)", false;
-	D2RL::PlayerHandle player {};
-	if (InventoryApi->getLocalPlayer(Context, &player) != D2RL::Inventory::Result::Success) return problem = "Superior zones: no player", false;
-	namespace Items = D2RL::Items;
-	const D2RL::Inventory::ItemFilter filter {
-		.structSize    = D2RL::Inventory::ItemFilterSize,
-		.containerMask = Items::ContainerBit(Items::ItemContainer::Inventory) | Items::ContainerBit(Items::ItemContainer::Cube) |
-		                 Items::ContainerBit(Items::ItemContainer::PersonalStash) | Items::ContainerBit(Items::ItemContainer::SharedStash),
-	};
-	ShardScan scan;
-	if (InventoryApi->forEachInventoryItem(Context, player, &filter, ScanShard, &scan) != D2RL::Inventory::Result::Success)
-		return problem = "Superior zones: your items could not be read", false;
-	std::string missing;
-	for (int i = 0; i < 5; ++i)
-		if (!scan.found[i]) missing += (missing.empty() ? "" : ", ") + std::string(ShardNames[i]);
-	if (!missing.empty()) return problem = "A superior zone takes one of each Worldstone Shard. Missing: " + missing + ".", false;
-	AcquireSRWLockExclusive(&ShardLock);
-	ShardPlayer = player;
-	for (int i = 0; i < 5; ++i) ShardItems[i] = scan.found[i];
-	ReleaseSRWLockExclusive(&ShardLock);
-	return true;
+std::atomic<std::uint8_t*> ServerGame { nullptr }; // the local game (HookFrameCall), for the shard payment's checks
+std::string ZoneOpenProblem(std::uint8_t* game) noexcept;
+
+void __cdecl ShowShardProblem(const D2RL::PluginContext*, void* text) noexcept {
+	auto* problem = static_cast<std::string*>(text);
+	App::Go(0), App::Open(), App::Notice(*problem, true);
+	delete problem;
 }
 
-void __cdecl DestroyShards(const D2RL::PluginContext* context, void*) noexcept {
+// Game thread: one of each shard found (inventory, cube, stashes) and destroyed, then the superior portal is asked for. Nothing
+// is taken and nothing opens when a shard is missing, the zone cannot open, or a shard cannot be taken.
+void __cdecl PayShards(const D2RL::PluginContext* context, void*) noexcept {
 	AcquireSRWLockExclusive(&ShardLock);
 	const D2RL::PlayerHandle player = ShardPlayer;
-	D2RL::ItemHandle         items[5];
-	for (int i = 0; i < 5; ++i) items[i] = ShardItems[i], ShardItems[i] = {};
 	ReleaseSRWLockExclusive(&ShardLock);
-	int paid = 0;
-	for (int i = 0; i < 5; ++i) {
-		if (!items[i]) continue;
-		const auto result = ItemsApi->destroyItem(context, player, items[i], D2RL::Items::SocketedItemPolicy::DestroyContents);
-		if (result == D2RL::Items::Result::Success) ++paid;
-		else Log(true, "superior zone: the %s Worldstone Shard could not be taken (result %u)", ShardNames[i], static_cast<unsigned>(result));
+	std::string problem = InGame.load() ? ZoneOpenProblem(ServerGame.load()) : std::string("Superior zone: not in a game.");
+	namespace Items = D2RL::Items;
+	ShardScan scan;
+	if (problem.empty()) {
+		const D2RL::Inventory::ItemFilter filter {
+			.structSize    = D2RL::Inventory::ItemFilterSize,
+			.containerMask = Items::ContainerBit(Items::ItemContainer::Inventory) | Items::ContainerBit(Items::ItemContainer::Cube) |
+			                 Items::ContainerBit(Items::ItemContainer::PersonalStash) | Items::ContainerBit(Items::ItemContainer::SharedStash),
+		};
+		if (InventoryApi->forEachInventoryItem(context, player, &filter, ScanShard, &scan) != D2RL::Inventory::Result::Success) problem = "Superior zone: your items could not be read.";
 	}
-	Log(false, "superior zone: %d of 5 Worldstone Shards paid", paid);
+	if (problem.empty()) {
+		std::string missing;
+		for (int i = 0; i < 5; ++i)
+			if (!scan.found[i]) missing += (missing.empty() ? "" : ", ") + std::string(ShardNames[i]);
+		if (!missing.empty()) problem = "A superior zone takes one of each Worldstone Shard. Missing: " + missing + ".";
+	}
+	int paid = 0;
+	for (int i = 0; problem.empty() && i < 5; ++i) {
+		const auto result = ItemsApi->destroyItem(context, player, scan.found[i], Items::SocketedItemPolicy::DestroyContents);
+		if (result == Items::Result::Success) ++paid;
+		else {
+			Log(true, "superior zone: the %s Worldstone Shard could not be taken (result %u)", ShardNames[i], static_cast<unsigned>(result));
+			problem = std::string("Superior zone: the ") + ShardNames[i] + " Worldstone Shard could not be taken" + (paid ? " (the others were)." : ".");
+		}
+	}
+	if (!problem.empty()) {
+		Log(false, "superior zone not opened: %s", problem.c_str());
+		if (ThreadsApi->runOnUiThread(context, ShowShardProblem, new std::string(problem)) != D2RL::Threads::Result::Success) Log(true, "superior zone: %s", problem.c_str());
+		return;
+	}
+	Log(false, "superior zone: 5 Worldstone Shards paid");
+	SuperiorPending = true, PortalRequested = true;
 }
 
-// Game thread (the zone portal just opened): the shards go.
-void PayShards() noexcept {
-	if (!ThreadsApi || ThreadsApi->runOnGameThread(Context, DestroyShards, nullptr) != D2RL::Threads::Result::Success)
-		Log(true, "superior zone: the shards could not be taken (no game thread)");
+// UI thread: asks for the payment (the game thread checks and takes the shards, then opens the portal).
+bool AskSuperior(std::string& problem) noexcept {
+	if (!D2RL::HasInventoryServiceField(InventoryApi, D2RL::InventoryServiceRequiredSize) || !D2RL::HasItemServiceField(ItemsApi, D2RL::ItemServiceRequiredSize) ||
+	    !D2RL::HasThreadServiceField(ThreadsApi, D2RL::ThreadServiceRequiredSize))
+		return problem = "Superior zones need a newer D2RLoader (inventory, item and thread services).", false;
+	D2RL::PlayerHandle player {};
+	if (InventoryApi->getLocalPlayer(Context, &player) != D2RL::Inventory::Result::Success) return problem = "Superior zone: no player.", false;
+	AcquireSRWLockExclusive(&ShardLock);
+	ShardPlayer = player;
+	ReleaseSRWLockExclusive(&ShardLock);
+	if (ThreadsApi->runOnGameThread(Context, PayShards, nullptr) != D2RL::Threads::Result::Success)
+		return problem = "Superior zones only work in your own game.", false;
+	return true;
 }
 
 std::string TierText(const int (&v)[3], const char* unit) {
@@ -2347,8 +2367,8 @@ std::vector<App::Item> RuleItems() {
 	                              " (it appears when you reach the dungeon's end) " + Paint::Gold("four times more") + ".",
 	                          IconOf("swap-bag", { 240, 200, 80 })));
 	out.push_back(App::Bullet("Every monster has a " + Paint::Gold("1% chance") + " to drop a flawless gem or a rune (even odds; the rune at Hell's rune odds).", IconOf("gem-pendant", { 120, 170, 240 })));
-	out.push_back(App::Bullet("No chipped, flawed or plain gems, and only the best potions (Super Healing and Mana, Full Rejuvenation); the extra rolls drop no potions.", IconOf("swap-bag")));
-	out.push_back(App::Bullet(Paint::Orange("Superior zone") + ": pay Roran one of each of the 5 Worldstone Shards. Twice the monsters, one more mod (in that zone only) and "
+	out.push_back(App::Bullet("No chipped, flawed or plain gems, no inferior items or throwing potions, only the best potions (Super Healing and Mana, Full Rejuvenation), and gold in fewer, 3x bigger piles; the extra rolls drop no potions.", IconOf("swap-bag")));
+	out.push_back(App::Bullet(Paint::Orange("Superior zone") + ": pay Roran one of each of the 5 Worldstone Shards. Twice the monsters, one more mod (in that zone only), a second herald guarding the passage to the chests, and "
 	                              + Paint::Gold("x1.5 rewards") + " there.",
 	                          IconOf("crystal-cluster", { 200, 120, 240 })));
 	out.push_back(App::Bullet("Offer runes (Offering tab) to ban a mod or a monster family from your zones.", IconOf("rune-stone")));
@@ -2821,7 +2841,7 @@ bool OnWindowCommand(const std::string& command) {
 	if (command == "zone-open-superior") {
 		std::string problem;
 		if (ZonePortalOpen.load()) problem = "A zone portal is already open: close it first.";
-		if (problem.empty() && FindShards(problem)) return ApplyBans(), SuperiorPending = true, PortalRequested = true, true;
+		if (problem.empty() && AskSuperior(problem)) return ApplyBans(), true;
 		App::Go(0), App::Open(), App::Notice(problem, true);
 		return true;
 	}
@@ -3734,6 +3754,26 @@ void RebuildRegion(std::uint8_t* game, std::uint8_t mode, int id, std::uint64_t&
 	Log(false, "zones: level %d monster region rebuilt: [%s] -> [%s] (row picks %d of %d)", id, before.c_str(), after.c_str(), row[0x3A], row[LvMonCount + 1]);
 }
 
+void ZoneBox(std::uint8_t mode, int id, int& x, int& y, int& w, int& h) noexcept;
+
+// Why a zone portal cannot open now (empty: it can), the checks OpenZonePortal makes first.
+std::string ZoneOpenProblem(std::uint8_t* game) noexcept {
+	if (!game) return "Superior zone: not in a game.";
+	if (ZoneBase.load() <= 0) return "TZ Plus zones are not available (see the log).";
+	const auto mode = Field<std::uint8_t>(game, GameMode);
+	GameMods*  g    = ModsOf(game);
+	if (!g || mode > 3 || !Banks[mode].levels) return "TZ Plus zones are only in Nightmare and Hell games.";
+	void* player = nullptr;
+	auto* client = Field<std::uint8_t*>(game, GameClients);
+	for (int guard = 0; client && guard < 64 && !player; ++guard, client = Field<std::uint8_t*>(client, ClientNext))
+		if (Field<std::uint32_t>(client, 4) == 4) player = At<ClientPlayerFn>(0x484C90)(client, 0);
+	void* room = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
+	if (!room || At<RoomLevelFn>(0x2EFC10)(room) != Harrogath) return "Stand in Harrogath to open a zone portal.";
+	if (g->portal) return "A zone portal is already open: close it first.";
+	if (g->zonesUsed + ZoneParts > ZoneSlots) return "All the zones of this game are used: make a new game for more.";
+	return {};
+}
+
 void OpenZonePortal(std::uint8_t* game) noexcept {
 	const bool superior = SuperiorPending.exchange(false); // paid: the shards go once the portal is open
 	const int base = ZoneBase.load();
@@ -3892,6 +3932,12 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	g->zonesUsed += ZoneParts;
 	g->zoneId = id, g->level2Id = id + 2, g->exitPortal = nullptr, g->exitPortalId = 0, g->single = ZoneSingle[id - base].load();
 	g->exitX = g->exitY = 0, g->exitDone = false, g->heraldDone = false, g->heraldRoom = nullptr, g->heraldX = g->heraldY = 0, g->heraldMissile = 0, g->heraldWait = 0;
+	g->passDone = !g->superior, g->passWait = 0, g->passMissile = 0;
+	{
+		int ex = 0, ey = 0, ew = 0, eh = 0;
+		ZoneBox(mode, id + KindExit, ex, ey, ew, eh);
+		g->passX = (ex - PassageInset) * 5, g->passY = (ey + eh / 2) * 5; // subtiles, just inside the outdoor area
+	}
 	g->portal   = portal;
 	g->portalId = portal ? Field<std::uint32_t>(portal, 8) : 0;
 	ZonePortalOpen = portal != nullptr;
@@ -3900,8 +3946,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		ZonePortals[PortalCursor++ % 64] = { Field<std::uint32_t>(portal, 8), id + KindEntry };
 		ReleaseSRWLockExclusive(&PortalLock);
 	}
-	if (portal && superior) PayShards();
-	else if (superior) Log(true, "zones: superior zone not opened, the shards stay");
+	if (!portal && superior) Log(true, "zones: the superior zone's portal was refused after the shards were paid");
 	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d) with its %s (level %d, our %d), monsters [%s], density %d/%d, Hell elite packs %d-%d/%d-%d; new mods: %s",
 	                g->zonesUsed / ZoneParts, ZoneSlots / ZoneParts, id, LevelName(Banks[mode], tmpl).c_str(), tmpl, LevelName(Banks[mode], dungeon).c_str(), dungeon, id + 1,
 	                monsters.c_str(), Field<std::int32_t>(Banks[mode].levels + id * LevelRow, LvDen + 8),
@@ -4041,7 +4086,10 @@ constexpr const char* PotionCodes[] { "hp1", "hp2", "hp3", "hp4", "hp5", "mp1", 
 std::atomic<int> PotionSkips { 0 };
 // In the zones every roll also skips the chipped, flawed and plain gems and the potions below the best ones (0.0.104).
 constexpr const char* ZoneBannedCodes[] { "gcv", "gcw", "gcg", "gcr", "gcb", "skc", "gcy", "gfv", "gfw", "gfg", "gfr", "gfb", "skf", "gfy",
-                                          "gsv", "gsw", "gsg", "gsr", "gsb", "sku", "gsy", "hp1", "hp2", "hp3", "hp4", "mp1", "mp2", "mp3", "mp4", "rvs" };
+                                          "gsv", "gsw", "gsg", "gsr", "gsb", "sku", "gsy", "hp1", "hp2", "hp3", "hp4", "mp1", "mp2", "mp3", "mp4", "rvs",
+                                          "gpl", "gps", "gpm", "opl", "ops", "opm" }; // + throwing potions (0.0.106)
+// Gold in the zones: 1 pile in GoldEvery, GoldEvery times bigger (the TC drop scales the pile after the maker, D2R+0x4410D8).
+constexpr int GoldEvery = 3, StatGold = 14;
 bool ItemIs(std::uint8_t mode, int item, const char* code) noexcept {
 	const std::uint32_t value = static_cast<std::uint8_t>(code[0]) | static_cast<std::uint8_t>(code[1]) << 8 | static_cast<std::uint8_t>(code[2]) << 16 | 0x20u << 24;
 	return At<ItemIdFn>(0x313EF0)(mode, value) == item;
@@ -4060,8 +4108,31 @@ void* HookTcItem(void* game, void* monster, int item, std::uint64_t a4, std::uin
 				if (PotionSkips.fetch_add(1, std::memory_order_relaxed) < 20) Log(false, "loot: zone drop %s skipped", code);
 				return nullptr;
 			}
+		// Inferior items (the TC roll's quality 1, D2MOO ITEMQUAL_INFERIOR: the maker's 4th argument, its drop's +0x40).
+		if (static_cast<std::uint32_t>(a4) == 1) return nullptr;
+		if (ItemIs(mode, item, "gld")) {
+			if (LootRandom() % GoldEvery) return nullptr;
+			void* pile = At<TcItemFn>(TcItemRva)(game, monster, item, a4, a5, a6);
+			if (pile) SetStat(pile, StatGold, GetStat(pile, StatGold) * GoldEvery);
+			return pile;
+		}
 	}
 	return At<TcItemFn>(TcItemRva)(game, monster, item, a4, a5, a6);
+}
+
+// The rotation warnings in chat ("The tremors show signs of slowing." ...): the client (D2R+0x93A00) gets the warning list from
+// the terror zone config (D2R+0x35BF00 (out): +0 entries, +8 count, +0x18 set; called at D2R+0x93A37) and posts the one for the
+// time left. In a Hell game with TZ Plus nothing rotates: the list comes back empty.
+constexpr std::uint64_t WarningsCall = 0x93A37, WarningsRva = 0x35BF00;
+using WarningsFn = void* (*)(void* out) noexcept;
+void* HookWarnings(void* out) noexcept {
+	void* result = At<WarningsFn>(WarningsRva)(out);
+	bool  hell   = false;
+	AcquireSRWLockShared(&Lock);
+	hell = InGame.load() && Last && Last->difficulty == 2 && Config.enabled.load(std::memory_order_relaxed) && Config.hell;
+	ReleaseSRWLockShared(&Lock);
+	if (hell && out && Field<std::uint8_t>(out, 0x18)) SetField<std::uint64_t>(out, 8, 0);
+	return result;
 }
 
 std::uint64_t HookDropTreasure(void* game, void* unit, int ignoreNoDrop, void* modeChange) noexcept {
@@ -4084,6 +4155,7 @@ std::uint64_t HookDropTreasure(void* game, void* unit, int ignoreNoDrop, void* m
 using HeraldMakerFn = bool (*)(void* game, int x, int y, std::int16_t monster, void* room) noexcept;
 constexpr std::uint64_t HeraldMakerRva = 0x498810, CreateMissileRva = 0x5371A0;
 using SpotMissileFn = void* (*)(void* game, void* params) noexcept;
+
 constexpr int HeraldSpawnerMissile = 737, HeraldDelay = 100; // frames (25 a second): after the arrival's orb (frame 95), before its end (125)
 void ZoneHerald(std::uint8_t* game) noexcept;
 void ZoneHeraldArrive(std::uint8_t* game) noexcept;
@@ -4142,6 +4214,29 @@ void ZoneExitArea(std::uint8_t* game) noexcept {
 
 
 constexpr int HeraldReach = 40; // subtiles from the end's stairs room centre: a player this close makes the herald
+
+// A herald of one of the level's own monster types (its monster region, game +0x1D0[level]: +0x10 count, +0x14 entries of 0x34,
+// word monster first), else of the zone's.
+void MakeZoneHerald(std::uint8_t* game, GameMods* g, int level, const Coord& spot, void* room, const char* where) noexcept {
+	std::vector<int> classes;
+	if (auto** regions = Field<std::uint8_t**>(game, 0x1D0); regions && regions[level])
+		for (int i = 0; i < regions[level][0x10] && i < 13; ++i)
+			if (const auto m = Field<std::int16_t>(regions[level], 0x14 + i * 0x34); m > 0) classes.push_back(m);
+	if (classes.empty()) {
+		AcquireSRWLockShared(&g->modLock);
+		for (const auto& [cls, made] : g->zoneClasses)
+			if (made > 0) classes.push_back(cls);
+		ReleaseSRWLockShared(&g->modLock);
+	}
+	if (classes.empty()) return Log(true, "zones: herald %s: no monster type for it", where);
+	const auto monster = static_cast<std::int16_t>(classes[LootRandom() % classes.size()]);
+	auto&      tier    = *reinterpret_cast<std::int32_t*>(game + 0x1A5C4);
+	const int  before  = tier;
+	if (tier < 1) tier = 1;
+	const bool made = At<HeraldMakerFn>(HeraldMakerRva)(game, spot.x, spot.y, monster, room);
+	if (before < 1) tier = before;
+	Log(!made, "zones: herald (monster %d) %s (level %d), %d,%d: %s", monster, where, level, spot.x, spot.y, made ? "made" : "refused by the game (level not terrorized?)");
+}
 void ZoneHerald(std::uint8_t* game) noexcept {
 	GameMods* g = ModsOf(game);
 	if (!g || !g->zoneId || g->heraldDone || g->heraldWait > 0) return;
@@ -4209,21 +4304,49 @@ void ZoneHeraldArrive(std::uint8_t* game) noexcept {
 	void* free = nullptr;
 	At<FindFreeSpotFn>(0x517F90)(game, stairsRoom, &spot, 2, 0x400, &free, 4, 100); // as for the chests
 	if (!free) return Log(true, "zones: herald: no free spot near %d,%d", spot.x, spot.y);
-	// One of the zone's monster types (those the game made in it so far).
-	std::vector<int> classes;
-	AcquireSRWLockShared(&g->modLock);
-	for (const auto& [cls, made] : g->zoneClasses)
-		if (made > 0) classes.push_back(cls);
-	ReleaseSRWLockShared(&g->modLock);
-	if (classes.empty()) return Log(true, "zones: herald: no monster type for it");
-	const auto monster = static_cast<std::int16_t>(classes[LootRandom() % classes.size()]);
-	auto&      tier    = *reinterpret_cast<std::int32_t*>(game + 0x1A5C4);
-	const int  before  = tier;
-	if (tier < 1) tier = 1;
-	const bool made = At<HeraldMakerFn>(HeraldMakerRva)(game, spot.x, spot.y, monster, free);
-	if (before < 1) tier = before;
-	Log(!made, "zones: herald (monster %d) at the dungeon's end (level %d), %d,%d: %s", monster, g->zoneId + KindDungeon, spot.x, spot.y,
-	    made ? "made" : "refused by the game (level not terrorized?)");
+	MakeZoneHerald(game, g, g->zoneId + KindDungeon, spot, free, "at the dungeon's end");
+}
+
+// A superior zone's second herald, at the outdoor area's passage to the exit area: the same arrival when a player comes near.
+void PassageHerald(std::uint8_t* game) noexcept {
+	GameMods* g = ModsOf(game);
+	if (!g || !g->zoneId || !g->superior || g->passDone) return;
+	auto* client = Field<std::uint8_t*>(game, GameClients);
+	for (int guard = 0; client && guard < 64; ++guard, client = Field<std::uint8_t*>(client, ClientNext)) {
+		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
+		void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
+		if (!room || At<RoomLevelFn>(0x2EFC10)(room) != g->zoneId) continue;
+		Coord at {};
+		At<GetCoordsFn>(0x34A040)(player, &at);
+		if (g->passWait <= 0) {
+			const long long dx = g->passX - at.x, dy = g->passY - at.y;
+			if (dx * dx + dy * dy > static_cast<long long>(HeraldReach) * HeraldReach) continue;
+			g->passWait = HeraldDelay;
+			alignas(8) std::uint8_t params[0x100] {};
+			SetField<std::uint32_t>(params, 0, 1), SetField<void*>(params, 8, player), SetField<std::int32_t>(params, 0x20, HeraldSpawnerMissile);
+			SetField<std::int32_t>(params, 0x24, g->passX), SetField<std::int32_t>(params, 0x28, g->passY);
+			void* missile = At<SpotMissileFn>(CreateMissileRva)(game, params);
+			g->passMissile = missile ? Field<std::uint32_t>(missile, 8) : 0;
+			Log(!missile, "zones: passage herald: arriving at %d,%d%s", g->passX, g->passY, missile ? "" : " (no arrival missile)");
+			return;
+		}
+		if (--g->passWait > 0) return;
+		g->passDone = true;
+		if (g->passMissile) {
+			if (void* missile = At<FindUnitFn>(0x48FE80)(game, 3, g->passMissile)) {
+				if (void* mroom = At<UnitRoomFn>(0x34B440)(missile)) At<RoomUnitGoneFn>(0x2EF4D0)(mroom, 3, g->passMissile);
+				At<RemoveUnitFn>(0x48FAA0)(game, missile);
+			}
+			g->passMissile = 0;
+		}
+		void* spotRoom = At<void* (*)(void*, int, int) noexcept>(0x38DFB0)(room, g->passX, g->passY);
+		if (!spotRoom) return Log(true, "zones: passage herald: its room is not loaded");
+		Coord spot { g->passX, g->passY };
+		void* free = nullptr;
+		At<FindFreeSpotFn>(0x517F90)(game, spotRoom, &spot, 2, 0x400, &free, 4, 100);
+		if (!free) return Log(true, "zones: passage herald: no free spot near %d,%d", spot.x, spot.y);
+		return MakeZoneHerald(game, g, g->zoneId, spot, free, "at the passage to the chests");
+	}
 }
 
 void OpenExitPortal(std::uint8_t* game) noexcept {
@@ -4816,8 +4939,9 @@ void SuperiorRewards(std::uint8_t* game) noexcept {
 }
 
 std::uint64_t HookFrameCall(void* game) noexcept {
+	if (game) ServerGame.store(static_cast<std::uint8_t*>(game));
 	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), TrackMeetings(static_cast<std::uint8_t*>(game)),
-		          ZoneExitArea(static_cast<std::uint8_t*>(game)), ZoneHerald(static_cast<std::uint8_t*>(game)), ZoneHeraldArrive(static_cast<std::uint8_t*>(game)), SuperiorRewards(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
+		          ZoneExitArea(static_cast<std::uint8_t*>(game)), ZoneHerald(static_cast<std::uint8_t*>(game)), ZoneHeraldArrive(static_cast<std::uint8_t*>(game)), PassageHerald(static_cast<std::uint8_t*>(game)), SuperiorRewards(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
 	if (game && CloseRequested.exchange(false)) CloseZonePortal(static_cast<std::uint8_t*>(game));
 	return At<FrameCallFn>(FrameCallTarget)(game);
@@ -5013,6 +5137,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		if (!context->InstallInlineHook(DropTreasureRva, DropTreasureBytes.data(), static_cast<std::uint32_t>(DropTreasureBytes.size()), reinterpret_cast<void*>(&HookDropTreasure), &original) || !original)
 			Log(true, "TZ Plus %s: no extra loot in the zones, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(DropTreasureRva));
 		else DropTreasureOrig = reinterpret_cast<DropTreasureFn>(original);
+		if (!PatchCall(WarningsCall, WarningsRva, reinterpret_cast<const void*>(&HookWarnings))) Log(true, "TZ Plus %s: Hell games keep the rotation warnings (D2R+0x%llX)", PluginVersion, static_cast<unsigned long long>(WarningsCall));
 		if (!PatchCall(TcItemCall, TcItemRva, reinterpret_cast<const void*>(&HookTcItem))) Log(true, "TZ Plus %s: extra rolls may drop potions (D2R+0x%llX)", PluginVersion, static_cast<unsigned long long>(TcItemCall));
 		original = nullptr;
 		if (!context->InstallInlineHook(ThinkRva, ThinkBytes.data(), static_cast<std::uint32_t>(ThinkBytes.size()), reinterpret_cast<void*>(&HookThink), &original) || !original)
