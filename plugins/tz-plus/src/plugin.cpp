@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.103";
+constexpr const char* PluginVersion = "0.0.104";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2221,12 +2221,13 @@ std::vector<App::Item> RuleItems() {
 	out.push_back(App::Card("Roran Stronghammer's zones"));
 	out.push_back(App::Bullet("At the fire in Harrogath, in Nightmare and Hell: " + Paint::Gold(std::to_string(ZoneSlots / ZoneParts) + " zones") + " a game.", IconOf("campfire", { 240, 150, 60 })));
 	out.push_back(App::Bullet("An outdoor area half the size of Cold Plains with " + Paint::Red("4x the monsters") + " and x1.5 elite packs, 8 monster types from every act.", IconOf("world")));
-	out.push_back(App::Bullet("Its dungeon: x1.5 the density, x2 elite packs; its stairs lead back to Harrogath.", IconOf("castle")));
+	out.push_back(App::Bullet("Its dungeon: x2.25 the density, x2 elite packs; its stairs lead back to Harrogath.", IconOf("castle")));
 	out.push_back(App::Bullet("The exit area holds " + Paint::Gold("3 golden chests") + ".", IconOf("open-treasure-chest", { 240, 200, 80 })));
 	out.push_back(App::Bullet("Every monster rolls its drops " + Paint::Gold("once more") + ", elites " + Paint::Gold("twice more") + ", and the dungeon's " + Paint::Orange("herald") +
 	                              " (it appears when you reach the dungeon's end) " + Paint::Gold("four times more") + ".",
 	                          IconOf("swap-bag", { 240, 200, 80 })));
-	out.push_back(App::Bullet("Every monster has a " + Paint::Gold("2% chance") + " to drop a flawless gem or a rune (at Hell's rune odds).", IconOf("gem-pendant", { 120, 170, 240 })));
+	out.push_back(App::Bullet("Every monster has a " + Paint::Gold("1% chance") + " to drop a rune (at Hell's rune odds).", IconOf("gem-pendant", { 120, 170, 240 })));
+	out.push_back(App::Bullet("No chipped, flawed or plain gems, and only the best potions (Super Healing and Mana, Full Rejuvenation); the extra rolls drop no potions.", IconOf("swap-bag")));
 	out.push_back(App::Bullet("Offer runes (Offering tab) to ban a mod or a monster family from your zones.", IconOf("rune-stone")));
 	out.push_back(App::Bullet(Paint::Red("Beware: ") + "these zones mix monsters from every act with this game's mods. Some combinations can be deadly, even for a strong character.",
 	                          IconOf("hazard-sign", { 230, 90, 60 })));
@@ -3706,7 +3707,8 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	GiveRewards(game, *g, difficulty == 2);
 
 	// The portal: always at the same spot, by Roran's fire (in Harrogath), or next to the player when that spot is not loaded.
-	constexpr int PortalX = 5151, PortalY = 5110;
+	// 0.0.104: the 0.0.100 spot (5151,5110) turned 180 degrees around Roran (5145,5107), then half way back towards him.
+	constexpr int PortalX = 5142, PortalY = 5105;
 	Coord         spot { PortalX, PortalY };
 	void*         fixedRoom = At<void* (*)(void*, int, int) noexcept>(0x38DFB0)(room, PortalX, PortalY);
 	if (!fixedRoom || At<RoomLevelFn>(0x2EFC10)(fixedRoom) != 109) {
@@ -3832,7 +3834,7 @@ int ExitLogs = 0;
 // The game's monster drop (D2R+0x447B80 (game, monster, ignoreNoDrop, modeChange) = D2MOO MONSTERMODE_DropTreasure: picks the
 // monster's TC (normal, champion, unique, quest) and rolls it once; reached from the death (D2R+0x447B24, ignoreNoDrop 0) or Find
 // Item (D2R+0x446E80, 1)). In a zone a death rolls it again: once for any monster, twice for elites, four times for a herald
-// (MonsterData +0x1A word bit 0x200, set by the herald maker). Then 2% for a flawless gem or a rune (half each; the rune at the
+// (MonsterData +0x1A word bit 0x200, set by the herald maker). Then 1% for a rune (at the
 // game's own odds within Hell's "Runes 17"), dropped as the quests drop a given item: the monster's drop code (unit +0x118,
 // D2R+0x34F390) set, D2R+0x43FBF0 (game, monster, quality 2 normal, &item level, 0, -1, 0), the code put back.
 constexpr std::uint64_t DropTreasureRva = 0x447B80, DropByCodeRva = 0x43FBF0;
@@ -3840,8 +3842,7 @@ constexpr std::array<std::uint8_t, 15> DropTreasureBytes { 0x48, 0x8B, 0xC4, 0x4
 using DropTreasureFn = std::uint64_t (*)(void* game, void* unit, int ignoreNoDrop, void* modeChange) noexcept;
 using DropByCodeFn   = std::uint64_t (*)(void* game, void* unit, int quality, int* itemLevel, void* a5, int a6, int a7) noexcept;
 DropTreasureFn DropTreasureOrig {};
-constexpr int  ExtraDropsNormal = 1, ExtraDropsElite = 2, ExtraDropsHerald = 4, BonusDropPerMille = 20;
-constexpr const char* FlawlessGems[] { "gzv", "glw", "glg", "glr", "glb", "skl", "gly" };
+constexpr int  ExtraDropsNormal = 1, ExtraDropsElite = 2, ExtraDropsHerald = 4, BonusDropPerMille = 10;
 // Hell "Runes 17" odds per rune r01-r33 (parts per million, from the TC chain without NoDrop).
 constexpr int RuneOdds[33] { 23057, 15371, 57642, 38428, 80699, 53799, 115284, 76856, 115284, 76856, 89083, 59389, 53450, 35633, 29694, 19796, 15672,
                              10448, 8054,  5369,  4083,  2722,  2777,   1851,  1958,   1305,  1375,  917,   1017,  678,   757,   505,   193 };
@@ -3860,8 +3861,7 @@ bool InZoneLevel(void* unit) noexcept {
 
 void DropBonus(void* game, void* unit) noexcept {
 	char code[5] {};
-	if (LootRandom() % 2) std::snprintf(code, sizeof(code), "%s", FlawlessGems[LootRandom() % std::size(FlawlessGems)]);
-	else {
+	{
 		int total = 0;
 		for (const int w : RuneOdds) total += w;
 		int pick = static_cast<int>(LootRandom() % static_cast<std::uint64_t>(total)), rune = 0;
@@ -3886,16 +3886,27 @@ using ItemIdFn = int (*)(std::uint8_t mode, std::uint32_t code) noexcept; // D2R
 thread_local bool ExtraRolling = false;
 constexpr const char* PotionCodes[] { "hp1", "hp2", "hp3", "hp4", "hp5", "mp1", "mp2", "mp3", "mp4", "mp5", "rvs", "rvl", "yps", "vps", "wms" };
 std::atomic<int> PotionSkips { 0 };
+// In the zones every roll also skips the chipped, flawed and plain gems and the potions below the best ones (0.0.104).
+constexpr const char* ZoneBannedCodes[] { "gcv", "gcw", "gcg", "gcr", "gcb", "skc", "gcy", "gfv", "gfw", "gfg", "gfr", "gfb", "skf", "gfy",
+                                          "gsv", "gsw", "gsg", "gsr", "gsb", "sku", "gsy", "hp1", "hp2", "hp3", "hp4", "mp1", "mp2", "mp3", "mp4", "rvs" };
+bool ItemIs(std::uint8_t mode, int item, const char* code) noexcept {
+	const std::uint32_t value = static_cast<std::uint8_t>(code[0]) | static_cast<std::uint8_t>(code[1]) << 8 | static_cast<std::uint8_t>(code[2]) << 16 | 0x20u << 24;
+	return At<ItemIdFn>(0x313EF0)(mode, value) == item;
+}
 void* HookTcItem(void* game, void* monster, int item, std::uint64_t a4, std::uint64_t a5, std::uint64_t a6) noexcept {
-	if (ExtraRolling && game) {
+	if (game && (ExtraRolling || (monster && (Field<std::uint32_t>(monster, 0) == 1 || Field<std::uint32_t>(monster, 0) == 2) && InZoneLevel(monster)))) {
 		const std::uint8_t mode = Field<std::uint8_t>(game, 0x106);
-		for (const char* code : PotionCodes) {
-			const std::uint32_t value = static_cast<std::uint8_t>(code[0]) | static_cast<std::uint8_t>(code[1]) << 8 | static_cast<std::uint8_t>(code[2]) << 16 | 0x20u << 24;
-			if (At<ItemIdFn>(0x313EF0)(mode, value) == item) {
-				if (PotionSkips.fetch_add(1, std::memory_order_relaxed) < 10) Log(false, "loot: extra roll potion %s skipped", code);
+		if (ExtraRolling)
+			for (const char* code : PotionCodes)
+				if (ItemIs(mode, item, code)) {
+					if (PotionSkips.fetch_add(1, std::memory_order_relaxed) < 10) Log(false, "loot: extra roll potion %s skipped", code);
+					return nullptr;
+				}
+		for (const char* code : ZoneBannedCodes)
+			if (ItemIs(mode, item, code)) {
+				if (PotionSkips.fetch_add(1, std::memory_order_relaxed) < 20) Log(false, "loot: zone drop %s skipped", code);
 				return nullptr;
 			}
-		}
 	}
 	return At<TcItemFn>(TcItemRva)(game, monster, item, a4, a5, a6);
 }
