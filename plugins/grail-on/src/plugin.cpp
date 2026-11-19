@@ -116,7 +116,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.2.3-dev-1";
+constexpr const char* PluginVersion = "1.2.3-dev-2";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -7347,21 +7347,24 @@ std::string CharacterName() {
 	return name;
 }
 
-// The client player's name (PlayerData at unit+0x10 starts with it), then the
-// newest <name>.d2s in the save folder or a mod's: byte 0x24 bit 0x04 is
-// hardcore.
-bool Hardcore() {
+// The client player's name (PlayerData at unit+0x10 starts with it), then its
+// <name>.d2s: byte 0x24 bit 0x04 is hardcore. 1 hardcore, 0 softcore, -1 not
+// known yet (a new character the game has not saved yet). The active mod's
+// save folder is the one that counts: a file of the same name elsewhere (an
+// old character in another mod or without one) is only looked at when that
+// folder holds no character at all (a mod saving under another name).
+int Hardcore() {
 	const auto base = static_cast<std::uintptr_t>(Context->exeBase);
 	void*      unit = reinterpret_cast<PlayerUnitFn>(base + Sound::PlayerUnit)(reinterpret_cast<LocalIndexFn>(base + Sound::LocalIndex)());
 	char       name[17] {};
 	void*      data   = nullptr;
 	if (!unit || !ReadOwn(static_cast<const char*>(unit) + 0x10, &data, sizeof(data)) || !data
 	    || !ReadOwn(data, name, 16))
-		return false;
+		return -1;
 	for (const char c : std::string(name))
-		if (static_cast<unsigned char>(c) < 32) return false;
+		if (static_cast<unsigned char>(c) < 32) return -1;
 	PWSTR folder = nullptr;
-	if (!*name || SHGetKnownFolderPath(FOLDERID_SavedGames, 0, nullptr, &folder) != S_OK) return false;
+	if (!*name || SHGetKnownFolderPath(FOLDERID_SavedGames, 0, nullptr, &folder) != S_OK) return 0;
 	const std::wstring saves = std::wstring(folder) + L"\\Diablo II Resurrected";
 	CoTaskMemFree(folder);
 	// The game keeps the name in UTF-8 (Chinese, Korean, Cyrillic... names).
@@ -7373,12 +7376,22 @@ bool Hardcore() {
 		for (const char* c = name; *c; ++c) wide += static_cast<wchar_t>(static_cast<unsigned char>(*c));
 	}
 	// The active mod's save first: that is the character playing.
-	if (const std::wstring own = SaveFolder() + L"\\" + wide + L".d2s"; GetFileAttributesW(own.c_str()) != INVALID_FILE_ATTRIBUTES) {
+	const std::wstring active = SaveFolder();
+	if (const std::wstring own = active + L"\\" + wide + L".d2s"; GetFileAttributesW(own.c_str()) != INVALID_FILE_ATTRIBUTES) {
 		FILE*         file = _wfopen(own.c_str(), L"rb");
 		unsigned char header[0x25] {};
 		const bool    read = file && std::fread(header, 1, sizeof(header), file) == sizeof(header);
 		if (file) std::fclose(file);
-		if (read) return (header[0x24] & 0x04) != 0;
+		if (read) return (header[0x24] & 0x04) != 0 ? 1 : 0;
+		return -1; // being written now: read again soon
+	}
+	// Other characters saved there: this one is new, not saved yet.
+	{
+		WIN32_FIND_DATAW any {};
+		if (HANDLE find = FindFirstFileW((active + L"\\*.d2s").c_str(), &any); find != INVALID_HANDLE_VALUE) {
+			FindClose(find);
+			return -1;
+		}
 	}
 	std::vector<std::wstring> candidates { saves + L"\\" + wide + L".d2s" };
 	WIN32_FIND_DATAW found {};
@@ -7396,23 +7409,45 @@ bool Hardcore() {
 		if (newest.empty() || CompareFileTime(&attributes.ftLastWriteTime, &latest) > 0) newest = path, latest = attributes.ftLastWriteTime;
 	}
 	FILE* file = newest.empty() ? nullptr : _wfopen(newest.c_str(), L"rb");
-	if (!file) {
-		Say(true, "grailon: %s's save file was not found; the softcore grail is used", name);
-		return false;
-	}
+	if (!file) return -1;
 	unsigned char header[0x25] {};
 	const bool    read = std::fread(header, 1, sizeof(header), file) == sizeof(header);
 	std::fclose(file);
-	return read && (header[0x24] & 0x04) != 0;
+	return !read ? -1 : (header[0x24] & 0x04) != 0 ? 1 : 0;
 }
 
 // UI thread: opens the storage of the character that just came in.
+// A character whose save file is not there yet (just made) waits for it
+// (StoreWaiting, asked again every few seconds) rather than opening the
+// softcore grail, which would be another grail for a hardcore character; after
+// StoreWaitLimit the softcore grail is used, as before.
+D2RL::PlayerHandle StoreWaiting {};
+ULONGLONG          StoreWaitSince = 0, StoreWaitNext = 0;
+constexpr ULONGLONG StoreWaitEvery = 3000, StoreWaitLimit = 10 * 60 * 1000;
 void OpenStoreFor(D2RL::PlayerHandle player) {
 	if (!StoreReady) return;
-	const bool         hardcore = Hardcore();
-	const std::wstring folder   = StoreFolder();
-	const std::string  name     = CharacterName();
-	std::lock_guard    guard(Lock);
+	const int          kind   = Hardcore();
+	const std::wstring folder = StoreFolder();
+	const std::string  name   = CharacterName();
+	const ULONGLONG    now    = GetTickCount64();
+	if (StoreWaiting != player) StoreWaiting = {}, StoreWaitSince = now;
+	if (kind < 0 && now - StoreWaitSince < StoreWaitLimit) {
+		std::lock_guard guard(Lock);
+		if (StoreWaiting != player) {
+			Records.clear(), Tombstones.clear(), FoundIds.clear(), CheckedIds.clear(), Materialized.clear(), Fingerprints.clear(), TakenOut.clear();
+			StorePath.clear();
+			StoreOwner = {};
+			RebuildStored();
+			Say(false, "grailon: %s has no save file yet: its grail opens once the game saves it", name.c_str());
+		}
+		StoreWaiting = player, StoreWaitNext = now + StoreWaitEvery;
+		return;
+	}
+	if (kind < 0) Say(true, "grailon: %s's save file was not found; the softcore grail is used", name.c_str());
+	else if (StoreWaiting == player) Say(false, "grailon: %s's save file is there now", name.c_str());
+	StoreWaiting = {};
+	const bool      hardcore = kind > 0;
+	std::lock_guard guard(Lock);
 	StoreOwner      = player;
 	StoreCharacter  = name;
 	TakenOutChecked = false;
@@ -13409,6 +13444,8 @@ void __cdecl UiTick(const D2RL::PluginContext* context, void*) noexcept {
 		}
 		ServerGame = nullptr;
 		if (player) OpenStoreFor(player), StaleChecked = false;
+	} else if (player && StoreWaiting == player && GetTickCount64() >= StoreWaitNext) {
+		OpenStoreFor(player), StaleChecked = false;
 	}
 	// The character's pictures, read early for the loot filter.
 	if (LootOn && Threads && LocalPlayer.load() && !PictureScanQueued) {
