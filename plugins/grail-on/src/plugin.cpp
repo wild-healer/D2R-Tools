@@ -116,7 +116,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.2.3";
+constexpr const char* PluginVersion = "1.2.3-dev-1";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -721,6 +721,7 @@ constexpr int InvTransform = 61; // u8: its colour (colors.txt row, GlobalData c
 }
 // Property functions (Properties func1) the ethereal rules come from.
 constexpr int IndestructibleFunc = 20, EtherealFunc = 23;
+constexpr int IndestructibleStat = 152; // item_indesctructible
 namespace SetRow {
 constexpr int Index = 2, IndexLength = 32, NameString = 36, Code = 40, Flags = 44, Set = 48, SetIndex = 50;
 constexpr int Props = 152, PropCount = 9, BonusProps = 296, BonusPropCount = 10; // {i32 prop, par, min, max}
@@ -10412,6 +10413,7 @@ void AddChecks(Rework& out, const unsigned char* row, int first, int count, cons
 		if (func == 5) out.allowed.insert({ 21, 23, 159 });
 		if (func == 6) out.allowed.insert({ 22, 24, 160 });
 		if (func == 7) out.allowed.insert({ 17, 18 });
+		if (func == IndestructibleFunc) out.allowed.insert(IndestructibleStat); // "indestruct" names no stat: its function sets this one
 	};
 	auto&      needs = bonus ? out.bonuses : out.needs;
 	const auto need  = [&](int stat, int layer, int low, int high, bool value) {
