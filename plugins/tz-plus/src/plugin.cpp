@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.109";
+constexpr const char* PluginVersion = "0.0.110";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2117,6 +2117,7 @@ namespace Gui = D2RGui;
 namespace App = D2RGui::App;
 
 void ProbeClientRecords() noexcept; // 0.0.108 recycle probe
+void RecycleClientRecords() noexcept;
 
 // This game, as lines (UI thread).
 std::vector<std::string> GameLines() {
@@ -2899,6 +2900,7 @@ void StartWindow(const D2RL::PluginContext* context) noexcept {
             SyncRoranMenu();
             RoranTalkTick();
             ProbeClientRecords();
+            RecycleClientRecords();
             if (const std::string name = CharacterName(); !name.empty() && name != OfferCharacter) LoadOfferings(name), App::Refresh();
 		},
 		.mouse = OnGameMessage,
@@ -3794,6 +3796,120 @@ void RebuildRegion(std::uint8_t* game, std::uint8_t mode, int id, std::uint64_t&
 void ZoneBox(std::uint8_t mode, int id, int& x, int& y, int& w, int& h) noexcept;
 
 // Why a zone portal cannot open now (empty: it can), the checks OpenZonePortal makes first.
+// ---- zone slot recycling (0.0.110) ----
+// A game has ZoneSlots / ZoneParts zone slots; once all are used, a new zone takes the oldest one. Its level records are deleted
+// on both sides first, so the next GetLevel (D2R+0x3267C0) makes them again from the rewritten rows, with a new layout seed.
+// The level list: drlg+0x868 (next +0x1B8, id +0x1F8, active +0xC, first room +0x10); link records drlg+0x118 (id +0, next +0x48).
+// A record goes only when the game has already let go of its rooms (D2R+0x327370 frees an idle level's rooms ~10 frames after
+// the last player left), the way DRLG_FreeDrlg (D2R+0x326600) frees them: FreeLevel (D2R+0x327C40, mode, level, 0) + pool free.
+using FreeLevelFn = void (*)(std::uint8_t mode, void* level, int keep) noexcept;
+using PoolLockFn  = void (*)(void* lock) noexcept;
+using PoolFreeFn  = void (*)(void* pool, void* block) noexcept;
+constexpr std::uint64_t LevelLockRva = 0x2A9A8A8, LevelPoolRva = 0x2A9A810, WarpLockRva = 0x2A9A808, WarpPoolRva = 0x2A9A770;
+
+void RememberDrlgMode(std::uint8_t mode, void* level) noexcept;
+void* DrlgOfUnit(void* unit) noexcept;
+int  DrlgModeOf(void* drlg) noexcept; // -1 = not seen
+
+// Levels first..first+count-1 in this drlg: how many have a record, and whether any is still in use (active or with rooms).
+int ZoneRecords(void* drlg, int first, int count, bool& busy) noexcept {
+	int held = 0;
+	busy     = false;
+	auto* level = drlg ? Field<std::uint8_t*>(drlg, 0x868) : nullptr;
+	for (int guard = 0; level && guard < 1000; ++guard, level = Field<std::uint8_t*>(level, 0x1B8)) {
+		const int id = Field<std::int32_t>(level, 0x1F8);
+		if (id < first || id >= first + count) continue;
+		++held;
+		if (Field<std::int32_t>(level, 0xC) || Field<void*>(level, 0x10)) busy = true;
+	}
+	return held;
+}
+
+// Deletes those records (call only when ZoneRecords said none is busy). Returns how many went.
+int FreeZoneRecords(std::uint8_t mode, void* drlg, int first, int count) noexcept {
+	int freed = 0;
+	auto** link = reinterpret_cast<std::uint8_t**>(static_cast<std::uint8_t*>(drlg) + 0x868);
+	for (int guard = 0; *link && guard < 1000; ++guard) {
+		std::uint8_t* level = *link;
+		const int     id    = Field<std::int32_t>(level, 0x1F8);
+		if (id < first || id >= first + count) {
+			link = reinterpret_cast<std::uint8_t**>(level + 0x1B8);
+			continue;
+		}
+		*link = Field<std::uint8_t*>(level, 0x1B8);
+		At<FreeLevelFn>(0x327C40)(mode, level, 0);
+		At<PoolLockFn>(0x122AD60)(reinterpret_cast<void*>(Base + LevelLockRva));
+		At<PoolFreeFn>(0x1230490)(reinterpret_cast<void*>(Base + LevelPoolRva), level);
+		At<PoolLockFn>(0x122AD90)(reinterpret_cast<void*>(Base + LevelLockRva));
+		++freed;
+	}
+	auto** wlink = reinterpret_cast<std::uint8_t**>(static_cast<std::uint8_t*>(drlg) + 0x118);
+	for (int guard = 0; *wlink && guard < 1000; ++guard) {
+		std::uint8_t* warp = *wlink;
+		const int     id   = Field<std::int32_t>(warp, 0);
+		if (id < first || id >= first + count) {
+			wlink = reinterpret_cast<std::uint8_t**>(warp + 0x48);
+			continue;
+		}
+		*wlink = Field<std::uint8_t*>(warp, 0x48);
+		At<PoolLockFn>(0x122AD60)(reinterpret_cast<void*>(Base + WarpLockRva));
+		At<PoolFreeFn>(0x1230490)(reinterpret_cast<void*>(Base + WarpPoolRva), warp);
+		At<PoolLockFn>(0x122AD90)(reinterpret_cast<void*>(Base + WarpLockRva));
+	}
+	return freed;
+}
+
+// The client's copy: each closed zone's level records go as soon as the client has let go of their rooms (not the last opened
+// zone: a player can still be on his way out of it). ClientHeld: a bit per zone slot whose records the client still has.
+std::atomic<std::uint32_t> ClientHeld { 0 };
+std::atomic<int>           CurrentZoneSlot { -1 };
+
+void RecycleClientRecords() noexcept {
+	static std::uint64_t next = 0;
+	const std::uint64_t  now  = GetTickCount64();
+	if (now < next) return;
+	next = now + 250;
+	const int base = ZoneBase.load(std::memory_order_relaxed);
+	const int index = At<LocalIndexFn>(0x8B2D0)();
+	if (base <= 0 || index < 0 || index >= 8) return;
+	void* drlg = DrlgOfUnit(At<PlayerByIndexFn>(0x9A480)(index));
+	if (!drlg) return;
+	std::uint32_t held = 0;
+	for (int slot = 0; slot < ZoneSlots / ZoneParts; ++slot) {
+		bool      busy  = false;
+		const int first = base + slot * ZoneParts;
+		if (!ZoneRecords(drlg, first, ZoneParts, busy)) continue;
+		const int mode = DrlgModeOf(drlg);
+		if (busy || slot == CurrentZoneSlot.load() || mode < 0) {
+			held |= 1u << slot;
+			continue;
+		}
+		const int freed = FreeZoneRecords(static_cast<std::uint8_t>(mode), drlg, first, ZoneParts);
+		Log(false, "recycle: client let go of zone slot %d (levels %d-%d): %d level records deleted", slot + 1, first, first + ZoneParts - 1, freed);
+	}
+	ClientHeld = held;
+}
+
+// Server, game thread: the zone slot for the next zone (-1 + problem when none can be had now).
+int ZoneSlotFor(std::uint8_t* game, const GameMods& g, std::string& problem) noexcept {
+	const int slots = ZoneSlots / ZoneParts, slot = (g.zonesUsed / ZoneParts) % slots;
+	if (g.zonesUsed < ZoneSlots) return slot; // never used
+	const int base = ZoneBase.load(), first = base + slot * ZoneParts;
+	void* drlg = nullptr;
+	for (auto* client = Field<std::uint8_t*>(game, GameClients); client; client = Field<std::uint8_t*>(client, ClientNext)) {
+		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
+		void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
+		const int at = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
+		if (at >= first && at < first + ZoneParts) return problem = "A player is still in the oldest zone: it can be reused once everyone is out.", -1;
+		if (!drlg) drlg = DrlgOfUnit(player);
+	}
+	bool busy = false;
+	ZoneRecords(drlg, first, ZoneParts, busy);
+	if (!drlg || busy || (ClientHeld.load() & (1u << slot)))
+		return problem = "The oldest zone is still loaded: try again in a few seconds.", -1;
+	return slot;
+}
+
 std::string ZoneOpenProblem(std::uint8_t* game) noexcept {
 	if (!game) return "Superior zone: not in a game.";
 	if (ZoneBase.load() <= 0) return "TZ Plus zones are not available (see the log).";
@@ -3807,8 +3923,9 @@ std::string ZoneOpenProblem(std::uint8_t* game) noexcept {
 	void* room = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
 	if (!room || At<RoomLevelFn>(0x2EFC10)(room) != Harrogath) return "Stand in Harrogath to open a zone portal.";
 	if (g->portal) return "A zone portal is already open: close it first.";
-	if (g->zonesUsed + ZoneParts > ZoneSlots) return "All the zones of this game are used: make a new game for more.";
-	return {};
+	std::string problem;
+	ZoneSlotFor(game, *g, problem);
+	return problem;
 }
 
 void OpenZonePortal(std::uint8_t* game) noexcept {
@@ -3826,8 +3943,20 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	void* room = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
 	if (!room || At<RoomLevelFn>(0x2EFC10)(room) != Harrogath) return SetPortalResult("TZ Plus zones: stand in Harrogath to open a zone portal");
 	if (g->portal) return SetPortalResult("TZ Plus zones: a zone portal is already open in this game, close it first");
-	if (g->zonesUsed + ZoneParts > ZoneSlots) return SetPortalResult("TZ Plus zones: all %d zones of this game are used, make a new game for more", ZoneSlots / ZoneParts);
-	const int     id    = base + g->zonesUsed;
+	std::string problem;
+	const int   slot = ZoneSlotFor(game, *g, problem);
+	if (slot < 0) return SetPortalResult("TZ Plus zones: %s", problem.c_str());
+	const int id = base + slot * ZoneParts;
+	if (g->zonesUsed >= ZoneSlots) {
+		bool busy = false;
+		void* drlg = nullptr;
+		for (auto* c = Field<std::uint8_t*>(game, GameClients); c && !drlg; c = Field<std::uint8_t*>(c, ClientNext))
+			if (Field<std::uint32_t>(c, 4) == 4) drlg = DrlgOfUnit(At<ClientPlayerFn>(0x484C90)(c, 0));
+		const int held  = ZoneRecords(drlg, id, ZoneParts, busy);
+		const int freed = drlg && !busy ? FreeZoneRecords(mode, drlg, id, ZoneParts) : 0;
+		Log(false, "recycle: zone slot %d (levels %d-%d) reused: %d of %d server level records deleted", slot + 1, id, id + ZoneParts - 1, freed, held);
+	}
+	CurrentZoneSlot = slot;
 	std::uint64_t state = Field<std::uint64_t>(game, GameSeed) ^ (static_cast<std::uint64_t>(std::time(nullptr)) << 16) ^ static_cast<std::uint64_t>(id);
 	// A zone = an outdoor area (where the portal arrives) + its dungeon, one level; the dungeon's down stairs lead to Harrogath
 	// (through an empty stand-in level, the third slot).
@@ -3984,8 +4113,8 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		ReleaseSRWLockExclusive(&PortalLock);
 	}
 	if (!portal && superior) Log(true, "zones: the superior zone's portal was refused after the shards were paid");
-	SetPortalResult("TZ Plus zone %d/%d opened: level %d, a copy of %s (level %d) with its %s (level %d, our %d), monsters [%s], density %d/%d, Hell elite packs %d-%d/%d-%d; new mods: %s",
-	                g->zonesUsed / ZoneParts, ZoneSlots / ZoneParts, id, LevelName(Banks[mode], tmpl).c_str(), tmpl, LevelName(Banks[mode], dungeon).c_str(), dungeon, id + 1,
+	SetPortalResult("TZ Plus zone %d (slot %d/%d) opened: level %d, a copy of %s (level %d) with its %s (level %d, our %d), monsters [%s], density %d/%d, Hell elite packs %d-%d/%d-%d; new mods: %s",
+	                g->zonesUsed / ZoneParts, (id - base) / ZoneParts + 1, ZoneSlots / ZoneParts, id, LevelName(Banks[mode], tmpl).c_str(), tmpl, LevelName(Banks[mode], dungeon).c_str(), dungeon, id + 1,
 	                monsters.c_str(), Field<std::int32_t>(Banks[mode].levels + id * LevelRow, LvDen + 8),
 	                Field<std::int32_t>(Banks[mode].levels + (id + 1) * LevelRow, LvDen + 8), Field<std::uint8_t>(Banks[mode].levels + id * LevelRow, 50), Field<std::uint8_t>(Banks[mode].levels + id * LevelRow, 53),
 	                Field<std::uint8_t>(Banks[mode].levels + (id + 1) * LevelRow, 50), Field<std::uint8_t>(Banks[mode].levels + (id + 1) * LevelRow, 53), mods.c_str());
@@ -4000,16 +4129,20 @@ using AnimModeFn = int (*)(void* unit, int mode) noexcept;
 constexpr int PortalCloseFrames = 30;
 struct ClosingPortal {
 	void*         game = nullptr;
-	std::uint32_t id   = 0;
+	std::uint32_t id = 0, partner = 0; // the town portal and its partner in the zone
 	int           wait = 0;
 } Closing;
+using RoomPortalFlagFn = void (*)(void* room, int clear) noexcept; // D2R+0x2F0530: room flag 0x400000 "has a portal" (keeps it loaded)
 
 void RemovePortalUnit(std::uint8_t* game, std::uint32_t id) noexcept {
 	void* portal = At<FindUnitFn>(0x48FE80)(game, 2, id);
 	if (!portal) return;
-	// Like the game does for a portal it drops (D2R+0x435EB0): tell the room's clients the unit is gone, then remove it.
-	if (void* room = At<UnitRoomFn>(0x34B440)(portal)) At<RoomUnitGoneFn>(0x2EF4D0)(room, 2, id);
+	// Like the game does for a portal its owner takes back (ObjMode town portal): tell the room's clients the unit is gone,
+	// remove it, and the room no longer has a portal (that flag kept the zone's entry area loaded for good, 0.0.108 log).
+	void* room = At<UnitRoomFn>(0x34B440)(portal);
+	if (room) At<RoomUnitGoneFn>(0x2EF4D0)(room, 2, id);
 	At<RemoveUnitFn>(0x48FAA0)(game, portal);
+	if (room) At<RoomPortalFlagFn>(0x2F0530)(room, 1);
 }
 
 void ForgetClosingPortal() noexcept { Closing = {}; }
@@ -4017,6 +4150,7 @@ void ForgetClosingPortal() noexcept { Closing = {}; }
 void ClosingPortalTick(std::uint8_t* game) noexcept {
 	if (!Closing.id || Closing.game != game || --Closing.wait > 0) return;
 	RemovePortalUnit(game, Closing.id);
+	if (Closing.partner) RemovePortalUnit(game, Closing.partner);
 	Closing = {};
 }
 
@@ -4025,9 +4159,13 @@ void CloseZonePortal(std::uint8_t* game) noexcept {
 	if (!g || !g->portal) return ZonePortalOpen = false, SetPortalResult("TZ Plus zones: no zone portal is open in this game");
 	void* portal = At<FindUnitFn>(0x48FE80)(game, 2, g->portalId);
 	if (portal == g->portal) {
-		if (Closing.id && Closing.game == game) RemovePortalUnit(game, Closing.id); // an older one still closing
+		if (Closing.id && Closing.game == game) Closing.wait = 1, ClosingPortalTick(game); // an older one still closing
+		// Its partner in the zone (CreatePortal D2R+0x432CE0 links them both ways: unit +0xE8 type, +0xEC id).
+		const std::uint32_t partner = Field<std::uint32_t>(portal, 0xE8) == 2 ? Field<std::uint32_t>(portal, 0xEC) : 0;
+		void*               other   = partner ? At<FindUnitFn>(0x48FE80)(game, 2, partner) : nullptr;
 		At<AnimModeFn>(0x34E5F0)(portal, 3);
-		Closing = { game, g->portalId, PortalCloseFrames };
+		if (other) At<AnimModeFn>(0x34E5F0)(other, 3);
+		Closing = { game, g->portalId, other ? partner : 0, PortalCloseFrames };
 	}
 	WriteZoneStats(*g, true);
 	g->portal = nullptr, g->portalId = 0, ZonePortalOpen = false;
@@ -4786,10 +4924,28 @@ void* HookMazeAdd(void* room, int direction, int merge) noexcept {
 	return At<MazeAddFn>(MazeAddRva)(room, direction, merge);
 }
 
-std::uint64_t HookMazeBuild(std::uint8_t mode, void* level) noexcept { return BuildZoneLevel(mode, level, MazeBuildOrig, "maze"); }
+// Which table bank (mode) each drlg (client's, server's) builds with: recycling frees a level with its drlg's mode.
+std::atomic<void*> DrlgSeen[4] {};
+std::atomic<int>   DrlgSeenMode[4] {};
+void RememberDrlgMode(std::uint8_t mode, void* level) noexcept {
+	void* drlg = level ? Field<void*>(level, 0x1C8) : nullptr;
+	if (!drlg) return;
+	for (int i = 0; i < 4; ++i)
+		if (DrlgSeen[i].load() == drlg) return DrlgSeenMode[i].store(mode);
+	static std::atomic<int> next { 0 };
+	const int i = next.fetch_add(1) & 3;
+	DrlgSeenMode[i] = mode, DrlgSeen[i] = drlg;
+}
+int DrlgModeOf(void* drlg) noexcept {
+	for (int i = 0; i < 4; ++i)
+		if (drlg && DrlgSeen[i].load() == drlg) return DrlgSeenMode[i].load();
+	return -1;
+}
+
+std::uint64_t HookMazeBuild(std::uint8_t mode, void* level) noexcept { return RememberDrlgMode(mode, level), BuildZoneLevel(mode, level, MazeBuildOrig, "maze"); }
 
 // Outdoor areas (D2R+0x32720E: call 0x3E2B5CE (mode, level), a slot the loader's core fills): our outdoor copies the same way.
-std::uint64_t HookOutdoorBuild(std::uint8_t mode, void* level) noexcept { return BuildZoneLevel(mode, level, &OutdoorBuild, "outdoor"); }
+std::uint64_t HookOutdoorBuild(std::uint8_t mode, void* level) noexcept { return RememberDrlgMode(mode, level), BuildZoneLevel(mode, level, &OutdoorBuild, "outdoor"); }
 
 // Diagnosis (0.0.50): each step of the outdoor build logged while one of our outdoor levels builds, to find the one that crashes.
 struct TraceSite {
