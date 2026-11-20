@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.114";
+constexpr const char* PluginVersion = "0.0.115";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -4208,20 +4208,48 @@ void UnloadingTick(std::uint8_t* game) noexcept {
 	std::string     problem;
 	if (!g || Closing.id) return;
 	const int slot = ZoneSlotFor(game, *g, problem);
-	if (slot == -2) { // still loaded: a town portal a player left in it keeps its room loaded (room flag 0x400000): it goes
-		const int first = ZoneBase.load(); // one zone: levels first..first+ZoneParts-1
-		for (auto* client = Field<std::uint8_t*>(game, GameClients); client; client = Field<std::uint8_t*>(client, ClientNext)) {
-			void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
-			auto* data   = player ? static_cast<std::uint8_t*>(At<void* (*)(void*) noexcept>(0x34B240)(player)) : nullptr;
-			const std::uint32_t id = data ? Field<std::uint32_t>(data, 0xA4) : 0; // the player's town portal (set by the skill, D2R+0x46FDA5)
-			void* tp   = id ? At<FindUnitFn>(0x48FE80)(game, 2, id) : nullptr;
-			void* room = tp ? At<UnitRoomFn>(0x34B440)(tp) : nullptr;
-			const int at = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
-			if (at < first || at >= first + ZoneParts) continue;
-			const std::uint32_t partner = Field<std::uint32_t>(tp, 0xE8) == 2 ? Field<std::uint32_t>(tp, 0xEC) : 0;
-			RemovePortalUnit(game, id);
+	if (slot == -2) {
+		// Still loaded: a portal left in it (a player's town portal cast there, ...) keeps its room loaded (room flag
+		// 0x400000). 0.0.115: every portal object (59 blue, 60 red) standing in the zone's levels goes, with its partner.
+		// (0.0.114 looked only at the players' own town portals, PlayerData +0xA4, and found none.) Objects: game +0x546*8,
+		// 128 lists by id & 0x7F (D2R+0x4925B0), unit +4 class, +8 id, +0x158 next.
+		const int     first = ZoneBase.load(); // one zone: levels first..first+ZoneParts-1
+		std::uint32_t found[16] {};
+		int           count = 0, seen = 0;
+		for (int bucket = 0; bucket < 128 && count < 16; ++bucket)
+			for (auto* unit = Field<std::uint8_t*>(game, (0x546 + bucket) * 8); unit && count < 16 && seen < 100000; unit = Field<std::uint8_t*>(unit, 0x158), ++seen) {
+				const std::uint32_t cls = Field<std::uint32_t>(unit, 4);
+				if (cls != 59 && cls != 60) continue;
+				void*     room = At<UnitRoomFn>(0x34B440)(unit);
+				const int at   = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
+				if (at >= first && at < first + ZoneParts) found[count++] = Field<std::uint32_t>(unit, 8);
+			}
+		for (int i = 0; i < count; ++i) {
+			void* portal = At<FindUnitFn>(0x48FE80)(game, 2, found[i]);
+			if (!portal) continue;
+			void*               room    = At<UnitRoomFn>(0x34B440)(portal);
+			const int           at      = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
+			const std::uint32_t cls     = Field<std::uint32_t>(portal, 4);
+			const std::uint32_t partner = Field<std::uint32_t>(portal, 0xE8) == 2 ? Field<std::uint32_t>(portal, 0xEC) : 0;
+			RemovePortalUnit(game, found[i]);
 			if (partner) RemovePortalUnit(game, partner);
-			Log(false, "zones: a town portal left in the closed zone (level %d) is gone", at);
+			Log(false, "zones: a portal (object %u, id %u, partner %u) left in the closed zone (level %d) is gone", cls, found[i], partner, at);
+		}
+		static int waitLogs = 0;
+		if (!count && frames % 300 == 0 && waitLogs < 20) {
+			++waitLogs;
+			std::string tps;
+			for (auto* client = Field<std::uint8_t*>(game, GameClients); client; client = Field<std::uint8_t*>(client, ClientNext)) {
+				void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
+				auto* data   = player ? static_cast<std::uint8_t*>(At<void* (*)(void*) noexcept>(0x34B240)(player)) : nullptr;
+				const std::uint32_t id = data ? Field<std::uint32_t>(data, 0xA4) : 0;
+				void* tp   = id ? At<FindUnitFn>(0x48FE80)(game, 2, id) : nullptr;
+				void* room = tp ? At<UnitRoomFn>(0x34B440)(tp) : nullptr;
+				char  line[96];
+				std::snprintf(line, sizeof(line), " [town portal id %u %s level %d]", id, tp ? "found" : "not found", room ? At<RoomLevelFn>(0x2EFC10)(room) : 0);
+				tps += line;
+			}
+			Log(false, "zones: still waiting for the closed zone (%s), %d objects looked at, no portal in it;%s", problem.c_str(), seen, tps.c_str());
 		}
 	}
 	if (slot < 0) return;
@@ -4998,38 +5026,81 @@ using MazeAddFn = void* (*)(void* room, int direction, int merge) noexcept;
 constexpr std::uint64_t MazeAddSites[] { 0x3E753D, 0x3E7578, 0x3E7B23, 0x3E7B61, 0x3E7BAD, 0x3E7BEB, 0x3E7C25, 0x3E7C63, 0x3E7C9D, 0x3E7CF2, 0x3E7D2C,
 	                                     0x3E7D62, 0x3E7DAB, 0x3E7DE9, 0x3E7E23, 0x3E7E59, 0x3E7E96, 0x3EA14B, 0x3EB577, 0x3EB5B8, 0x3EB8D9, 0x3EBD28 };
 thread_local int LinearRefused = 0, LinearBranches = 0, LinearSiteLogs = 0;
+thread_local bool SpecialAnyRoom = false; // a stairs room that fits at neither end of the corridor: anywhere (a short branch)
+constexpr std::uint64_t SpecialAddSite = 0x3EB8D9; // ScanReplaceSpecial (D2R+0x3EB850) adds a stairs/special room next to a room
+bool MazeFixed(void* room) noexcept {
+	auto* maze = room ? Field<std::uint8_t*>(room, 0x40) : nullptr;
+	return maze && (Field<std::uint32_t>(maze, 0x10) & 2);
+}
 void* HookMazeAdd(void* room, int direction, int merge) noexcept {
 	auto* level = room ? Field<std::uint8_t*>(room, 0x90) : nullptr;
 	if (BuildingKind == KindDungeon && level) {
 		const auto site = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)) - Base - 5;
-		merge = 0;
-		// 0.0.114 trace: every add of the dungeon build (which caller, from which room, onto which), to find the intersections.
-		auto* tip    = Field<std::uint8_t*>(level, 0x10);
-		auto* tipMaze = tip ? Field<std::uint8_t*>(tip, 0x40) : nullptr;
-		const bool tipFixed = tipMaze && (Field<std::uint32_t>(tipMaze, 0x10) & 2);
-		void* result = nullptr;
-		{
-			auto* last  = tip;
-			if (Field<std::int32_t>(level, 8) == 1) LinearRefused = 0, LinearBranches = 0, LinearSiteLogs = 0; // the first room only: a new build
-			if (last && !tipFixed && LinearRefused < 8) {
-				if ((result = At<MazeAddFn>(MazeAddRva)(last, direction, 0))) {
-					At<void (*)(void*, int) noexcept>(MazePickRva)(last, 1);
-					if (room != last) At<void (*)(void*, int) noexcept>(MazePickRva)(room, 1);
-					LinearRefused = 0;
-				} else ++LinearRefused;
-			} else {
+		merge = 0; // the new room joins only the one it grew from: no loops
+		auto*      tip      = Field<std::uint8_t*>(level, 0x10); // the newest room (the list head)
+		const bool tipFixed = MazeFixed(tip);
+		void*      result   = nullptr;
+		bool       branch   = false;
+		if (Field<std::int32_t>(level, 8) == 1) LinearRefused = 0, LinearBranches = 0, LinearSiteLogs = 0; // the first room only: a new build
+		if (site == SpecialAddSite) {
+			// 0.0.115: the stairs rooms go only at the two ends of the corridor: the newest room (the list head, tried first)
+			// or the first room (the list's last); every other room says no, so the game's scan moves on to the next one.
+			const bool end = room == tip || !Field<void*>(room, 0x48);
+			if (end || SpecialAnyRoom) result = At<MazeAddFn>(MazeAddRva)(room, direction, 0), branch = !end;
+		} else if (tip && !tipFixed && LinearRefused < 8) {
+			if ((result = At<MazeAddFn>(MazeAddRva)(tip, direction, 0))) {
+				At<void (*)(void*, int) noexcept>(MazePickRva)(tip, 1);
+				if (room != tip) At<void (*)(void*, int) noexcept>(MazePickRva)(room, 1);
 				LinearRefused = 0;
-				result = At<MazeAddFn>(MazeAddRva)(room, direction, merge);
-			}
+			} else ++LinearRefused;
+		} else {
+			LinearRefused = 0;
+			result = At<MazeAddFn>(MazeAddRva)(room, direction, merge), branch = result != nullptr;
 		}
 		if (LinearSiteLogs < 400 && (result || site != MazeAddCall))
 			++LinearSiteLogs, Log(false, "dungeon trace: D2R+0x%llX rooms %d dir %d caller room %d,%d tip %d,%d%s -> %s%s", static_cast<unsigned long long>(site),
 			                      Field<std::int32_t>(level, 8), direction, Field<std::int32_t>(room, 0x60), Field<std::int32_t>(room, 0x64),
 			                      tip ? Field<std::int32_t>(tip, 0x60) : -1, tip ? Field<std::int32_t>(tip, 0x64) : -1, tipFixed ? " (fixed)" : "",
-			                      result ? "added" : "refused", result && (tipFixed || !tip) ? " FROM CALLER ROOM (branch)" : "");
+			                      result ? "added" : "refused", branch ? " (branch)" : "");
 		return result;
 	}
 	return At<MazeAddFn>(MazeAddRva)(room, direction, merge);
+}
+
+// The act 1 cave's special rooms (D2R+0x3E69E0, cave case, D2MOO DRLGMAZE_GenerateLevel): ScanReplaceSpecial (level, {want,
+// preset, file, direction} entry of a group of 4, &rand) for the previous stairs (call D2R+0x3E6AC3), the next stairs
+// (0x3E6AED) and, for Cave Level 1 (our dungeons are built as it), Coldcrow's room (0x3E6B14). Ours: no Coldcrow room, and each
+// stairs room tries the 4 entries of its group (each has its own direction) at the corridor's ends before going anywhere.
+constexpr std::uint64_t ScanSpecialRva = 0x3EB850, ScanPrevCall = 0x3E6AC3, ScanNextCall = 0x3E6AED, ScanColdcrowCall = 0x3E6B14;
+using ScanSpecialFn = void (*)(void* level, const std::uint8_t* entry, int* rand) noexcept;
+int FixedRooms(void* level) noexcept {
+	int n = 0, guard = 0;
+	for (auto* r = Field<std::uint8_t*>(level, 0x10); r && guard < 4096; r = Field<std::uint8_t*>(r, 0x48), ++guard) n += MazeFixed(r);
+	return n;
+}
+void ScanSpecial(void* level, const std::uint8_t* entry, int* rand) noexcept { At<ScanSpecialFn>(ScanSpecialRva)(level, entry, rand); }
+template <std::uint64_t Site>
+void HookScanSpecial(void* level, const std::uint8_t* entry, int* rand) noexcept {
+	if (BuildingKind != KindDungeon || !level || !entry || !rand) return ScanSpecial(level, entry, rand);
+	const int pick = *rand & 3, next = (pick + 1) & 3;
+	if constexpr (Site == ScanColdcrowCall) {
+		*rand = next; // what the game's scan does with it
+		return Log(false, "dungeon: Coldcrow's room left out");
+	}
+	const std::uint8_t* group  = entry - pick * 16;
+	const int           before = FixedRooms(level);
+	bool                placed = false;
+	for (int pass = 0; pass < 2 && !placed; ++pass) {
+		SpecialAnyRoom = pass == 1;
+		for (int i = 0; i < 4 && !placed; ++i) {
+			int scratch = 0;
+			ScanSpecial(level, group + ((pick + i) & 3) * 16, &scratch);
+			placed = FixedRooms(level) > before;
+		}
+	}
+	SpecialAnyRoom = false;
+	*rand = next;
+	Log(!placed, "dungeon: %s stairs room %s", Site == ScanPrevCall ? "previous" : "next", placed ? "placed" : "could not be placed");
 }
 
 // Which table bank (mode) each drlg (client's, server's) builds with: recycling frees a level with its drlg's mode.
@@ -5399,6 +5470,10 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 		if (!PatchCall(MazeAddCall, MazeAddRva, reinterpret_cast<const void*>(&HookMazeAdd))) Log(true, "zones: linear dungeons off (D2R+0x%llX)", static_cast<unsigned long long>(MazeAddCall));
 		for (const std::uint64_t site : MazeAddSites)
 			if (!PatchCall(site, MazeAddRva, reinterpret_cast<const void*>(&HookMazeAdd))) Log(true, "zones: dungeon room add at D2R+0x%llX not linear", static_cast<unsigned long long>(site));
+		if (!PatchCall(ScanPrevCall, ScanSpecialRva, reinterpret_cast<const void*>(&HookScanSpecial<ScanPrevCall>)) ||
+		    !PatchCall(ScanNextCall, ScanSpecialRva, reinterpret_cast<const void*>(&HookScanSpecial<ScanNextCall>)) ||
+		    !PatchCall(ScanColdcrowCall, ScanSpecialRva, reinterpret_cast<const void*>(&HookScanSpecial<ScanColdcrowCall>)))
+			Log(true, "zones: dungeon stairs rooms not placed at the corridor ends");
 		if (!context->InstallInlineHook(MazeBuildRva, MazeBuildBytes.data(), static_cast<std::uint32_t>(MazeBuildBytes.size()), reinterpret_cast<void*>(&HookMazeBuild), &original) || !original)
 			Log(true, "zones: no exit stairs, could not hook D2R+0x%llX", static_cast<unsigned long long>(MazeBuildRva));
 		else MazeBuildOrig = reinterpret_cast<MazeBuildFn>(original);
