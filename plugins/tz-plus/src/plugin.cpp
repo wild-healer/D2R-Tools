@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.112";
+constexpr const char* PluginVersion = "0.0.113";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -1815,6 +1815,7 @@ extern bool MenuHooked;
 std::atomic<void*> RoranServer { nullptr }; // his server unit (this game)
 void ForgetClosingPortal() noexcept; // the game is gone
 extern std::atomic<bool> PortalRequested, CloseRequested;
+std::atomic<bool> ZoneUnloading { false }; // 0.0.113: the closed zone is not gone yet (Roran: "Closing previous zone")
 std::atomic<bool> ZonePortalOpen { false }; // this game has an open TZ Plus zone portal (the barbarian offers to close it)
 
 void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
@@ -1823,7 +1824,7 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 	switch (event->kind) {
 	case EventKind::GameJoined: InGame = true, CurrentLevel = -1, UseRoranLook(), (MenuHooked && RoranMenuRow()); break;
 	case EventKind::GameLeft: {
-		RoranServer = nullptr, ForgetClosingPortal(), PortalRequested = false;
+		RoranServer = nullptr, ForgetClosingPortal(), PortalRequested = false, ZoneUnloading = false;
 		InGame = false, CurrentLevel = -1, ZonePortalOpen = false;
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
 		for (GameMods* g : Games)
@@ -2598,7 +2599,7 @@ using MenuCallbackFn = bool (*)(std::uint8_t) noexcept;
 using SendPacket5Fn  = void (*)(std::uint8_t command, std::uint32_t value) noexcept;
 
 const char* HookMenuText(std::uint32_t index) noexcept {
-	if (index == TextPortal) return ZonePortalOpen.load() ? "Close the portal" : "Open a portal to a terror zone";
+	if (index == TextPortal) return ZonePortalOpen.load() ? "Close the portal" : ZoneUnloading.load() ? "Closing previous zone" : "Open a portal to a terror zone";
 	if (index == TextRules) return "Rules and offerings";
 	if (index == TextSuperior) return "Open a superior terror zone (5 Worldstone Shards)";
 	return At<const char* (*)(std::uint32_t) noexcept>(StringByIndexRva)(index);
@@ -2614,6 +2615,7 @@ void HookNpcPacket(std::uint8_t command, std::uint32_t value) noexcept {
 
 bool __cdecl RoranPortal(std::uint8_t a) noexcept {
 	const bool result = At<MenuCallbackFn>(NpcCancelRva)(a);
+	if (!ZonePortalOpen.load() && ZoneUnloading.load()) return result; // "Closing previous zone": nothing to do
 	Gui::Commands::Post(ZonePortalOpen.load() ? "zone-close" : "zone-open");
 	return result;
 }
@@ -2635,7 +2637,7 @@ std::uint8_t* RoranRow = nullptr;
 void SyncRoranMenu() noexcept {
 	static int shown = -1;
 	if (!RoranRow) return;
-	const bool open = ZonePortalOpen.load();
+	const bool open = ZonePortalOpen.load() || ZoneUnloading.load(); // both: first line + Rules, no superior line
 	if (shown == static_cast<int>(open)) return;
 	shown = open;
 	const std::uint16_t texts[3] { TextPortal, open ? TextRules : TextSuperior, open ? std::uint16_t(0) : TextRules };
@@ -4104,7 +4106,8 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	Creating     = g;
 	CreatingId   = id + KindEntry; // the portal arrives in the entry area
 	CreatingGame = game;
-	const int created = freeRoom ? At<CreatePortalFn>(0x432CE0)(game, player, freeRoom, spot.x, spot.y, id + KindEntry, &portal, 60, 0, 1) : 0;
+	// 0.0.113: a blue town portal (object 59, it has a closing animation) for a zone, the red one (60, none) for a superior zone.
+	const int created = freeRoom ? At<CreatePortalFn>(0x432CE0)(game, player, freeRoom, spot.x, spot.y, id + KindEntry, &portal, superior ? 60 : 59, 0, 1) : 0;
 	Creating = nullptr, CreatingGame = nullptr;
 	if (!created)
 		return SetPortalResult("TZ Plus zones: the game refused the portal to level %d (%s) at %d,%d%s", id, LevelName(Banks[mode], tmpl).c_str(), spot.x, spot.y,
@@ -4161,6 +4164,19 @@ void RemovePortalUnit(std::uint8_t* game, std::uint32_t id) noexcept {
 
 void ForgetClosingPortal() noexcept { Closing = {}; }
 
+int ZoneSlotFor(std::uint8_t* game, const GameMods& g, std::string& problem) noexcept;
+
+// "Closing previous zone" until the closed zone can be rebuilt (nobody in it, its records let go on both sides).
+void UnloadingTick(std::uint8_t* game) noexcept {
+	static int frames = 0;
+	if (!ZoneUnloading.load() || ++frames % 10) return;
+	const GameMods* g = ModsOf(game);
+	std::string     problem;
+	if (!g || Closing.id || ZoneSlotFor(game, *g, problem) < 0) return;
+	ZoneUnloading = false;
+	Log(false, "zones: the previous zone is gone, a new one can open");
+}
+
 void ClosingPortalTick(std::uint8_t* game) noexcept {
 	if (!Closing.id || Closing.game != game || --Closing.wait > 0) return;
 	RemovePortalUnit(game, Closing.id);
@@ -4177,13 +4193,23 @@ void CloseZonePortal(std::uint8_t* game) noexcept {
 		// Its partner in the zone (CreatePortal D2R+0x432CE0 links them both ways: unit +0xE8 type, +0xEC id).
 		const std::uint32_t partner = Field<std::uint32_t>(portal, 0xE8) == 2 ? Field<std::uint32_t>(portal, 0xEC) : 0;
 		void*               other   = partner ? At<FindUnitFn>(0x48FE80)(game, 2, partner) : nullptr;
-		// 0.0.111 crashed here: mode 3 is not a mode of the red portal (object 60), the client's Gfx.cpp:1554 check is fatal.
-		// It has no closing animation, so both go at once.
-		RemovePortalUnit(game, g->portalId);
-		if (other) RemovePortalUnit(game, partner);
+		// The blue portal (59) collapses (mode 3, as the game's own town portals) and goes when that animation ends (its
+		// objects.txt frame count, record D2R+0x38FD00 (mode, class) +0xA4 = FrameCnt3 x256). The red one (60) has no mode 3
+		// (0.0.111 crashed: the client's Gfx.cpp:1554 check is fatal): both go at once.
+		if (Field<std::uint32_t>(portal, 4) == 59) {
+			const auto* record = static_cast<const std::uint8_t*>(At<void* (*)(std::uint8_t, int) noexcept>(0x38FD00)(Field<std::uint8_t>(game, GameMode), 59));
+			const int   frames = std::clamp(record ? static_cast<int>(Field<std::uint32_t>(record, 0xA4) >> 8) + 1 : PortalCloseFrames, 5, 100);
+			At<AnimModeFn>(0x34E5F0)(portal, 3);
+			if (other && Field<std::uint32_t>(other, 4) == 59) At<AnimModeFn>(0x34E5F0)(other, 3);
+			Closing = { game, g->portalId, other ? partner : 0, frames };
+			Log(false, "zones: the zone portal collapses (%d frames)", frames);
+		} else {
+			RemovePortalUnit(game, g->portalId);
+			if (other) RemovePortalUnit(game, partner);
+		}
 	}
 	WriteZoneStats(*g, true);
-	g->portal = nullptr, g->portalId = 0, ZonePortalOpen = false;
+	g->portal = nullptr, g->portalId = 0, ZonePortalOpen = false, ZoneUnloading = true;
 	SetPortalResult(portal ? "TZ Plus zones: the zone portal is closed" : "TZ Plus zones: the zone portal was already gone");
 }
 
@@ -4914,27 +4940,38 @@ std::uint64_t BuildZoneLevel(std::uint8_t mode, void* level, MazeBuildFn build, 
 // box's corner: the cave pieces opened onto nothing.)
 constexpr std::uint64_t MazeAddCall = 0x3E97C9, MazeAddRva = 0x3E77A0, MazePickRva = 0x3EB960;
 using MazeAddFn = void* (*)(void* room, int direction, int merge) noexcept;
-thread_local int LinearRefused = 0, LinearBranches = 0;
+// 0.0.113 (fully linear, no dead end but the stairs one): every caller of the add (the basic maze and the special rooms,
+// MazeAddSites) grows from the newest room, without merging (merge 0: the new room joins only the one it grew from, no
+// loops), and the room it grew from gets its tiles picked again.
+constexpr std::uint64_t MazeAddSites[] { 0x3E753D, 0x3E7578, 0x3E7B23, 0x3E7B61, 0x3E7BAD, 0x3E7BEB, 0x3E7C25, 0x3E7C63, 0x3E7C9D, 0x3E7CF2, 0x3E7D2C,
+	                                     0x3E7D62, 0x3E7DAB, 0x3E7DE9, 0x3E7E23, 0x3E7E59, 0x3E7E96, 0x3EA14B, 0x3EB577, 0x3EB5B8, 0x3EB8D9, 0x3EBD28 };
+thread_local int LinearRefused = 0, LinearBranches = 0, LinearSiteLogs = 0;
 void* HookMazeAdd(void* room, int direction, int merge) noexcept {
 	auto* level = room ? Field<std::uint8_t*>(room, 0x90) : nullptr;
 	if (BuildingKind == KindDungeon && level) {
+		const auto site = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)) - Base - 5;
+		if (site != MazeAddCall && LinearSiteLogs < 20)
+			++LinearSiteLogs, Log(false, "zones: dungeon room added from D2R+0x%llX at %d rooms (direction %d)", static_cast<unsigned long long>(site),
+			                      Field<std::int32_t>(level, 8), direction);
+		merge = 0;
 		if (Field<std::int32_t>(level, 8) == 1) LinearRefused = 0, LinearBranches = 0; // the first room only: a new build
 		auto* last  = Field<std::uint8_t*>(level, 0x10);
 		auto* maze  = last ? Field<std::uint8_t*>(last, 0x40) : nullptr;
 		const bool fixed = maze && (Field<std::uint32_t>(maze, 0x10) & 2); // a room with its own map (the game never grows from one)
 		if (last && !fixed && LinearRefused < 8) {
-			if (void* added = At<MazeAddFn>(MazeAddRva)(last, direction, merge)) {
+			if (void* added = At<MazeAddFn>(MazeAddRva)(last, direction, 0)) {
 				// The caller picks the tiles again for the room it chose and the new one (D2R+0x3EB960 (room, 1), the openings
 				// from the room's neighbours): the room we grew from needs it too, else it keeps its old openings (0.0.100: the
 				// first room opened bottom right while the second expected a bottom left one).
-				if (last != room) At<void (*)(void*, int) noexcept>(MazePickRva)(last, 1);
+				At<void (*)(void*, int) noexcept>(MazePickRva)(last, 1); // merge 0 does not pick it again
+				if (room != last) At<void (*)(void*, int) noexcept>(MazePickRva)(room, 1);
 				return LinearRefused = 0, added;
 			}
 			++LinearRefused;
 			return nullptr; // the game rolls again
 		}
 		LinearRefused = 0;
-		if (LinearBranches++ < 3) Log(false, "zones: the dungeon corridor is boxed in at %d rooms, one branch", Field<std::int32_t>(level, 8));
+		if (LinearBranches++ < 3) Log(false, "zones: the dungeon corridor is boxed in (or ends on a fixed room) at %d rooms, one branch", Field<std::int32_t>(level, 8));
 	}
 	return At<MazeAddFn>(MazeAddRva)(room, direction, merge);
 }
@@ -5226,7 +5263,7 @@ void ProbeClientRecords() noexcept {
 }
 
 std::uint64_t HookFrameCall(void* game) noexcept {
-	if (game) ServerGame.store(static_cast<std::uint8_t*>(game)), ProbeServerRecords(static_cast<std::uint8_t*>(game)), ClosingPortalTick(static_cast<std::uint8_t*>(game));
+	if (game) ServerGame.store(static_cast<std::uint8_t*>(game)), ProbeServerRecords(static_cast<std::uint8_t*>(game)), ClosingPortalTick(static_cast<std::uint8_t*>(game)), UnloadingTick(static_cast<std::uint8_t*>(game));
 	if (game) SpawnRoran(static_cast<std::uint8_t*>(game)), SendStandInsToTown(static_cast<std::uint8_t*>(game)), TrackMeetings(static_cast<std::uint8_t*>(game)),
 		          ZoneExitArea(static_cast<std::uint8_t*>(game)), ZoneHerald(static_cast<std::uint8_t*>(game)), ZoneHeraldArrive(static_cast<std::uint8_t*>(game)), PassageHerald(static_cast<std::uint8_t*>(game)), SuperiorRewards(static_cast<std::uint8_t*>(game)), MoveOutOfSafeArea(static_cast<std::uint8_t*>(game));
 	if (game && PortalRequested.exchange(false)) OpenZonePortal(static_cast<std::uint8_t*>(game));
@@ -5304,6 +5341,8 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 		else SpawnCoreOrig = reinterpret_cast<SpawnCoreFn>(original);
 		original = nullptr;
 		if (!PatchCall(MazeAddCall, MazeAddRva, reinterpret_cast<const void*>(&HookMazeAdd))) Log(true, "zones: linear dungeons off (D2R+0x%llX)", static_cast<unsigned long long>(MazeAddCall));
+		for (const std::uint64_t site : MazeAddSites)
+			if (!PatchCall(site, MazeAddRva, reinterpret_cast<const void*>(&HookMazeAdd))) Log(true, "zones: dungeon room add at D2R+0x%llX not linear", static_cast<unsigned long long>(site));
 		if (!context->InstallInlineHook(MazeBuildRva, MazeBuildBytes.data(), static_cast<std::uint32_t>(MazeBuildBytes.size()), reinterpret_cast<void*>(&HookMazeBuild), &original) || !original)
 			Log(true, "zones: no exit stairs, could not hook D2R+0x%llX", static_cast<unsigned long long>(MazeBuildRva));
 		else MazeBuildOrig = reinterpret_cast<MazeBuildFn>(original);
