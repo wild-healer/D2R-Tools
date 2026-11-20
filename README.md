@@ -54,3 +54,7 @@ Two plugins come with a D2RMM data mod holding their art, on the same hub page a
 ## Building
 
 Each plugin has a `build.sh` that cross-builds the DLL on Linux with MinGW-w64 and packs the release zip. It fetches the D2RLoader PluginSDK at the commit it was built against.
+
+## License
+
+Copyright (c) 2026 wild-healer. All rights reserved.
