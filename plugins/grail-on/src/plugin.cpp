@@ -116,7 +116,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.2.3-dev-3";
+constexpr const char* PluginVersion = "1.2.3-dev-4";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -7465,6 +7465,16 @@ void OpenStoreFor(D2RL::PlayerHandle player) {
 		StorePath.clear();
 		Problem(true, "grailon: no Saved Games folder: the grail cannot store items");
 		return;
+	}
+	// Before 1.2.3 every saved character of the current save format read as
+	// hardcore (see SaveIsHardcore), so a softcore player's grail is in the
+	// hardcore file: a softcore grail that was never made starts as a copy.
+	if (!hardcore) {
+		const std::wstring soft = StoreFile(folder, L"grail-softcore.dat"), hard = StoreFile(folder, L"grail-hardcore.dat");
+		if (GetFileAttributesW(soft.c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW(hard.c_str()) != INVALID_FILE_ATTRIBUTES) {
+			if (CopyFileW(hard.c_str(), soft.c_str(), TRUE)) Say(false, "grailon: no softcore grail yet: it starts as a copy of the hardcore grail (older versions put softcore items there)");
+			else Say(true, "grailon: the hardcore grail could not be copied for softcore (%lu)", GetLastError());
+		}
 	}
 	(void)LoadStore(StoreFile(folder, hardcore ? L"grail-hardcore.dat" : L"grail-softcore.dat"));
 	RebuildStored(); // the tiles from the records now (a joined game has no arrange that would)
