@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.111";
+constexpr const char* PluginVersion = "0.0.112";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -4177,9 +4177,10 @@ void CloseZonePortal(std::uint8_t* game) noexcept {
 		// Its partner in the zone (CreatePortal D2R+0x432CE0 links them both ways: unit +0xE8 type, +0xEC id).
 		const std::uint32_t partner = Field<std::uint32_t>(portal, 0xE8) == 2 ? Field<std::uint32_t>(portal, 0xEC) : 0;
 		void*               other   = partner ? At<FindUnitFn>(0x48FE80)(game, 2, partner) : nullptr;
-		At<AnimModeFn>(0x34E5F0)(portal, 3);
-		if (other) At<AnimModeFn>(0x34E5F0)(other, 3);
-		Closing = { game, g->portalId, other ? partner : 0, PortalCloseFrames };
+		// 0.0.111 crashed here: mode 3 is not a mode of the red portal (object 60), the client's Gfx.cpp:1554 check is fatal.
+		// It has no closing animation, so both go at once.
+		RemovePortalUnit(game, g->portalId);
+		if (other) RemovePortalUnit(game, partner);
 	}
 	WriteZoneStats(*g, true);
 	g->portal = nullptr, g->portalId = 0, ZonePortalOpen = false;
