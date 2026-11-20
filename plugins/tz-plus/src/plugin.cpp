@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.110";
+constexpr const char* PluginVersion = "0.0.111";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -585,7 +585,7 @@ constexpr ActLevels Acts[5] { { Act1, 38 }, { Act2, 34 }, { Act3, 27 }, { Act4, 
 
 // TZ Plus zones (see "TZ Plus zones" below): hidden act 5 levels added after the game's own, always terrorized.
 std::atomic<int> ZoneBase { 0 }; // the first one's level id (the game's level count), 0 = none
-constexpr int    ZoneSlots = 30; // ZoneParts levels a zone
+constexpr int    ZoneSlots = 5; // ZoneParts levels a zone; 0.0.111: one zone, reused by every portal (was 30 = 6 zones a game)
 // A zone's levels: its outdoor area, its dungeon, the dungeon's down stairs stand-in (sends you back outdoors), and two small
 // outdoor areas joined to the outdoor one by the game's own passages: the entry (where the portal arrives) and the exit (chests).
 constexpr int    ZoneParts = 5, KindMain = 0, KindDungeon = 1, KindStandIn = 2, KindEntry = 3, KindExit = 4;
@@ -1814,6 +1814,7 @@ bool RoranMenuRow() noexcept;
 extern bool MenuHooked;
 std::atomic<void*> RoranServer { nullptr }; // his server unit (this game)
 void ForgetClosingPortal() noexcept; // the game is gone
+extern std::atomic<bool> PortalRequested, CloseRequested;
 std::atomic<bool> ZonePortalOpen { false }; // this game has an open TZ Plus zone portal (the barbarian offers to close it)
 
 void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::GameplayEvent* event, void*) noexcept {
@@ -1822,7 +1823,7 @@ void __cdecl OnGameplayEvent(const D2RL::PluginContext*, const D2RL::Lifecycle::
 	switch (event->kind) {
 	case EventKind::GameJoined: InGame = true, CurrentLevel = -1, UseRoranLook(), (MenuHooked && RoranMenuRow()); break;
 	case EventKind::GameLeft: {
-		RoranServer = nullptr, ForgetClosingPortal();
+		RoranServer = nullptr, ForgetClosingPortal(), PortalRequested = false;
 		InGame = false, CurrentLevel = -1, ZonePortalOpen = false;
 		AcquireSRWLockExclusive(&Lock); // the game is gone: a new one in the same memory rolls again
 		for (GameMods* g : Games)
@@ -2379,7 +2380,7 @@ std::vector<App::Item> RuleItems() {
 
 	// Roran
 	out.push_back(App::Card("Roran Stronghammer's zones"));
-	out.push_back(App::Bullet("At the fire in Harrogath, in Nightmare and Hell: " + Paint::Gold(std::to_string(ZoneSlots / ZoneParts) + " zones") + " a game.", IconOf("campfire", { 240, 150, 60 })));
+	out.push_back(App::Bullet("At the fire in Harrogath, in Nightmare and Hell: " + Paint::Gold("as many zones as you like") + ", one portal at a time.", IconOf("campfire", { 240, 150, 60 })));
 	out.push_back(App::Bullet("An outdoor area half the size of Cold Plains with " + Paint::Red("4x the monsters") + " and x1.5 elite packs, 8 monster types from every act.", IconOf("world")));
 	out.push_back(App::Bullet("Its dungeon: x2.25 the density, x2 elite packs; its stairs lead back to Harrogath.", IconOf("castle")));
 	out.push_back(App::Bullet("The exit area holds " + Paint::Gold("3 golden chests") + ".", IconOf("open-treasure-chest", { 240, 200, 80 })));
@@ -3880,17 +3881,18 @@ void RecycleClientRecords() noexcept {
 		const int first = base + slot * ZoneParts;
 		if (!ZoneRecords(drlg, first, ZoneParts, busy)) continue;
 		const int mode = DrlgModeOf(drlg);
-		if (busy || slot == CurrentZoneSlot.load() || mode < 0) {
+		if (busy || ZonePortalOpen.load() || mode < 0) { // an open zone stays (its records are being made or used)
 			held |= 1u << slot;
 			continue;
 		}
 		const int freed = FreeZoneRecords(static_cast<std::uint8_t>(mode), drlg, first, ZoneParts);
-		Log(false, "recycle: client let go of zone slot %d (levels %d-%d): %d level records deleted", slot + 1, first, first + ZoneParts - 1, freed);
+		Log(false, "recycle: client let go of zone levels %d-%d: %d level records deleted", first, first + ZoneParts - 1, freed);
 	}
 	ClientHeld = held;
 }
 
-// Server, game thread: the zone slot for the next zone (-1 + problem when none can be had now).
+// Server, game thread: the zone slot for the next zone (-1 + problem when none can be had now, -2 when the last zone has
+// not unloaded yet: the portal waits for it).
 int ZoneSlotFor(std::uint8_t* game, const GameMods& g, std::string& problem) noexcept {
 	const int slots = ZoneSlots / ZoneParts, slot = (g.zonesUsed / ZoneParts) % slots;
 	if (g.zonesUsed < ZoneSlots) return slot; // never used
@@ -3900,15 +3902,18 @@ int ZoneSlotFor(std::uint8_t* game, const GameMods& g, std::string& problem) noe
 		void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
 		void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
 		const int at = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
-		if (at >= first && at < first + ZoneParts) return problem = "A player is still in the oldest zone: it can be reused once everyone is out.", -1;
+		if (at >= first && at < first + ZoneParts) return problem = "A player is still in the last zone: a new one opens once everyone is out.", -1;
 		if (!drlg) drlg = DrlgOfUnit(player);
 	}
 	bool busy = false;
 	ZoneRecords(drlg, first, ZoneParts, busy);
 	if (!drlg || busy || (ClientHeld.load() & (1u << slot)))
-		return problem = "The oldest zone is still loaded: try again in a few seconds.", -1;
+		return problem = "the last zone is still loaded", -2;
 	return slot;
 }
+
+constexpr int PortalWaitFrames = 25 * 30; // up to 30 s
+std::atomic<int> PortalWait { 0 };
 
 std::string ZoneOpenProblem(std::uint8_t* game) noexcept {
 	if (!game) return "Superior zone: not in a game.";
@@ -3923,9 +3928,9 @@ std::string ZoneOpenProblem(std::uint8_t* game) noexcept {
 	void* room = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
 	if (!room || At<RoomLevelFn>(0x2EFC10)(room) != Harrogath) return "Stand in Harrogath to open a zone portal.";
 	if (g->portal) return "A zone portal is already open: close it first.";
+	if (PortalWait > 0 || PortalRequested.load()) return "A zone portal is already opening.";
 	std::string problem;
-	ZoneSlotFor(game, *g, problem);
-	return problem;
+	return ZoneSlotFor(game, *g, problem) == -2 ? std::string() : problem; // still loaded: the portal waits for it
 }
 
 void OpenZonePortal(std::uint8_t* game) noexcept {
@@ -3945,6 +3950,15 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	if (g->portal) return SetPortalResult("TZ Plus zones: a zone portal is already open in this game, close it first");
 	std::string problem;
 	const int   slot = ZoneSlotFor(game, *g, problem);
+	if (slot == -2) { // the last zone unloads a few seconds after everyone left it: ask again next frame, up to PortalWaitFrames
+		if (superior) SuperiorPending = true;
+		if (++PortalWait == 1) Log(false, "zones: %s, the portal waits for it", problem.c_str());
+		if (PortalWait < PortalWaitFrames) return void(PortalRequested = true);
+		PortalWait = 0;
+		if (superior) Log(true, "zones: the superior zone could not open after the shards were paid (the last zone never unloaded)");
+		return SetPortalResult("TZ Plus zones: the last zone did not unload, try again");
+	}
+	PortalWait = 0;
 	if (slot < 0) return SetPortalResult("TZ Plus zones: %s", problem.c_str());
 	const int id = base + slot * ZoneParts;
 	if (g->zonesUsed >= ZoneSlots) {
@@ -3954,7 +3968,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 			if (Field<std::uint32_t>(c, 4) == 4) drlg = DrlgOfUnit(At<ClientPlayerFn>(0x484C90)(c, 0));
 		const int held  = ZoneRecords(drlg, id, ZoneParts, busy);
 		const int freed = drlg && !busy ? FreeZoneRecords(mode, drlg, id, ZoneParts) : 0;
-		Log(false, "recycle: zone slot %d (levels %d-%d) reused: %d of %d server level records deleted", slot + 1, id, id + ZoneParts - 1, freed, held);
+		Log(false, "recycle: zone levels %d-%d reused: %d of %d server level records deleted", id, id + ZoneParts - 1, freed, held);
 	}
 	CurrentZoneSlot = slot;
 	std::uint64_t state = Field<std::uint64_t>(game, GameSeed) ^ (static_cast<std::uint64_t>(std::time(nullptr)) << 16) ^ static_cast<std::uint64_t>(id);
@@ -4113,8 +4127,8 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		ReleaseSRWLockExclusive(&PortalLock);
 	}
 	if (!portal && superior) Log(true, "zones: the superior zone's portal was refused after the shards were paid");
-	SetPortalResult("TZ Plus zone %d (slot %d/%d) opened: level %d, a copy of %s (level %d) with its %s (level %d, our %d), monsters [%s], density %d/%d, Hell elite packs %d-%d/%d-%d; new mods: %s",
-	                g->zonesUsed / ZoneParts, (id - base) / ZoneParts + 1, ZoneSlots / ZoneParts, id, LevelName(Banks[mode], tmpl).c_str(), tmpl, LevelName(Banks[mode], dungeon).c_str(), dungeon, id + 1,
+	SetPortalResult("TZ Plus zone %d opened: level %d, a copy of %s (level %d) with its %s (level %d, our %d), monsters [%s], density %d/%d, Hell elite packs %d-%d/%d-%d; new mods: %s",
+	                g->zonesUsed / ZoneParts, id, LevelName(Banks[mode], tmpl).c_str(), tmpl, LevelName(Banks[mode], dungeon).c_str(), dungeon, id + 1,
 	                monsters.c_str(), Field<std::int32_t>(Banks[mode].levels + id * LevelRow, LvDen + 8),
 	                Field<std::int32_t>(Banks[mode].levels + (id + 1) * LevelRow, LvDen + 8), Field<std::uint8_t>(Banks[mode].levels + id * LevelRow, 50), Field<std::uint8_t>(Banks[mode].levels + id * LevelRow, 53),
 	                Field<std::uint8_t>(Banks[mode].levels + (id + 1) * LevelRow, 50), Field<std::uint8_t>(Banks[mode].levels + (id + 1) * LevelRow, 53), mods.c_str());
