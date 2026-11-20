@@ -116,7 +116,7 @@ extern "C" const unsigned char grailon_panel_png[], grailon_panel_png_end[], gra
 namespace {
 
 constexpr const char* PluginId      = "grail-on";
-constexpr const char* PluginVersion = "1.2.3-dev-2";
+constexpr const char* PluginVersion = "1.2.3-dev-3";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -7347,8 +7347,16 @@ std::string CharacterName() {
 	return name;
 }
 
+// A .d2s header's status byte, bit 0x04 hardcore (0x20 expansion): at 0x24
+// up to version 0x68, at 0x14 from 0x69 (105, the current game's), where
+// 0x24 is no longer it (0xFF in a softcore save).
+bool SaveIsHardcore(const unsigned char (&header)[0x25]) {
+	const std::uint32_t version = header[4] | header[5] << 8 | header[6] << 16 | static_cast<std::uint32_t>(header[7]) << 24;
+	return (header[version >= 0x69 ? 0x14 : 0x24] & 0x04) != 0;
+}
+
 // The client player's name (PlayerData at unit+0x10 starts with it), then its
-// <name>.d2s: byte 0x24 bit 0x04 is hardcore. 1 hardcore, 0 softcore, -1 not
+// <name>.d2s (SaveIsHardcore). 1 hardcore, 0 softcore, -1 not
 // known yet (a new character the game has not saved yet). The active mod's
 // save folder is the one that counts: a file of the same name elsewhere (an
 // old character in another mod or without one) is only looked at when that
@@ -7382,7 +7390,7 @@ int Hardcore() {
 		unsigned char header[0x25] {};
 		const bool    read = file && std::fread(header, 1, sizeof(header), file) == sizeof(header);
 		if (file) std::fclose(file);
-		if (read) return (header[0x24] & 0x04) != 0 ? 1 : 0;
+		if (read) return SaveIsHardcore(header) ? 1 : 0;
 		return -1; // being written now: read again soon
 	}
 	// Other characters saved there: this one is new, not saved yet.
@@ -7413,7 +7421,7 @@ int Hardcore() {
 	unsigned char header[0x25] {};
 	const bool    read = std::fread(header, 1, sizeof(header), file) == sizeof(header);
 	std::fclose(file);
-	return !read ? -1 : (header[0x24] & 0x04) != 0 ? 1 : 0;
+	return !read ? -1 : SaveIsHardcore(header) ? 1 : 0;
 }
 
 // UI thread: opens the storage of the character that just came in.
