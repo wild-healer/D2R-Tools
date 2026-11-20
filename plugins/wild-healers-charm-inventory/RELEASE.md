@@ -1,5 +1,17 @@
 # Wild Healer's Charm Inventory 1.1.2: release texts
 
+## Test build 1.1.2-dev-6 (not released, diagnostic)
+
+```
+**Wild Healer's Charm Inventory 1.1.2-dev-6**
+
+**Fixed**
+
+* Charms in the normal inventory no longer give their bonuses while a game loads, which could break mana regeneration and leech until they were moved.
+```
+
+Still has the diagnostic log.
+
 ## Test build 1.1.2-dev-5 (not released, diagnostic)
 
 1.1.2-dev-4 with up to 100 diagnostic lines a second (20 cut off the charms added while a character loads).

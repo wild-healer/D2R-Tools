@@ -35,7 +35,7 @@ namespace Gui  = D2RGui;
 namespace App  = D2RGui::App;
 
 constexpr const char* PluginId      = "wild-healers-charm-inventory";
-constexpr const char* PluginVersion = "1.1.2-dev-5";
+constexpr const char* PluginVersion = "1.1.2-dev-6";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -144,7 +144,11 @@ bool IsLocalPlayer(void* unit) noexcept {
 	std::memcpy(&id, static_cast<const std::uint8_t*>(unit) + UnitId, sizeof(id));
 	if (!PlayerUnit) return true; // no local player lookup on this build: every player
 	const auto* local = static_cast<const std::uint8_t*>(PlayerUnit(LocalIndex()));
-	if (!local) return false;
+	// While a game loads the local player isn't set yet, and the player being
+	// loaded is this PC's: the rule applies, as it will once the player is set
+	// (else the game adds an inventory charm's stats at load and never takes
+	// them off: the answer must not change while a charm stays put).
+	if (!local) return true;
 	std::uint32_t localId = 0;
 	std::memcpy(&localId, local + UnitId, sizeof(localId));
 	return id == localId;
