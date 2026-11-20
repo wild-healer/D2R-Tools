@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.113";
+constexpr const char* PluginVersion = "0.0.114";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -3862,6 +3862,38 @@ int FreeZoneRecords(std::uint8_t mode, void* drlg, int first, int count) noexcep
 	return freed;
 }
 
+// The game keeps the units of a room it lets go (items on the ground, monsters left alive) in per-act lists by the room's
+// position (game +0x1B0: vector of list heads per act; node +0 x, +4 y in subtiles, +0x20 next; D2R+0x503790 gives them back
+// when a room at that spot comes back). A rebuilt zone has rooms at the same spots: the old zone's units came back in it
+// (0.0.113). Its nodes are dropped (unlinked; their few bytes stay allocated) before the zone is rebuilt.
+int PurgeInactiveUnits(std::uint8_t* game, void* drlg, int first, int count) noexcept {
+	struct Box { int x0, y0, x1, y1; } boxes[8] {};
+	int n = 0;
+	auto* level = drlg ? Field<std::uint8_t*>(drlg, 0x868) : nullptr;
+	for (int guard = 0; level && guard < 1000 && n < 8; ++guard, level = Field<std::uint8_t*>(level, 0x1B8)) {
+		const int id = Field<std::int32_t>(level, 0x1F8);
+		if (id < first || id >= first + count) continue;
+		const int x = Field<std::int32_t>(level, 0x24), y = Field<std::int32_t>(level, 0x28), w = Field<std::int32_t>(level, 0x2C), h = Field<std::int32_t>(level, 0x30);
+		if (w > 0 && h > 0) boxes[n++] = { x * 5, y * 5, (x + w) * 5, (y + h) * 5 };
+	}
+	if (!n || !game) return 0;
+	auto**       heads = Field<std::uint8_t**>(game, 0x1B0);
+	const auto   acts  = Field<std::uint64_t>(game, 0x1B8);
+	int          purged = 0;
+	for (std::uint64_t act = 0; heads && act < acts && act < 8; ++act) {
+		std::uint8_t** link = &heads[act];
+		for (int guard = 0; *link && guard < 100000; ++guard) {
+			std::uint8_t* node = *link;
+			const int     x = Field<std::int32_t>(node, 0), y = Field<std::int32_t>(node, 4);
+			bool          inside = false;
+			for (int i = 0; i < n && !inside; ++i) inside = x >= boxes[i].x0 && x < boxes[i].x1 && y >= boxes[i].y0 && y < boxes[i].y1;
+			if (inside) *link = Field<std::uint8_t*>(node, 0x20), ++purged;
+			else link = reinterpret_cast<std::uint8_t**>(node + 0x20);
+		}
+	}
+	return purged;
+}
+
 // The client's copy: each closed zone's level records go as soon as the client has let go of their rooms (not the last opened
 // zone: a player can still be on his way out of it). ClientHeld: a bit per zone slot whose records the client still has.
 std::atomic<std::uint32_t> ClientHeld { 0 };
@@ -3968,8 +4000,10 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		void* drlg = nullptr;
 		for (auto* c = Field<std::uint8_t*>(game, GameClients); c && !drlg; c = Field<std::uint8_t*>(c, ClientNext))
 			if (Field<std::uint32_t>(c, 4) == 4) drlg = DrlgOfUnit(At<ClientPlayerFn>(0x484C90)(c, 0));
-		const int held  = ZoneRecords(drlg, id, ZoneParts, busy);
-		const int freed = drlg && !busy ? FreeZoneRecords(mode, drlg, id, ZoneParts) : 0;
+		const int held   = ZoneRecords(drlg, id, ZoneParts, busy);
+		const int purged = drlg && !busy ? PurgeInactiveUnits(game, drlg, id, ZoneParts) : 0;
+		const int freed  = drlg && !busy ? FreeZoneRecords(mode, drlg, id, ZoneParts) : 0;
+		Log(false, "recycle: %d stored ground units of the last zone dropped", purged);
 		Log(false, "recycle: zone levels %d-%d reused: %d of %d server level records deleted", id, id + ZoneParts - 1, freed, held);
 	}
 	CurrentZoneSlot = slot;
@@ -4172,7 +4206,25 @@ void UnloadingTick(std::uint8_t* game) noexcept {
 	if (!ZoneUnloading.load() || ++frames % 10) return;
 	const GameMods* g = ModsOf(game);
 	std::string     problem;
-	if (!g || Closing.id || ZoneSlotFor(game, *g, problem) < 0) return;
+	if (!g || Closing.id) return;
+	const int slot = ZoneSlotFor(game, *g, problem);
+	if (slot == -2) { // still loaded: a town portal a player left in it keeps its room loaded (room flag 0x400000): it goes
+		const int first = ZoneBase.load(); // one zone: levels first..first+ZoneParts-1
+		for (auto* client = Field<std::uint8_t*>(game, GameClients); client; client = Field<std::uint8_t*>(client, ClientNext)) {
+			void* player = Field<std::uint32_t>(client, 4) == 4 ? At<ClientPlayerFn>(0x484C90)(client, 0) : nullptr;
+			auto* data   = player ? static_cast<std::uint8_t*>(At<void* (*)(void*) noexcept>(0x34B240)(player)) : nullptr;
+			const std::uint32_t id = data ? Field<std::uint32_t>(data, 0xA4) : 0; // the player's town portal (set by the skill, D2R+0x46FDA5)
+			void* tp   = id ? At<FindUnitFn>(0x48FE80)(game, 2, id) : nullptr;
+			void* room = tp ? At<UnitRoomFn>(0x34B440)(tp) : nullptr;
+			const int at = room ? At<RoomLevelFn>(0x2EFC10)(room) : 0;
+			if (at < first || at >= first + ZoneParts) continue;
+			const std::uint32_t partner = Field<std::uint32_t>(tp, 0xE8) == 2 ? Field<std::uint32_t>(tp, 0xEC) : 0;
+			RemovePortalUnit(game, id);
+			if (partner) RemovePortalUnit(game, partner);
+			Log(false, "zones: a town portal left in the closed zone (level %d) is gone", at);
+		}
+	}
+	if (slot < 0) return;
 	ZoneUnloading = false;
 	Log(false, "zones: the previous zone is gone, a new one can open");
 }
@@ -4950,28 +5002,32 @@ void* HookMazeAdd(void* room, int direction, int merge) noexcept {
 	auto* level = room ? Field<std::uint8_t*>(room, 0x90) : nullptr;
 	if (BuildingKind == KindDungeon && level) {
 		const auto site = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)) - Base - 5;
-		if (site != MazeAddCall && LinearSiteLogs < 20)
-			++LinearSiteLogs, Log(false, "zones: dungeon room added from D2R+0x%llX at %d rooms (direction %d)", static_cast<unsigned long long>(site),
-			                      Field<std::int32_t>(level, 8), direction);
 		merge = 0;
-		if (Field<std::int32_t>(level, 8) == 1) LinearRefused = 0, LinearBranches = 0; // the first room only: a new build
-		auto* last  = Field<std::uint8_t*>(level, 0x10);
-		auto* maze  = last ? Field<std::uint8_t*>(last, 0x40) : nullptr;
-		const bool fixed = maze && (Field<std::uint32_t>(maze, 0x10) & 2); // a room with its own map (the game never grows from one)
-		if (last && !fixed && LinearRefused < 8) {
-			if (void* added = At<MazeAddFn>(MazeAddRva)(last, direction, 0)) {
-				// The caller picks the tiles again for the room it chose and the new one (D2R+0x3EB960 (room, 1), the openings
-				// from the room's neighbours): the room we grew from needs it too, else it keeps its old openings (0.0.100: the
-				// first room opened bottom right while the second expected a bottom left one).
-				At<void (*)(void*, int) noexcept>(MazePickRva)(last, 1); // merge 0 does not pick it again
-				if (room != last) At<void (*)(void*, int) noexcept>(MazePickRva)(room, 1);
-				return LinearRefused = 0, added;
+		// 0.0.114 trace: every add of the dungeon build (which caller, from which room, onto which), to find the intersections.
+		auto* tip    = Field<std::uint8_t*>(level, 0x10);
+		auto* tipMaze = tip ? Field<std::uint8_t*>(tip, 0x40) : nullptr;
+		const bool tipFixed = tipMaze && (Field<std::uint32_t>(tipMaze, 0x10) & 2);
+		void* result = nullptr;
+		{
+			auto* last  = tip;
+			if (Field<std::int32_t>(level, 8) == 1) LinearRefused = 0, LinearBranches = 0, LinearSiteLogs = 0; // the first room only: a new build
+			if (last && !tipFixed && LinearRefused < 8) {
+				if ((result = At<MazeAddFn>(MazeAddRva)(last, direction, 0))) {
+					At<void (*)(void*, int) noexcept>(MazePickRva)(last, 1);
+					if (room != last) At<void (*)(void*, int) noexcept>(MazePickRva)(room, 1);
+					LinearRefused = 0;
+				} else ++LinearRefused;
+			} else {
+				LinearRefused = 0;
+				result = At<MazeAddFn>(MazeAddRva)(room, direction, merge);
 			}
-			++LinearRefused;
-			return nullptr; // the game rolls again
 		}
-		LinearRefused = 0;
-		if (LinearBranches++ < 3) Log(false, "zones: the dungeon corridor is boxed in (or ends on a fixed room) at %d rooms, one branch", Field<std::int32_t>(level, 8));
+		if (LinearSiteLogs < 400 && (result || site != MazeAddCall))
+			++LinearSiteLogs, Log(false, "dungeon trace: D2R+0x%llX rooms %d dir %d caller room %d,%d tip %d,%d%s -> %s%s", static_cast<unsigned long long>(site),
+			                      Field<std::int32_t>(level, 8), direction, Field<std::int32_t>(room, 0x60), Field<std::int32_t>(room, 0x64),
+			                      tip ? Field<std::int32_t>(tip, 0x60) : -1, tip ? Field<std::int32_t>(tip, 0x64) : -1, tipFixed ? " (fixed)" : "",
+			                      result ? "added" : "refused", result && (tipFixed || !tip) ? " FROM CALLER ROOM (branch)" : "");
+		return result;
 	}
 	return At<MazeAddFn>(MazeAddRva)(room, direction, merge);
 }
