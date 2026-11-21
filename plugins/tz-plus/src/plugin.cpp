@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.115";
+constexpr const char* PluginVersion = "0.0.116";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -596,6 +596,12 @@ thread_local int  BuildingKind = -1;   // the kind of zone level being built (ou
 thread_local bool OwnObject    = false; // our own objects (golden chests), let through the small areas' object block
 using GetLevelFn  = void* (*)(std::uint8_t mode, void* drlg, int level) noexcept; // D2R+0x3267C0: the act's level (made if new)
 using BuildLevelFn = std::uint64_t (*)(std::uint8_t mode, void* level) noexcept;  // D2R+0x3271C0: builds a level's rooms
+// 0.0.116: the way a zone runs, rolled when its portal opens: 0 west to east (entry west, exit east), 1 east to west, 2 north to
+// south, 3 south to north. The outdoor area is MainWidth long that way, MainHeight across.
+std::atomic<int> ZoneDir[ZoneSlots / ZoneParts] {};
+constexpr const char* DirNames[4] { "west to east", "east to west", "north to south", "south to north" };
+int  DirOf(int id) noexcept;
+void DirStep(int dir, int& fx, int& fy) noexcept { fx = dir == 0 ? 1 : dir == 1 ? -1 : 0, fy = dir == 2 ? 1 : dir == 3 ? -1 : 0; }
 std::atomic<std::uint32_t> ZoneSeed[ZoneSlots] {}; // each zone's layout seed, rolled when its portal opens (server and client build the same map)
 std::atomic<int> ZoneTemplate[ZoneSlots] {}; // the template of each zone (0 = none, level 2s too): its stairs rooms (HookMazeBuild)
 std::atomic<std::uint32_t> ZoneEntryBit[ZoneSlots] {}; // Room2 +0x50 flag of each zone's entry stairs room (0x10 << the template's Vis index)
@@ -2120,6 +2126,7 @@ namespace App = D2RGui::App;
 
 void ProbeClientRecords() noexcept; // 0.0.108 recycle probe
 void RecycleClientRecords() noexcept;
+void RevealClientZone() noexcept;
 
 // This game, as lines (UI thread).
 std::vector<std::string> GameLines() {
@@ -2647,6 +2654,26 @@ void SyncRoranMenu() noexcept {
 	SetField<std::uint32_t>(RoranRow, 4, open ? 3 : 4); // lines + Cancel
 }
 
+// 0.0.116: Roran's menu, while it is up, follows the zone's state (portal open, closing previous zone, a zone can open):
+// the game's menu widget (D2R+0x2A487B0) is destroyed as the game does before another dialog (D2R+0x1E9390, then the global
+// cleared, D2R+0x112C80) and built again for the same talk (D2R+0x1147A0), so its lines change without talking again.
+constexpr std::uint64_t MenuDestroyRva = 0x1E9390;
+void RefreshRoranMenu() noexcept {
+	static int built = -1; // the state the menu up was built for (-1: no Roran menu up)
+	auto*      menu  = reinterpret_cast<void**>(Base + NpcMenuRva);
+	const bool roran = *menu && Field<std::int16_t>(reinterpret_cast<void*>(Base + NpcClassRva), 0) == static_cast<std::int16_t>(RoranMenuClass) &&
+	                   Field<std::uint32_t>(reinterpret_cast<void*>(Base + NpcTalkingRva), 0);
+	const int  state = (ZonePortalOpen.load() ? 2 : 0) | (ZoneUnloading.load() ? 1 : 0);
+	if (!roran) return void(built = -1);
+	if (built < 0) return void(built = state);
+	if (built == state) return;
+	built = state;
+	At<void (*)(void*) noexcept>(MenuDestroyRva)(*menu);
+	*menu = nullptr;
+	At<void (*)(std::uint8_t) noexcept>(NpcMenuBuildRva)(0);
+	Log(!*menu, "Roran: menu %s for the zone's new state (%d)", *menu ? "rebuilt" : "could not be rebuilt", state);
+}
+
 // Our row in the game's menu table (once: a copy of the table one row longer, the old one left as it is).
 bool RoranMenuRow() noexcept {
 	static int state = 0; // 1 done, -1 failed
@@ -2901,9 +2928,11 @@ void StartWindow(const D2RL::PluginContext* context) noexcept {
 		.tick     = [] {
             if (!InGame.load()) return;
             SyncRoranMenu();
+            RefreshRoranMenu();
             RoranTalkTick();
             ProbeClientRecords();
             RecycleClientRecords();
+            RevealClientZone();
             if (const std::string name = CharacterName(); !name.empty() && name != OfferCharacter) LoadOfferings(name), App::Refresh();
 		},
 		.mouse = OnGameMessage,
@@ -3925,6 +3954,64 @@ void RecycleClientRecords() noexcept {
 	ClientHeld = held;
 }
 
+// 0.0.116: a zone's maps are revealed from the start. Client, UI tick: the levels of the zone the player is in (the one he is in,
+// and the outdoor area with its entry and exit areas, which share a map) are revealed a few rooms at a time: each Room2 is
+// loaded (D2R+0x3289A0, as the game does near the player; it lets go of far ones itself) and its automap cells added the way
+// the game reveals a whole room (D2R+0xD2240 (room): its level's layer, RevealRoom D2R+0xD6550 (mode, room, 1, cells)).
+constexpr std::uint64_t RevealRoomRva = 0xD2240;
+constexpr int           RevealPerTick = 4;
+struct RevealState {
+	void*         level = nullptr;
+	std::uint32_t seed  = 0;
+	int           next  = 0; // rooms done (in the level's list order)
+	bool          done  = false;
+};
+RevealState Revealed[8];
+int         RevealLogs = 0;
+void RevealClientZone() noexcept {
+	const int base = ZoneBase.load(std::memory_order_relaxed);
+	const int index = At<LocalIndexFn>(0x8B2D0)();
+	if (base <= 0 || index < 0 || index >= 8) return;
+	void* player = At<PlayerByIndexFn>(0x9A480)(index);
+	void* room   = player ? At<UnitRoomFn>(0x34B440)(player) : nullptr;
+	auto* room2  = room ? Field<std::uint8_t*>(room, 0x18) : nullptr;
+	auto* here   = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
+	auto* drlg   = here ? Field<std::uint8_t*>(here, 0x1C8) : nullptr;
+	const int id = here ? Field<std::int32_t>(here, 0x1F8) : 0;
+	if (!drlg || id < base || id >= base + ZoneSlots) return;
+	const int mode = DrlgModeOf(drlg);
+	if (mode < 0) return;
+	const int kind = (id - base) % ZoneParts, first = id - kind;
+	int       budget = RevealPerTick;
+	for (auto* level = Field<std::uint8_t*>(drlg, 0x868); level && budget > 0; level = Field<std::uint8_t*>(level, 0x1B8)) {
+		const int lid = Field<std::int32_t>(level, 0x1F8);
+		const bool mine = lid == id || (kind != KindDungeon && kind != KindStandIn && lid >= first && lid < first + ZoneParts &&
+		                                (lid - first == KindMain || lid - first == KindEntry || lid - first == KindExit));
+		if (!mine || !Field<void*>(level, 0x10)) continue;
+		const std::uint32_t seed = Field<std::uint32_t>(level, 0x1E4);
+		RevealState*        st   = nullptr;
+		for (auto& r : Revealed)
+			if (r.level == level && r.seed == seed) st = &r;
+		if (!st) {
+			static int cursor = 0;
+			st  = &Revealed[cursor++ & 7];
+			*st = { level, seed, 0, false };
+		}
+		if (st->done) continue;
+		int i = 0;
+		for (auto* r = Field<std::uint8_t*>(level, 0x10); r && budget > 0 && i < 4096; r = Field<std::uint8_t*>(r, 0x48), ++i) {
+			if (i < st->next) continue;
+			if (!Field<void*>(r, 0x58)) At<ActivateRoomFn>(0x3289A0)(static_cast<std::uint8_t>(mode), r);
+			if (void* active = Field<void*>(r, 0x58)) At<void (*)(void*) noexcept>(RevealRoomRva)(active);
+			st->next = i + 1, --budget;
+		}
+		if (budget > 0 || !Field<void*>(level, 0x10)) {
+			st->done = true;
+			if (RevealLogs < 40) ++RevealLogs, Log(false, "automap: level %d revealed (%d rooms)", lid, st->next);
+		}
+	}
+}
+
 // Server, game thread: the zone slot for the next zone (-1 + problem when none can be had now, -2 when the last zone has
 // not unloaded yet: the portal waits for it).
 int ZoneSlotFor(std::uint8_t* game, const GameMods& g, std::string& problem) noexcept {
@@ -4135,6 +4222,8 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	{
 		std::uint64_t layout = Field<std::uint64_t>(game, GameSeed) ^ GetTickCount64() ^ (static_cast<std::uint64_t>(id) << 40);
 		for (int i = 0; i < ZoneParts; ++i) ZoneSeed[id + i - base] = static_cast<std::uint32_t>(Mix(layout)) | 1;
+		ZoneDir[(id - base) / ZoneParts] = static_cast<int>(Mix(layout) & 3);
+		Log(false, "zones: zone at level %d runs %s", id, DirNames[ZoneDir[(id - base) / ZoneParts].load()]);
 	}
 	for (const int level : { id, id + KindDungeon }) RebuildRegion(game, mode, level, state);
 	Creating     = g;
@@ -4153,7 +4242,10 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	{
 		int ex = 0, ey = 0, ew = 0, eh = 0;
 		ZoneBox(mode, id + KindExit, ex, ey, ew, eh);
-		g->passX = (ex - PassageInset) * 5, g->passY = (ey + eh / 2) * 5; // subtiles, just inside the outdoor area
+		int fx = 0, fy = 0;
+		DirStep(DirOf(id), fx, fy);
+		// subtiles, just inside the outdoor area, before the exit area's passage
+		g->passX = (ex + ew / 2 - fx * (ew / 2 + PassageInset)) * 5, g->passY = (ey + eh / 2 - fy * (eh / 2 + PassageInset)) * 5;
 	}
 	g->portal   = portal;
 	g->portalId = portal ? Field<std::uint32_t>(portal, 8) : 0;
@@ -4519,7 +4611,10 @@ void ZoneExitArea(std::uint8_t* game) noexcept {
 		if (!exitRoom) return Log(true, "zones: the exit area's middle room (level %d) could not be loaded", g->zoneId + KindExit);
 		int made = 0;
 		for (int i = 0; i < ExitChests; ++i) {
-			Coord spot { g->exitX + 12, g->exitY + (i - 1) * 8 }; // a row across the area, toward the back (east), facing the passage (west)
+			int fx = 0, fy = 0;
+			DirStep(DirOf(g->zoneId), fx, fy);
+			// a row across the area, toward its back (the zone's way), facing the passage
+			Coord spot { g->exitX + 12 * fx - (i - 1) * 8 * fy, g->exitY + 12 * fy + (i - 1) * 8 * fx };
 			void* free = nullptr;
 			At<FindFreeSpotFn>(0x517F90)(game, exitRoom, &spot, 2, 0x400, &free, 4, 100);
 			OwnObject   = true;
@@ -4894,13 +4989,25 @@ void ZoneBox(std::uint8_t mode, int id, int& x, int& y, int& w, int& h) noexcept
 		return;
 	}
 	const int mx = 3300 + (first % 10) * 220, my = 3200 + (first / 10) * 230;
-	const int mw = MainWidth, mh = MainHeight; // half of Cold Plains (80x80)
-	// One block taller than wide: a 2x2-block area is 4 corner pieces and has no edge piece to open for the passage (0.0.66 pen),
-	// a 3rd block along the side facing the outdoor area gives it one.
-	const int sh = SmallArea, sy = my + ((mh - sh) / 2 & ~7);
-	if (kind == KindEntry) x = mx - SmallArea, y = sy, w = SmallArea, h = sh;
-	else if (kind == KindExit) x = mx + mw, y = sy, w = SmallArea, h = sh;
-	else x = mx, y = my, w = mw, h = mh;
+	const int  dir = DirOf(id);
+	const bool across = dir >= 2; // north-south: the outdoor area stands up
+	const int  mw = across ? MainHeight : MainWidth, mh = across ? MainWidth : MainHeight; // half of Cold Plains (80x80)
+	// The entry and exit areas: SmallArea squares centred on the outdoor area's short sides (8-tile cells).
+	const int sx = mx + ((mw - SmallArea) / 2 & ~7), sy = my + ((mh - SmallArea) / 2 & ~7);
+	const int west = mx - SmallArea, east = mx + mw, north = my - SmallArea, south = my + mh;
+	w = h = SmallArea;
+	if (kind == KindEntry || kind == KindExit) {
+		// where the zone starts (the entry) and ends (the exit)
+		const bool start = kind == KindEntry;
+		if (dir == 0) x = start ? west : east, y = sy;
+		else if (dir == 1) x = start ? east : west, y = sy;
+		else if (dir == 2) x = sx, y = start ? north : south;
+		else x = sx, y = start ? south : north;
+	} else x = mx, y = my, w = mw, h = mh;
+}
+int DirOf(int id) noexcept {
+	const int base = ZoneBase.load(std::memory_order_relaxed), slot = (id - base) / ZoneParts;
+	return slot >= 0 && slot < ZoneSlots / ZoneParts ? ZoneDir[slot].load(std::memory_order_relaxed) & 3 : 0;
 }
 
 using LinkLevelsFn = void (*)(std::uint8_t mode, void* drlg, int first, int last) noexcept; // D2R+0x3F1B40
