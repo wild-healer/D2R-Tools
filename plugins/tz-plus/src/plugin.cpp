@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.117";
+constexpr const char* PluginVersion = "0.0.118";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -585,7 +585,7 @@ constexpr ActLevels Acts[5] { { Act1, 38 }, { Act2, 34 }, { Act3, 27 }, { Act4, 
 
 // TZ Plus zones (see "TZ Plus zones" below): hidden act 5 levels added after the game's own, always terrorized.
 std::atomic<int> ZoneBase { 0 }; // the first one's level id (the game's level count), 0 = none
-constexpr int    ZoneSlots = 5; // ZoneParts levels a zone; 0.0.111: one zone, reused by every portal (was 30 = 6 zones a game)
+constexpr int    ZoneSlots = 10; // ZoneParts levels a zone; 0.0.118: two zones taken in turn (the last one unloads while the next is played; 0.0.111 had one)
 // A zone's levels: its outdoor area, its dungeon, the dungeon's down stairs stand-in (sends you back outdoors), and two small
 // outdoor areas joined to the outdoor one by the game's own passages: the entry (where the portal arrives) and the exit (chests).
 constexpr int    ZoneParts = 5, KindMain = 0, KindDungeon = 1, KindStandIn = 2, KindEntry = 3, KindExit = 4;
@@ -1310,6 +1310,44 @@ constexpr std::uint64_t ThinkRva = 0x4A2A00;
 constexpr Code          ThinkBytes { 0x48, 0x89, 0x54, 0x24, 0x10, 0x48, 0x89, 0x4C, 0x24, 0x08, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48 };
 std::uint64_t           ThinkOrig {};
 
+// 0.0.118: a cast that did not move the monster (0.0.117 log: the same monster cast twice from the same spot, 15 s apart) is
+// finished by hand a second later, as the skill would (0.0.16's move: D2R+0x491CA0 into the room at the spot, then
+// D2R+0x34F490 (unit, 1) tells the clients).
+using FindRoomFn   = void* (*)(void* room, int x, int y) noexcept;
+using MoveToFn     = int (*)(void* game, void* unit, void* room, int x, int y, int, int) noexcept;
+using UnitUpdateFn = void (*)(void* unit, int on) noexcept;
+struct CastCheck {
+	void*         unit = nullptr;
+	std::uint32_t id = 0;
+	std::uint8_t* game = nullptr;
+	int           x = 0, y = 0, tx = 0, ty = 0;
+	std::uint64_t at = 0;
+};
+CastCheck CastChecks[32] {};
+std::atomic<int> CastChecksOpen { 0 };
+bool MoveMonster(std::uint8_t* game, void* unit, int tx, int ty) noexcept {
+	void* here  = At<UnitRoomFn>(0x34B440)(unit);
+	void* there = here ? At<FindRoomFn>(0x38DFB0)(here, tx, ty) : nullptr;
+	if (!there || !At<MoveToFn>(0x491CA0)(game, unit, there, tx, ty, 0, 0)) return false;
+	At<UnitUpdateFn>(0x34F490)(unit, 1);
+	return true;
+}
+void CheckCasts(std::uint8_t* game, void* unit) noexcept {
+	const std::uint64_t now = GetTickCount64();
+	for (CastCheck& c : CastChecks) {
+		if (c.unit != unit || c.game != game) continue;
+		if (now - c.at < 1000) return;
+		c.unit = nullptr, CastChecksOpen.fetch_sub(1, std::memory_order_relaxed);
+		if (Field<std::uint32_t>(unit, 8) != c.id) return;
+		void* path = Field<void*>(unit, 0x38);
+		if (!path || At<PathCoordFn>(0x341A20)(path) != c.x || At<PathCoordFn>(0x341A30)(path) != c.y) return; // it moved
+		static int logs = 0;
+		const bool moved = MoveMonster(game, unit, c.tx, c.ty);
+		if (logs < 40) ++logs, Log(false, "Teleportation: monster %p did not move with its cast, %s to %d,%d", unit, moved ? "moved" : "could not be moved", c.tx, c.ty);
+		return;
+	}
+}
+
 bool CastTeleport(std::uint8_t* game, void* unit) noexcept {
 	void* path = Field<void*>(unit, 0x38);
 	if (!path) return false;
@@ -1327,7 +1365,13 @@ bool CastTeleport(std::uint8_t* game, void* unit) noexcept {
 		if (!At<WarpFn>(WarpRva)(game, unit, 0xB8, nullptr, tx, ty)) continue;
 		const int cast = At<CastFn>(CastRva)(game, unit, 0xB8, nullptr, tx, ty);
 		if (logs < 40) ++logs, Log(false, "Teleportation: monster %p at %d,%d casts to %d,%d (%d)", unit, x, y, tx, ty, cast);
-		return cast != 0;
+		if (!cast) return MoveMonster(game, unit, tx, ty);
+		for (CastCheck& c : CastChecks)
+			if (!c.unit) {
+				c = { unit, Field<std::uint32_t>(unit, 8), game, x, y, tx, ty, GetTickCount64() }, CastChecksOpen.fetch_add(1, std::memory_order_relaxed);
+				break;
+			}
+		return true;
 	}
 	if (logs < 40) ++logs, Log(false, "Teleportation: monster %p found no spot around %d,%d", unit, x, y);
 	return false;
@@ -1350,6 +1394,7 @@ std::uint64_t HookThink(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::
 			}
 		ReleaseSRWLockExclusive(&TeleportLock);
 	}
+	if (unit && CastChecksOpen.load(std::memory_order_relaxed) > 0) CheckCasts(reinterpret_cast<std::uint8_t*>(a), unit);
 	if (due && CastTeleport(reinterpret_cast<std::uint8_t*>(a), unit)) return 0;
 	return reinterpret_cast<Fn>(ThinkOrig)(a, b, c, d, e, f, g7, h, i, j, k, l, m, n);
 }
@@ -3952,7 +3997,7 @@ void RecycleClientRecords() noexcept {
 		// 0.0.117: the rooms the map reveal loaded (0.0.116) stay loaded on the client (closing hung on them): once the zone is
 		// closed and the player is out of it, its records go even with rooms in them (FreeLevel keep 0 frees the rooms too).
 		const bool away = myId < first || myId >= first + ZoneParts;
-		if ((busy && !away) || ZonePortalOpen.load() || mode < 0) { // an open zone stays (its records are being made or used)
+		if ((busy && !away) || (ZonePortalOpen.load() && slot == CurrentZoneSlot.load()) || mode < 0) { // the open zone stays (its records are being made or used)
 			held |= 1u << slot;
 			continue;
 		}
@@ -4313,7 +4358,7 @@ void UnloadingTick(std::uint8_t* game) noexcept {
 		// 0x400000). 0.0.115: every portal object (59 blue, 60 red) standing in the zone's levels goes, with its partner.
 		// (0.0.114 looked only at the players' own town portals, PlayerData +0xA4, and found none.) Objects: game +0x546*8,
 		// 128 lists by id & 0x7F (D2R+0x4925B0), unit +4 class, +8 id, +0x158 next.
-		const int     first = ZoneBase.load(); // one zone: levels first..first+ZoneParts-1
+		const int     first = ZoneBase.load() + (g->zonesUsed / ZoneParts) % (ZoneSlots / ZoneParts) * ZoneParts; // the zone the next portal reuses
 		std::uint32_t found[16] {};
 		int           count = 0, seen = 0;
 		for (int bucket = 0; bucket < 128 && count < 16; ++bucket)
@@ -4557,6 +4602,25 @@ void* HookWarnings(void* out) noexcept {
 	return result;
 }
 
+// 0.0.118: the chat message listing the terrorized levels (D2R+0x13AEDA0, "CreateAndSendDesecratedLevelsMessage", reached from
+// the loader's core) when a Hell game with TZ Plus loads: everything is terrorized there, the list says nothing.
+constexpr std::uint64_t LevelsMessageRva = 0x13AEDA0;
+constexpr std::array<std::uint8_t, 15> LevelsMessageBytes { 0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x80, 0xED, 0xFF, 0xFF };
+using LevelsMessageFn = void (*)(void*, void*, void*, void*) noexcept;
+LevelsMessageFn LevelsMessageOrig {};
+void HookLevelsMessage(void* a, void* b, void* c, void* d) noexcept {
+	bool hell = false;
+	AcquireSRWLockShared(&Lock);
+	hell = Last && Last->difficulty == 2 && Config.enabled.load(std::memory_order_relaxed) && Config.hell;
+	ReleaseSRWLockShared(&Lock);
+	if (hell) {
+		static int logs = 0;
+		if (logs < 5) ++logs, Log(false, "Hell: the terrorized levels chat message skipped");
+		return;
+	}
+	LevelsMessageOrig(a, b, c, d);
+}
+
 std::uint64_t HookDropTreasure(void* game, void* unit, int ignoreNoDrop, void* modeChange) noexcept {
 	const std::uint64_t result = DropTreasureOrig(game, unit, ignoreNoDrop, modeChange);
 	if (ignoreNoDrop || !game || !unit || Field<std::uint32_t>(unit, 0) != 1 || !InZoneLevel(unit)) return result;
@@ -4640,6 +4704,45 @@ void ZoneExitArea(std::uint8_t* game) noexcept {
 
 constexpr int HeraldReach = 40; // subtiles from the end's stairs room centre: a player this close makes the herald
 
+// 0.0.118: the herald's chat message ("a herald has appeared", packet 0x5A type 0x19 + the level, which the maker sends through
+// D2R+0x3E2B448 (game, packet) at D2R+0x498C44) goes out when its arrival starts, not when it comes out of it; and the arrival
+// gets its lightning (Missiles 739 heraldbolt, the bolts the spawner's own client function did not show) a few times on the way.
+constexpr std::uint64_t HeraldMessageCall = 0x498C44, BroadcastRva = 0x3E2B448;
+constexpr int           HeraldBoltMissile = 739;
+using BroadcastFn = void (*)(void* game, void* packet) noexcept;
+bool HeraldMessageOff = false; // game thread: the maker's own message is skipped (ours went out at the arrival)
+void HookHeraldMessage(void* game, void* packet) noexcept {
+	if (HeraldMessageOff) return;
+	At<BroadcastFn>(BroadcastRva)(game, packet);
+}
+void SendHeraldMessage(std::uint8_t* game, int level) noexcept {
+	alignas(8) std::uint8_t packet[0x24] {};
+	packet[0] = 0x5A, packet[1] = 0x19;
+	std::memcpy(packet + 3, &level, 4);
+	At<BroadcastFn>(BroadcastRva)(game, packet);
+}
+void* AnyPlayer(std::uint8_t* game) noexcept {
+	for (auto* c = Field<std::uint8_t*>(game, GameClients); c; c = Field<std::uint8_t*>(c, ClientNext))
+		if (Field<std::uint32_t>(c, 4) == 4)
+			if (void* p = At<ClientPlayerFn>(0x484C90)(c, 0)) return p;
+	return nullptr;
+}
+void* SpotMissile(std::uint8_t* game, void* owner, int missile, int x, int y) noexcept {
+	if (!owner) return nullptr;
+	alignas(8) std::uint8_t params[0x100] {};
+	SetField<std::uint32_t>(params, 0, 1), SetField<void*>(params, 8, owner), SetField<std::int32_t>(params, 0x20, missile);
+	SetField<std::int32_t>(params, 0x24, x), SetField<std::int32_t>(params, 0x28, y);
+	return At<SpotMissileFn>(CreateMissileRva)(game, params);
+}
+// While an arrival runs (wait counts down from HeraldDelay): a bolt every 20 frames, a little around the spot.
+void HeraldBolts(std::uint8_t* game, int wait, int x, int y) noexcept {
+	if (wait <= 0 || wait % 20 != 5) return;
+	const std::uint64_t r = LootRandom();
+	void* bolt = SpotMissile(game, AnyPlayer(game), HeraldBoltMissile, x + static_cast<int>(r % 7) - 3, y + static_cast<int>((r >> 8) % 7) - 3);
+	static int logs = 0;
+	if (logs < 10) ++logs, Log(!bolt, "zones: herald arrival bolt at %d,%d %s", x, y, bolt ? "made" : "refused");
+}
+
 // A herald of one of the level's own monster types (its monster region, game +0x1D0[level]: +0x10 count, +0x14 entries of 0x34,
 // word monster first), else of the zone's.
 void MakeZoneHerald(std::uint8_t* game, GameMods* g, int level, const Coord& spot, void* room, const char* where) noexcept {
@@ -4658,7 +4761,9 @@ void MakeZoneHerald(std::uint8_t* game, GameMods* g, int level, const Coord& spo
 	auto&      tier    = *reinterpret_cast<std::int32_t*>(game + 0x1A5C4);
 	const int  before  = tier;
 	if (tier < 1) tier = 1;
+	HeraldMessageOff = true;
 	const bool made = At<HeraldMakerFn>(HeraldMakerRva)(game, spot.x, spot.y, monster, room);
+	HeraldMessageOff = false;
 	if (before < 1) tier = before;
 	Log(!made, "zones: herald (monster %d) %s (level %d), %d,%d: %s", monster, where, level, spot.x, spot.y, made ? "made" : "refused by the game (level not terrorized?)");
 }
@@ -4702,6 +4807,7 @@ void ZoneHerald(std::uint8_t* game) noexcept {
 		if (!Field<void*>(g->heraldRoom, 0x58)) At<ActivateRoomFn>(0x3289A0)(Field<std::uint8_t>(game, GameMode), g->heraldRoom);
 		void* missile = At<SpotMissileFn>(CreateMissileRva)(game, params);
 		g->heraldMissile = missile ? Field<std::uint32_t>(missile, 8) : 0;
+		SendHeraldMessage(game, g->zoneId + KindDungeon);
 		Log(!missile, "zones: herald: arriving at %d,%d%s", g->heraldX, g->heraldY, missile ? "" : " (no arrival missile)");
 		return;
 	}
@@ -4710,7 +4816,9 @@ void ZoneHerald(std::uint8_t* game) noexcept {
 // The herald comes out of its arrival (ZoneHerald started it), once a frame.
 void ZoneHeraldArrive(std::uint8_t* game) noexcept {
 	GameMods* g = ModsOf(game);
-	if (!g || !g->zoneId || g->heraldDone || g->heraldWait <= 0 || --g->heraldWait > 0) return;
+	if (!g || !g->zoneId || g->heraldDone || g->heraldWait <= 0) return;
+	HeraldBolts(game, g->heraldWait, g->heraldX, g->heraldY);
+	if (--g->heraldWait > 0) return;
 	g->heraldDone = true;
 	if (g->heraldMissile) {
 		if (void* missile = At<FindUnitFn>(0x48FE80)(game, 3, g->heraldMissile)) {
@@ -4752,9 +4860,11 @@ void PassageHerald(std::uint8_t* game) noexcept {
 			SetField<std::int32_t>(params, 0x24, g->passX), SetField<std::int32_t>(params, 0x28, g->passY);
 			void* missile = At<SpotMissileFn>(CreateMissileRva)(game, params);
 			g->passMissile = missile ? Field<std::uint32_t>(missile, 8) : 0;
+			SendHeraldMessage(game, g->zoneId);
 			Log(!missile, "zones: passage herald: arriving at %d,%d%s", g->passX, g->passY, missile ? "" : " (no arrival missile)");
 			return;
 		}
+		HeraldBolts(game, g->passWait, g->passX, g->passY);
 		if (--g->passWait > 0) return;
 		g->passDone = true;
 		if (g->passMissile) {
@@ -5710,6 +5820,11 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 			Log(true, "TZ Plus %s: no extra loot in the zones, could not hook D2R+0x%llX", PluginVersion, static_cast<unsigned long long>(DropTreasureRva));
 		else DropTreasureOrig = reinterpret_cast<DropTreasureFn>(original);
 		if (!PatchCall(WarningsCall, WarningsRva, reinterpret_cast<const void*>(&HookWarnings))) Log(true, "TZ Plus %s: Hell games keep the rotation warnings (D2R+0x%llX)", PluginVersion, static_cast<unsigned long long>(WarningsCall));
+		if (!PatchCall(HeraldMessageCall, BroadcastRva, reinterpret_cast<const void*>(&HookHeraldMessage))) Log(true, "TZ Plus %s: the herald message comes when it appears (D2R+0x%llX)", PluginVersion, static_cast<unsigned long long>(HeraldMessageCall));
+		original = nullptr;
+		if (!context->InstallInlineHook(LevelsMessageRva, LevelsMessageBytes.data(), static_cast<std::uint32_t>(LevelsMessageBytes.size()), reinterpret_cast<void*>(&HookLevelsMessage), &original) || !original)
+			Log(true, "TZ Plus %s: Hell games keep the terrorized levels message (D2R+0x%llX)", PluginVersion, static_cast<unsigned long long>(LevelsMessageRva));
+		else LevelsMessageOrig = reinterpret_cast<LevelsMessageFn>(original);
 		if (!PatchCall(TcItemCall, TcItemRva, reinterpret_cast<const void*>(&HookTcItem))) Log(true, "TZ Plus %s: extra rolls may drop potions (D2R+0x%llX)", PluginVersion, static_cast<unsigned long long>(TcItemCall));
 		original = nullptr;
 		if (!context->InstallInlineHook(ThinkRva, ThinkBytes.data(), static_cast<std::uint32_t>(ThinkBytes.size()), reinterpret_cast<void*>(&HookThink), &original) || !original)
