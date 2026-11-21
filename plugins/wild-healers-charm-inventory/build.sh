@@ -15,7 +15,7 @@ command -v $cxx >/dev/null || { echo "needs $cxx (apt install g++-mingw-w64-x86-
 out=$here/build
 mkdir -p "$out"
 x86_64-w64-mingw32-windres -I"$sdk/include" -I"$here" "$here/src/plugin.rc" -O coff -o "$out/plugin.res"
-$cxx -std=c++20 -Os -Wall -shared -static -s -I"$sdk/include" \
+$cxx -std=c++20 -Os -Wall -shared -static -s -I"$sdk/include" -I"$here/../../lib/d2r-gui/include" \
   "$here/src/plugin.cpp" "$out/plugin.res" -o "$out/wild-healers-charm-inventory.dll"
 # Package: the DLL alone (its config is built in; D2RLoader writes it on first launch).
 rm -f "$here"/wild-healers-charm-inventory*.zip

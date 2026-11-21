@@ -1,6 +1,21 @@
-# Wild Healer's Charm Inventory 1.1.2: release texts
+# Wild Healer's Charm Inventory 1.1.3: release texts
 
 ## Patch notes
+
+```
+**Wild Healer's Charm Inventory 1.1.3**
+
+**New**
+
+* The button and panel are now made with the D2R GUI library, shared with the other wild-healer plugins. They look the same as before.
+* The Open/close charms key binding has a new id: a key set for it before must be set again.
+
+**Fixed**
+
+* Charms in the normal inventory no longer give their bonuses while a game loads, which could slow mana regeneration and break leech until they were moved.
+```
+
+## Patch notes 1.1.2
 
 ```
 **Wild Healer's Charm Inventory 1.1.2**
@@ -75,14 +90,14 @@
 
 ## GitHub release
 
-- Tag: `wild-healers-charm-inventory-v1.1.2`
-- Title: `Wild Healer's Charm Inventory 1.1.2`
+- Tag: `wild-healers-charm-inventory-v1.1.3`
+- Title: `Wild Healer's Charm Inventory 1.1.3`
 - Asset: `wild-healers-charm-inventory.zip`
 
 Body:
 
 ```markdown
-**Wild Healer's Charm Inventory** 1.1.2: a charm inventory (10x4 by default) on Player Page Host's player page.
+**Wild Healer's Charm Inventory** 1.1.3: a charm inventory (10x4 by default) on Player Page Host's player page.
 
 ### Features
 - 10x4 cells by default, the size of the inventory's grid, or any size up to 10x12 with the `columns` and `rows` settings. Only charms go in, one of each unique charm (a second copy can only be swapped with the first), and only these charms give their bonuses: charms in the normal inventory don't, unless the inventory_charms setting is on (Charm Dedup works alongside).

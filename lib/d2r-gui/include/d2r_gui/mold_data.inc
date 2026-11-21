@@ -1,8 +1,10 @@
+#pragma once
 // The stone and gold mold the inventory side buttons sit in, the one Charm
 // Inventory and Automatic Materials Deposit use (cut from Automatic Materials
 // Deposit 1.2.0's button-mold sprite). RGBA, row by row.
-constexpr int MoldWidth = 54, MoldHeight = 141;
-const unsigned char MoldRgba[] {
+namespace D2RGui::ArtData {
+inline constexpr int MoldWidth = 54, MoldHeight = 141;
+inline constexpr unsigned char MoldRgba[] {
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -956,3 +958,4 @@ const unsigned char MoldRgba[] {
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 };
+} // namespace D2RGui::ArtData

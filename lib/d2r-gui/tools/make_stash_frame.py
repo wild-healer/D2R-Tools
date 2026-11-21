@@ -1,4 +1,7 @@
-# Builds the panel's packaged art from the stash frame Grail On! ships
+# Builds include/d2r_gui/stash_frame_data.inc (StashWindow's frame) from the
+# stash frame Grail On! ships, then wrap the output in
+# `namespace D2RGui::StashWindow::Data { ... }` with `inline constexpr`.
+# Originally Charm Inventory's tools/make_art.py:
 # (Expanded Stash Plus's stash, 1687x1801, 16x16 cells of 98). The panel is
 # 1162x1507, the size of the game's left panels (the frame of Run Counter's
 # stats window): the stash's corners, edges and gold inner line, cropped

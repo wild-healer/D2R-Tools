@@ -30,6 +30,7 @@
 #pragma once
 
 #include <D2RLPlugin/api.h>
+#include <cstddef>
 #include <cstdint>
 
 namespace PageHost {
@@ -54,6 +55,8 @@ enum class Result : uint32_t {
 	Busy            = 7, // this plugin already holds an area of that name; openArea: not placed yet
 	Failed          = 8, // D2RLoader refused the call; the host log says why
 	OutsideArea     = 9, // a cell (or an item's cells) outside the area
+	Unsupported     = 10, // requests: the hosting game's host is older (1.0.1) or absent, or this game build doesn't fit the save natives
+	TimedOut        = 11, // requests: no answer from the hosting game in 10 s, or the connection to it ended
 };
 
 // Area flags.
@@ -113,6 +116,25 @@ struct LayoutRequest {
 // of the area shown, then asks the policy like a drop.
 using ItemPolicyFn = D2RL::Inventory::ItemPolicyDecision(__cdecl*)(AreaHandle area, const D2RL::Inventory::ItemPolicyRequest* request, void* userData) noexcept;
 
+// Where this game's items are made and moved (requests).
+enum class ItemsWhere : uint32_t {
+	Unknown      = 0, // not known yet (the host is still reaching the game's host, a few seconds after a game starts): requests answer Busy
+	Local        = 1, // single player, or this game hosts: this game
+	Remote       = 2, // joined another player's TCP/IP game: the hosting game's host
+	RemoteNoHost = 3, // joined a game whose hosting player has no Player Page Host, or one without requests (1.0.0, 1.0.1): requests answer Unsupported
+};
+
+struct RequestAnswer {
+	uint32_t       structSize;  // sizeof(RequestAnswer)
+	Result         result;      // Success, or what failed (Failed: D2RLoader refused, itemResult says why; the hosting game's log has the rest)
+	uint32_t       itemResult;  // D2RLoader's Items::Result when the call reached it
+	uint32_t       runtimeId;   // the item made or moved
+	const uint8_t* bytes;       // requestSaveItem: the save bytes, valid during the call only
+	uint32_t       byteCount;
+	uint32_t       reserved;
+};
+using RequestDone = void(__cdecl*)(void* userData, const RequestAnswer* answer) noexcept;
+
 enum class MoveKind : uint32_t {
 	CursorToArea = 1, // x, y: the item's new top-left cell, area-relative
 	AreaToCursor = 2, // x, y: any cell of the item, area-relative
@@ -142,13 +164,51 @@ struct Service {
 	Result (__cdecl* moveItems)(AreaHandle area, const D2RL::Items::ExistingItemTransaction* transaction, D2RL::Items::ExistingItemTransactionResult* result, uint32_t* itemResult) noexcept;
 	// Destroys an item of the area (its top-left cell inside), found by runtime id.
 	Result (__cdecl* destroyItem)(AreaHandle area, uint32_t runtimeId, D2RL::Items::SocketedItemPolicy socketed, uint32_t* itemResult) noexcept;
+
+	// ---- item requests (host 1.0.2; check serviceSize, see HasRequests) ----
+	// In a TCP/IP game only the hosting game can change items: a joined
+	// player's game can't run game-thread callbacks (runOnGameThread answers
+	// Unavailable) nor make or move items. These requests are done by the
+	// game that runs the items: this game when it is single player or hosts,
+	// the hosting game's host for a joined player (it needs only Player Page
+	// Host, not the client plugin). They work the same in both cases, so a
+	// client can use them always, or only when itemsWhere() says Remote.
+	// Call from the UI thread. `done` is called once, later, on the UI thread
+	// (never inside the request call), unless the request call returns an
+	// error. Runtime ids are the game's own (the same on every PC of a game);
+	// a made or moved item can show on a joined player's PC a moment after
+	// `done`. CustomPage destinations: Exact, area-relative x, y.
+	ItemsWhere (__cdecl* itemsWhere)() noexcept;
+	// Makes an item from save bytes (an item's save, socketed items following
+	// it, as requestSaveItem gives) into `spec->destination`. Only spec's code,
+	// quality, qualityRecordId, flags, itemLevel and stateFlags matter (they
+	// pass D2RLoader's checks; the item made is the decoded one). answer:
+	// runtimeId of the item made.
+	Result (__cdecl* requestCreateFromSave)(AreaHandle area, const D2RL::Items::ItemCreateSpec* spec, const uint8_t* bytes, uint32_t byteCount, RequestDone done, void* userData) noexcept;
+	// The save bytes of one of the player's items (anywhere: page, inventory,
+	// stash, cursor, body), with its socketed items. answer: bytes, byteCount.
+	Result (__cdecl* requestSaveItem)(AreaHandle area, uint32_t runtimeId, RequestDone done, void* userData) noexcept;
+	// Moves one of the player's items: CustomPage (area-relative, Exact),
+	// Inventory, PersonalStash or SharedStash (Automatic or Exact), Cursor. The page's item policy
+	// is not asked. answer: runtimeId.
+	Result (__cdecl* requestMoveItem)(AreaHandle area, uint32_t runtimeId, const D2RL::Items::ItemDestination* destination, RequestDone done, void* userData) noexcept;
+	// Destroys an item of the area (its top-left cell inside).
+	Result (__cdecl* requestDestroyItem)(AreaHandle area, uint32_t runtimeId, D2RL::Items::SocketedItemPolicy socketed, RequestDone done, void* userData) noexcept;
 };
 
-// Acquires the host's service. Returns D2RL's result (NotFound: host not
-// loaded yet, or not installed).
+// The 1.0.0 / 1.0.1 table ends at destroyItem.
+inline constexpr uint32_t BaseServiceSize = static_cast<uint32_t>(offsetof(Service, itemsWhere));
+
+// Acquires the host's service (a 1.0.1 host too). Returns D2RL's result
+// (NotFound: host not loaded yet, or not installed).
 inline auto Acquire(const D2RL::PluginContext* context, const D2RL::PluginCommunicationService* comm, D2RL::PluginCommunication::ServiceLease<Service>* lease) noexcept
     -> D2RL::PluginCommunication::Result {
-	return D2RL::PluginCommunication::Acquire(context, comm, ProviderId, ServiceName, ServiceVersion, sizeof(Service), lease);
+	return D2RL::PluginCommunication::Acquire(context, comm, ProviderId, ServiceName, ServiceVersion, BaseServiceSize, lease);
+}
+
+// The host has the item requests (1.0.2 or later).
+inline bool HasRequests(const D2RL::PluginCommunication::ServiceLease<Service>& lease) noexcept {
+	return lease && lease.Size() >= sizeof(Service) && lease->serviceSize >= sizeof(Service);
 }
 
 } // namespace PageHost
