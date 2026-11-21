@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.119";
+constexpr const char* PluginVersion = "0.0.120";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -5328,6 +5328,41 @@ void* HookMazeAdd(void* room, int direction, int merge) noexcept {
 // stairs room tries the 4 entries of its group (each has its own direction) at the corridor's ends before going anywhere.
 constexpr std::uint64_t ScanSpecialRva = 0x3EB850, ScanPrevCall = 0x3E6AC3, ScanNextCall = 0x3E6AED, ScanColdcrowCall = 0x3E6B14;
 using ScanSpecialFn = void (*)(void* level, const std::uint8_t* entry, int* rand) noexcept;
+// The River of Flame's own rooms (D2R+0x3EC820 (mode, level), called at D2R+0x3E75DD, D2MOO DRLGMAZE_PlaceAct4Lava): the
+// stairs room up to the City (Lava Warp N, preset 852), the bridge to the Chaos Sanctuary and the Hellforge (ScanReplaceSpecial
+// with a Forge W/E entry, table D2R+0x1D0FAE0, 16 bytes each), then the rooms moved next to the sanctuary. The game skips all of it
+// in act 5 (drlg +0x870 == 4), where our zones are: ours makes the stairs room at the corridor's start (south of its first
+// room, like the game) and the Hellforge at its end, no bridge, no sanctuary, and keeps the level where the zone put it.
+constexpr std::uint64_t LavaCall = 0x3E75DD, LavaRva = 0x3EC820, ForgeIdsRva = 0x1D0FAE0;
+constexpr int           LavaWarpPreset = 0x354, ForgeW = 0x355, ForgeE = 0x356;
+using LavaFn = void (*)(std::uint8_t mode, void* level) noexcept;
+void HookLava(std::uint8_t mode, void* level) noexcept {
+	if (BuildingKind != KindDungeon || !level) return At<LavaFn>(LavaRva)(mode, level);
+	auto* first = Field<std::uint8_t*>(level, 0x10);
+	for (int guard = 0; first && Field<std::uint8_t*>(first, 0x48) && guard < 4096; ++guard) first = Field<std::uint8_t*>(first, 0x48); // the oldest
+	std::uint8_t* warp = nullptr;
+	for (auto* from : { first, Field<std::uint8_t*>(level, 0x10) }) {
+		if (!from || warp) continue;
+		for (int dir : { 3, 0, 2, 1 })
+			if ((warp = static_cast<std::uint8_t*>(At<MazeAddFn>(MazeAddRva)(from, dir, 0)))) {
+				At<void (*)(void*, int) noexcept>(MazePickRva)(from, 1);
+				break;
+			}
+	}
+	if (auto* maze = warp ? Field<std::uint8_t*>(warp, 0x40) : nullptr) {
+		SetField<std::uint64_t>(maze, 0x10, Field<std::uint64_t>(maze, 0x10) | 2);
+		SetField<std::int32_t>(maze, 0, LavaWarpPreset), SetField<std::int32_t>(maze, 4, -1);
+	}
+	std::uint32_t pick = 0;
+	if (void* seed = static_cast<std::uint8_t*>(level) + 0x1E4) pick = Field<std::uint32_t>(seed, 0) & 1;
+	At<ScanSpecialFn>(ScanSpecialRva)(level, reinterpret_cast<const std::uint8_t*>(Base + ForgeIdsRva + pick * 16), nullptr);
+	int forge = 0, rooms = 0;
+	for (auto* r = Field<std::uint8_t*>(level, 0x10); r && rooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++rooms)
+		if (auto* maze = Field<std::uint8_t*>(r, 0x40); maze && (Field<std::int32_t>(maze, 0) == ForgeW || Field<std::int32_t>(maze, 0) == ForgeE)) ++forge;
+	Log(!warp || !forge, "zones: River of Flame: stairs room %s, Hellforge %s (%d rooms)", warp ? "made" : "NOT made", forge ? "made" : "NOT made", rooms);
+	At<void (*)(void*) noexcept>(0x327880)(level); // the rooms' coordinates, as the game does for every other maze
+}
+
 int FixedRooms(void* level) noexcept {
 	int n = 0, guard = 0;
 	for (auto* r = Field<std::uint8_t*>(level, 0x10); r && guard < 4096; r = Field<std::uint8_t*>(r, 0x48), ++guard) n += MazeFixed(r);
@@ -5766,6 +5801,8 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 		if (!PatchCall(MazeAddCall, MazeAddRva, reinterpret_cast<const void*>(&HookMazeAdd))) Log(true, "zones: linear dungeons off (D2R+0x%llX)", static_cast<unsigned long long>(MazeAddCall));
 		for (const std::uint64_t site : MazeAddSites)
 			if (!PatchCall(site, MazeAddRva, reinterpret_cast<const void*>(&HookMazeAdd))) Log(true, "zones: dungeon room add at D2R+0x%llX not linear", static_cast<unsigned long long>(site));
+		if (!PatchCall(LavaCall, LavaRva, reinterpret_cast<const void*>(&HookLava)))
+			Log(true, "zones: could not patch D2R+0x%llX: River of Flame zones get no stairs", static_cast<unsigned long long>(LavaCall));
 		if (!PatchCall(ScanPrevCall, ScanSpecialRva, reinterpret_cast<const void*>(&HookScanSpecial<ScanPrevCall>)) ||
 		    !PatchCall(ScanNextCall, ScanSpecialRva, reinterpret_cast<const void*>(&HookScanSpecial<ScanNextCall>)) ||
 		    !PatchCall(ScanColdcrowCall, ScanSpecialRva, reinterpret_cast<const void*>(&HookScanSpecial<ScanColdcrowCall>)))
