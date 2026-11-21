@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.120";
+constexpr const char* PluginVersion = "0.0.121";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -2643,7 +2643,11 @@ constexpr std::uint64_t NpcMenuBuildRva = 0x1147A0, UiOpenRva = 0xCD7C0, NpcCanc
 constexpr std::uint64_t MenuTextCall = 0x114CDC, StringByIndexRva = 0x3E2B730, NpcPacketCall = 0x10E2AD, SendPacket5Rva = 0xEC6E0;
 constexpr std::size_t   NpcMenuRow = 0x48;
 constexpr std::uint32_t RoranMenuClass = 534; // act5pow
-constexpr std::uint16_t TextPortal = 0xF7A0, TextRules = 0xF7A1, TextSuperior = 0xF7A2;
+constexpr std::uint16_t TextPortal = 0xF7A0, TextRules = 0xF7A1, TextSuperior = 0xF7A2, TextAct = 0xF7A3;
+// The act of the next zone (0.0.121), picked on Roran's menu: 0 random, else ZonePairs[choice - 1].
+std::atomic<int>      ZoneActChoice { 0 };
+constexpr const char* ZoneActTexts[6] { "Act: random", "Act 1: Cold Plains and Cave", "Act 2: Rocky Waste and Stony Tomb", "Act 3: Upper Kurast and Sewers",
+	                                    "Act 4: City of the Damned and River of Flame", "Act 5: Frozen Tundra and Glacial Trail" };
 std::atomic<std::uint32_t> RoranUnitId { 0 }, RoranTalkId { 0 };
 bool                       MenuHooked = false;
 
@@ -2653,6 +2657,7 @@ using SendPacket5Fn  = void (*)(std::uint8_t command, std::uint32_t value) noexc
 const char* HookMenuText(std::uint32_t index) noexcept {
 	if (index == TextPortal) return ZonePortalOpen.load() ? "Close the portal" : ZoneUnloading.load() ? "Closing previous zone" : "Open a portal to a terror zone";
 	if (index == TextRules) return "Rules and offerings";
+	if (index == TextAct) return ZoneActTexts[ZoneActChoice.load() % 6];
 	if (index == TextSuperior) return "Open a superior terror zone (5 Worldstone Shards)";
 	return At<const char* (*)(std::uint32_t) noexcept>(StringByIndexRva)(index);
 }
@@ -2678,6 +2683,13 @@ bool __cdecl RoranSuperior(std::uint8_t a) noexcept {
 	return result;
 }
 
+// The act line: the next act, the menu stays up (RefreshRoranMenu builds it again with the new text).
+bool __cdecl RoranAct(std::uint8_t) noexcept {
+	ZoneActChoice = (ZoneActChoice.load() + 1) % 6;
+	Log(false, "Roran: next zone %s", ZoneActTexts[ZoneActChoice.load()]);
+	return true;
+}
+
 bool __cdecl RoranRules(std::uint8_t a) noexcept {
 	const bool result = At<MenuCallbackFn>(NpcCancelRva)(a);
 	Gui::Commands::Post("a.toggle");
@@ -2692,11 +2704,11 @@ void SyncRoranMenu() noexcept {
 	const bool open = ZonePortalOpen.load() || ZoneUnloading.load(); // both: first line + Rules, no superior line
 	if (shown == static_cast<int>(open)) return;
 	shown = open;
-	const std::uint16_t texts[3] { TextPortal, open ? TextRules : TextSuperior, open ? std::uint16_t(0) : TextRules };
-	const void* calls[3] { reinterpret_cast<const void*>(&RoranPortal), open ? reinterpret_cast<const void*>(&RoranRules) : reinterpret_cast<const void*>(&RoranSuperior),
-		                   open ? nullptr : reinterpret_cast<const void*>(&RoranRules) };
-	for (int i = 0; i < 3; ++i) SetField<std::uint16_t>(RoranRow, 8 + i * 2, texts[i]), SetField<const void*>(RoranRow, 0x18 + i * 8, calls[i]);
-	SetField<std::uint32_t>(RoranRow, 4, open ? 3 : 4); // lines + Cancel
+	const std::uint16_t texts[4] { TextPortal, open ? TextRules : TextAct, open ? std::uint16_t(0) : TextSuperior, open ? std::uint16_t(0) : TextRules };
+	const void* calls[4] { reinterpret_cast<const void*>(&RoranPortal), open ? reinterpret_cast<const void*>(&RoranRules) : reinterpret_cast<const void*>(&RoranAct),
+		                   open ? nullptr : reinterpret_cast<const void*>(&RoranSuperior), open ? nullptr : reinterpret_cast<const void*>(&RoranRules) };
+	for (int i = 0; i < 4; ++i) SetField<std::uint16_t>(RoranRow, 8 + i * 2, texts[i]), SetField<const void*>(RoranRow, 0x18 + i * 8, calls[i]);
+	SetField<std::uint32_t>(RoranRow, 4, open ? 3 : 5); // lines + Cancel
 }
 
 // 0.0.116: Roran's menu, while it is up, follows the zone's state (portal open, closing previous zone, a zone can open):
@@ -2708,7 +2720,7 @@ void RefreshRoranMenu() noexcept {
 	auto*      menu  = reinterpret_cast<void**>(Base + NpcMenuRva);
 	const bool roran = *menu && Field<std::int16_t>(reinterpret_cast<void*>(Base + NpcClassRva), 0) == static_cast<std::int16_t>(RoranMenuClass) &&
 	                   Field<std::uint32_t>(reinterpret_cast<void*>(Base + NpcTalkingRva), 0);
-	const int  state = (ZonePortalOpen.load() ? 2 : 0) | (ZoneUnloading.load() ? 1 : 0);
+	const int  state = (ZonePortalOpen.load() ? 2 : 0) | (ZoneUnloading.load() ? 1 : 0) | ZoneActChoice.load() << 2;
 	if (!roran) return void(built = -1);
 	if (built < 0) return void(built = state);
 	if (built == state) return;
@@ -2743,12 +2755,14 @@ bool RoranMenuRow() noexcept {
 	std::uint8_t* row = fresh + count * NpcMenuRow;
 	std::memcpy(row, larzuk, NpcMenuRow);
 	SetField<std::int16_t>(row, 0, static_cast<std::int16_t>(RoranMenuClass));
-	SetField<std::uint32_t>(row, 4, 4); // 3 lines + Cancel
+	SetField<std::uint32_t>(row, 4, 5); // 4 lines + Cancel
 	for (int i = 0; i < 5; ++i) SetField<std::uint16_t>(row, 8 + i * 2, 0), SetField<const void*>(row, 0x18 + i * 8, nullptr);
-	SetField<std::uint16_t>(row, 8, TextPortal), SetField<std::uint16_t>(row, 10, TextSuperior), SetField<std::uint16_t>(row, 12, TextRules);
+	SetField<std::uint16_t>(row, 8, TextPortal), SetField<std::uint16_t>(row, 10, TextAct), SetField<std::uint16_t>(row, 12, TextSuperior);
+	SetField<std::uint16_t>(row, 14, TextRules);
 	SetField<const void*>(row, 0x18, reinterpret_cast<const void*>(&RoranPortal));
-	SetField<const void*>(row, 0x20, reinterpret_cast<const void*>(&RoranSuperior));
-	SetField<const void*>(row, 0x28, reinterpret_cast<const void*>(&RoranRules));
+	SetField<const void*>(row, 0x20, reinterpret_cast<const void*>(&RoranAct));
+	SetField<const void*>(row, 0x28, reinterpret_cast<const void*>(&RoranSuperior));
+	SetField<const void*>(row, 0x30, reinterpret_cast<const void*>(&RoranRules));
 	RoranRow = row;
 	SetField<std::uint8_t*>(vec, 0, fresh);
 	SetField<std::uint64_t>(vec, 0x10, count + 1);
@@ -3028,6 +3042,7 @@ struct ZonePair {
 // One pair per act (0.0.119): Cold Plains + Cave, Rocky Waste + Stony Tomb, Upper Kurast + Sewers, City of the Damned + River of
 // Flame, Frozen Tundra + Glacial Trail (in the game the trail leads to the tundra; here the tundra holds the trail's entrance).
 constexpr ZonePair ZonePairs[] { { 3, 9 }, { 41, 55 }, { 81, 92 }, { 106, 107 }, { 117, 115 } };
+constexpr int TombDungeon = 55; // Stony Tomb: entered by its down stairs room (HookTombPrev)
 constexpr int Kurast = 81; // act 3: its walls open at fixed spots (top middle, bottom right), so its zones run north to south
 std::atomic<int> KurastLow { 1 }; // drlg +0x864: Upper Kurast's bottom opening is one cell from the right edge when set, else the left
 constexpr int Harrogath = 109;
@@ -4154,9 +4169,10 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	std::uint64_t state = Field<std::uint64_t>(game, GameSeed) ^ (static_cast<std::uint64_t>(std::time(nullptr)) << 16) ^ static_cast<std::uint64_t>(id);
 	// A zone = an outdoor area (where the portal arrives) + its dungeon, one level; the dungeon's down stairs lead to Harrogath
 	// (through an empty stand-in level, the third slot).
-	// Test builds: the acts in turn, one per zone opened (random later).
-	const ZonePair pair = ZonePairs[static_cast<std::uint32_t>(g->zonesUsed / ZoneParts) % (sizeof(ZonePairs) / sizeof(ZonePairs[0]))];
-	Mix(state);
+	// The act picked on Roran's menu, else a random one.
+	constexpr int  pairs  = static_cast<int>(sizeof(ZonePairs) / sizeof(ZonePairs[0]));
+	const int      choice = ZoneActChoice.load();
+	const ZonePair pair   = ZonePairs[choice > 0 && choice <= pairs ? choice - 1 : static_cast<int>(Mix(state) % pairs)];
 	const int      tmpl = pair.outdoor, dungeon = pair.dungeon;
 	if (tmpl >= Banks[mode].count || dungeon >= Banks[mode].count || !MazeOf(Banks[mode], dungeon))
 		return SetPortalResult("TZ Plus zones: the level tables have no %d / %d to copy", tmpl, dungeon);
@@ -4183,11 +4199,14 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		const ZoneLink outdoorLinks[] { { dungeon, id + 1 } };
 		// The dungeon's down stairs lead to an empty stand-in level (a stairs tile must lead to a level that links back, else the
 		// client crashes reaching it, 0.0.55); a player arriving there is sent back to the outdoor area (SendStandInsToTown).
-		const ZoneLink dungeonLinks[] { { tmpl, id }, { deeper, id + 2 } };
+		// The Stony Tomb (0.0.121): its up stairs room has three openings (the game's only kind, a T), so the zone's way in is its
+		// down stairs room (one opening, HookTombPrev): the down stairs lead up to the outdoor area, and there's no way on.
+		const bool     nextEntry = dungeon == TombDungeon && deeper;
+		const ZoneLink dungeonLinks[] { { nextEntry ? deeper : tmpl, id }, { deeper, id + 2 } };
 		for (int bank = 1; bank <= 3; ++bank) {
 			std::uint64_t copy = state, copy1 = state, copy2 = state;
 			SetupZone(Banks[bank], id, tmpl, copy, 0, 0, false, outdoorLinks, 1, 0);
-			SetupZone(Banks[bank], id + 1, dungeon, copy1, 0, 0, false, dungeonLinks, deeper ? 2 : 1, tmpl);
+			SetupZone(Banks[bank], id + 1, dungeon, copy1, 0, 0, false, dungeonLinks, nextEntry ? 1 : deeper ? 2 : 1, nextEntry ? deeper : tmpl);
 			SetupZone(Banks[bank], id + 2, dungeon, copy2, id + 1, 0, true);
 			// The entry and exit areas: empty copies of the outdoor area; the outdoor area and they list each other as neighbours
 			// (LevelDefs Vis with Warp -1, like the act's own outdoor areas), which the game turns into passages (BuildZoneLevel).
@@ -5363,6 +5382,15 @@ void HookLava(std::uint8_t mode, void* level) noexcept {
 	At<void (*)(void*) noexcept>(0x327880)(level); // the rooms' coordinates, as the game does for every other maze
 }
 
+// The tomb's up stairs room (D2R+0x3EA0E0 (level), called at D2R+0x3E6DCE, D2MOO DRLGMAZE_PlaceAct2TombPrev): three rooms
+// around the first one, which becomes a three-way stairs room. Not in our tombs: they are entered by their down stairs room
+// (placed by the tomb's specials, D2R+0x3EB610, at an end of the corridor).
+constexpr std::uint64_t TombPrevCall = 0x3E6DCE, TombPrevRva = 0x3EA0E0;
+void HookTombPrev(void* level) noexcept {
+	if (BuildingKind == KindDungeon && level) return Log(false, "zones: tomb: no three-way up stairs room, the zone comes in by the down stairs");
+	At<void (*)(void*) noexcept>(TombPrevRva)(level);
+}
+
 int FixedRooms(void* level) noexcept {
 	int n = 0, guard = 0;
 	for (auto* r = Field<std::uint8_t*>(level, 0x10); r && guard < 4096; r = Field<std::uint8_t*>(r, 0x48), ++guard) n += MazeFixed(r);
@@ -5801,6 +5829,8 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 		if (!PatchCall(MazeAddCall, MazeAddRva, reinterpret_cast<const void*>(&HookMazeAdd))) Log(true, "zones: linear dungeons off (D2R+0x%llX)", static_cast<unsigned long long>(MazeAddCall));
 		for (const std::uint64_t site : MazeAddSites)
 			if (!PatchCall(site, MazeAddRva, reinterpret_cast<const void*>(&HookMazeAdd))) Log(true, "zones: dungeon room add at D2R+0x%llX not linear", static_cast<unsigned long long>(site));
+		if (!PatchCall(TombPrevCall, TombPrevRva, reinterpret_cast<const void*>(&HookTombPrev)))
+			Log(true, "zones: could not patch D2R+0x%llX: tomb zones keep their three-way entry", static_cast<unsigned long long>(TombPrevCall));
 		if (!PatchCall(LavaCall, LavaRva, reinterpret_cast<const void*>(&HookLava)))
 			Log(true, "zones: could not patch D2R+0x%llX: River of Flame zones get no stairs", static_cast<unsigned long long>(LavaCall));
 		if (!PatchCall(ScanPrevCall, ScanSpecialRva, reinterpret_cast<const void*>(&HookScanSpecial<ScanPrevCall>)) ||
