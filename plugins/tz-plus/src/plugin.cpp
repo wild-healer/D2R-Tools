@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.116";
+constexpr const char* PluginVersion = "0.0.117";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -3936,15 +3936,23 @@ void RecycleClientRecords() noexcept {
 	const int base = ZoneBase.load(std::memory_order_relaxed);
 	const int index = At<LocalIndexFn>(0x8B2D0)();
 	if (base <= 0 || index < 0 || index >= 8) return;
-	void* drlg = DrlgOfUnit(At<PlayerByIndexFn>(0x9A480)(index));
+	void* me   = At<PlayerByIndexFn>(0x9A480)(index);
+	void* drlg = DrlgOfUnit(me);
 	if (!drlg) return;
+	void*     myRoom  = me ? At<UnitRoomFn>(0x34B440)(me) : nullptr;
+	auto*     myRoom2 = myRoom ? Field<std::uint8_t*>(myRoom, 0x18) : nullptr;
+	auto*     myLevel = myRoom2 ? Field<std::uint8_t*>(myRoom2, 0x90) : nullptr;
+	const int myId    = myLevel ? Field<std::int32_t>(myLevel, 0x1F8) : 0;
 	std::uint32_t held = 0;
 	for (int slot = 0; slot < ZoneSlots / ZoneParts; ++slot) {
 		bool      busy  = false;
 		const int first = base + slot * ZoneParts;
 		if (!ZoneRecords(drlg, first, ZoneParts, busy)) continue;
 		const int mode = DrlgModeOf(drlg);
-		if (busy || ZonePortalOpen.load() || mode < 0) { // an open zone stays (its records are being made or used)
+		// 0.0.117: the rooms the map reveal loaded (0.0.116) stay loaded on the client (closing hung on them): once the zone is
+		// closed and the player is out of it, its records go even with rooms in them (FreeLevel keep 0 frees the rooms too).
+		const bool away = myId < first || myId >= first + ZoneParts;
+		if ((busy && !away) || ZonePortalOpen.load() || mode < 0) { // an open zone stays (its records are being made or used)
 			held |= 1u << slot;
 			continue;
 		}
