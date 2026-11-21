@@ -64,7 +64,7 @@
 namespace {
 
 constexpr const char* PluginId      = "tz-plus";
-constexpr const char* PluginVersion = "0.0.118";
+constexpr const char* PluginVersion = "0.0.119";
 
 const D2RL::PluginInfo Info {
 	.infoSize    = D2RL::PluginInfoSize,
@@ -3025,7 +3025,11 @@ constexpr int ZoneTemplates[] { 9, 11, 12, 18, 21, 29, 34, 55, 56, 58, 62, 65, 8
 struct ZonePair {
 	int outdoor, dungeon;
 };
-constexpr ZonePair ZonePairs[] { { 3, 9 } }; // Cold Plains + Cave (first test pair)
+// One pair per act (0.0.119): Cold Plains + Cave, Rocky Waste + Stony Tomb, Upper Kurast + Sewers, City of the Damned + River of
+// Flame, Frozen Tundra + Glacial Trail (in the game the trail leads to the tundra; here the tundra holds the trail's entrance).
+constexpr ZonePair ZonePairs[] { { 3, 9 }, { 41, 55 }, { 81, 92 }, { 106, 107 }, { 117, 115 } };
+constexpr int Kurast = 81; // act 3: its walls open at fixed spots (top middle, bottom right), so its zones run north to south
+std::atomic<int> KurastLow { 1 }; // drlg +0x864: Upper Kurast's bottom opening is one cell from the right edge when set, else the left
 constexpr int Harrogath = 109;
 
 struct ZoneBank {
@@ -4150,7 +4154,9 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 	std::uint64_t state = Field<std::uint64_t>(game, GameSeed) ^ (static_cast<std::uint64_t>(std::time(nullptr)) << 16) ^ static_cast<std::uint64_t>(id);
 	// A zone = an outdoor area (where the portal arrives) + its dungeon, one level; the dungeon's down stairs lead to Harrogath
 	// (through an empty stand-in level, the third slot).
-	const ZonePair pair = ZonePairs[Mix(state) % (sizeof(ZonePairs) / sizeof(ZonePairs[0]))];
+	// Test builds: the acts in turn, one per zone opened (random later).
+	const ZonePair pair = ZonePairs[static_cast<std::uint32_t>(g->zonesUsed / ZoneParts) % (sizeof(ZonePairs) / sizeof(ZonePairs[0]))];
+	Mix(state);
 	const int      tmpl = pair.outdoor, dungeon = pair.dungeon;
 	if (tmpl >= Banks[mode].count || dungeon >= Banks[mode].count || !MazeOf(Banks[mode], dungeon))
 		return SetPortalResult("TZ Plus zones: the level tables have no %d / %d to copy", tmpl, dungeon);
@@ -4195,7 +4201,12 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 				};
 				for (const int small : { id + KindEntry, id + KindExit })
 					for (int i = 0; i < 8; ++i) neighbour(small, i, 0);
-				neighbour(id, 0, id + KindEntry), neighbour(id, 1, id + KindExit);
+				// The outdoor area's first two free Vis (its own stairs keep theirs: Upper Kurast's sewers are Vis 0/1).
+				int freeVis[2] { -1, -1 };
+				for (int i = 0, k = 0; i < 8 && k < 2; ++i)
+					if (Field<std::int32_t>(defs + id * DefRow, DefVis + i * 4) <= 0) freeVis[k++] = i;
+				if (freeVis[1] < 0) freeVis[0] = 6, freeVis[1] = 7;
+				neighbour(id, freeVis[0], id + KindEntry), neighbour(id, freeVis[1], id + KindExit);
 				neighbour(id + KindEntry, 0, id), neighbour(id + KindExit, 0, id);
 			}
 			// Elite packs (Levels MonUMin/MonUMax, a byte per difficulty at +48/+51): x1.5 outdoors, x2 in the dungeon.
@@ -4276,6 +4287,7 @@ void OpenZonePortal(std::uint8_t* game) noexcept {
 		std::uint64_t layout = Field<std::uint64_t>(game, GameSeed) ^ GetTickCount64() ^ (static_cast<std::uint64_t>(id) << 40);
 		for (int i = 0; i < ZoneParts; ++i) ZoneSeed[id + i - base] = static_cast<std::uint32_t>(Mix(layout)) | 1;
 		ZoneDir[(id - base) / ZoneParts] = static_cast<int>(Mix(layout) & 3);
+		if (tmpl == Kurast) ZoneDir[(id - base) / ZoneParts] = 2; // its openings: north (entry) and south (exit)
 		Log(false, "zones: zone at level %d runs %s", id, DirNames[ZoneDir[(id - base) / ZoneParts].load()]);
 	}
 	for (const int level : { id, id + KindDungeon }) RebuildRegion(game, mode, level, state);
@@ -4783,9 +4795,13 @@ void ZoneHerald(std::uint8_t* game) noexcept {
 			auto* level = room2 ? Field<std::uint8_t*>(room2, 0x90) : nullptr;
 			if (!level) return g->heraldDone = true, Log(true, "zones: herald: the dungeon level was not found");
 			long long best  = -1;
-			int       rooms = 0;
+			int       rooms = 0, stairs = 0;
+			for (auto* r = Field<std::uint8_t*>(level, 0x10); r && stairs < 4096; r = Field<std::uint8_t*>(r, 0x48))
+				if (Field<std::uint32_t>(r, 0x50) & 0xFF0) ++stairs;
+			// No down stairs (River of Flame: its way on is an open passage, gone here): the farthest room of all.
+			const bool anyRoom = stairs < 2;
 			for (auto* r = Field<std::uint8_t*>(level, 0x10); r && rooms < 4096; r = Field<std::uint8_t*>(r, 0x48), ++rooms) {
-				if (!(Field<std::uint32_t>(r, 0x50) & 0xFF0)) continue; // stairs rooms only
+				if (!anyRoom && !(Field<std::uint32_t>(r, 0x50) & 0xFF0)) continue; // stairs rooms only
 				const int       cx = (Field<std::int32_t>(r, 0x60) + Field<std::int32_t>(r, 0x68) / 2) * 5, cy = (Field<std::int32_t>(r, 0x64) + Field<std::int32_t>(r, 0x6C) / 2) * 5;
 				const long long dx = cx - at.x, dy = cy - at.y;
 				if (dx * dx + dy * dy > best) best = dx * dx + dy * dy, g->heraldRoom = r, g->heraldX = cx, g->heraldY = cy;
@@ -5088,6 +5104,13 @@ std::atomic<int> ObjectBlocked { 0 };
 void* HookSpawnUnit(int type, int cls, int x, int y, void* game, void* room, std::uint64_t flag, std::uint64_t mode, std::uint64_t a9, void* a10) noexcept {
 	if (type == 2 && room && !OwnObject && cls != 59 && cls != 60 && ZoneBase.load(std::memory_order_relaxed) > 0) {
 		const int level = At<RoomLevelFn>(0x2EFC10)(room), base = ZoneBase.load(std::memory_order_relaxed);
+		// No waypoint in a zone (City of the Damned, River of Flame, Frozen Tundra and Glacial Trail have one: objects with
+		// OperateFn 23 in Objects.txt).
+		constexpr int Waypoints[] { 119, 145, 156, 157, 237, 238, 288, 323, 324, 398, 402, 429, 494, 496, 511, 539 };
+		if (level >= base && level < base + ZoneSlots && std::find(std::begin(Waypoints), std::end(Waypoints), cls) != std::end(Waypoints)) {
+			if (ObjectBlocked.fetch_add(1, std::memory_order_relaxed) < 20) Log(false, "zones: no waypoint %d in level %d", cls, level);
+			return nullptr;
+		}
 		if (level >= base && level < base + ZoneSlots && ((level - base) % ZoneParts == KindEntry || (level - base) % ZoneParts == KindExit)) {
 			if (ObjectBlocked.fetch_add(1, std::memory_order_relaxed) < 20) Log(false, "zones: no object %d in level %d (small area)", cls, level);
 			return nullptr;
@@ -5119,7 +5142,13 @@ void ZoneBox(std::uint8_t mode, int id, int& x, int& y, int& w, int& h) noexcept
 		const bool start = kind == KindEntry;
 		if (dir == 0) x = start ? west : east, y = sy;
 		else if (dir == 1) x = start ? east : west, y = sy;
-		else if (dir == 2) x = sx, y = start ? north : south;
+		else if (dir == 2) {
+			x = sx, y = start ? north : south;
+			// Upper Kurast's bottom opening (D2R+0x3FCD20): the second cell from the right edge (or the left one); the exit area's
+			// own top opening is its middle cell.
+			if (!start && ZoneTemplate[first].load(std::memory_order_relaxed) == Kurast)
+				x = mx + (KurastLow.load(std::memory_order_relaxed) ? (mw / 8 - 2) - 1 : 0) * 8; // its middle cell under main cell w-2 or 1
+		}
 		else x = sx, y = start ? south : north;
 	} else x = mx, y = my, w = mw, h = mh;
 }
@@ -5185,6 +5214,7 @@ std::uint64_t BuildZoneLevel(std::uint8_t mode, void* level, MazeBuildFn build, 
 	if (base <= 0 || id < base || id >= base + ZoneSlots) return build(mode, level);
 	const int slot = id - base, tmpl = ZoneTemplate[slot].load();
 	if (const std::uint32_t seed = ZoneSeed[slot].load()) At<SeedFn>(SeedInitRva)(static_cast<std::uint8_t*>(level) + 0x1E4, seed);
+	if (void* drlg = Field<void*>(level, 0x1C8)) KurastLow = Field<std::int32_t>(drlg, 0x864) != 0;
 	// Tiles, past act 5's own levels (y up to ~3060); subtiles (x5) must stay under 32768: x 3300-5480, y 3200-3890.
 	{
 		int x = 0, y = 0, w = 0, h = 0;
@@ -5350,6 +5380,46 @@ std::uint64_t HookMazeBuild(std::uint8_t mode, void* level) noexcept { return Re
 
 // Outdoor areas (D2R+0x32720E: call 0x3E2B5CE (mode, level), a slot the loader's core fills): our outdoor copies the same way.
 std::uint64_t HookOutdoorBuild(std::uint8_t mode, void* level) noexcept { return RememberDrlgMode(mode, level), BuildZoneLevel(mode, level, &OutdoorBuild, "outdoor"); }
+
+// The act 2-5 outdoor builders (the generic outdoor build calls one per act, D2R+0x3EE4A3..0x3EE4CD; act 1's is traced below).
+// The entry and exit areas of acts 2 and 4: the act's base steps alone (D2R+0x3EFA20 the level's edges, 0x3EFAF0 the passages
+// to the neighbours) and its border pieces on all four sides (D2R+0x3EE010 (mode, level, side, preset)): no dungeon entrance,
+// no landmark. Their outdoor areas: the act's own build, plus the border on side 0 (the act leaves it open toward its town).
+// Act 3 (Upper Kurast, D2R+0x3FCD20 walls with fixed openings) and act 5 (cliffs all around, D2R+0x3FF0E0 passages): the act's
+// own build for every part.
+struct ActBuild {
+	std::uint64_t site, target;
+	std::int32_t  border; // the act's border preset, 0 = the act's own build for every part
+	int           act;
+};
+constexpr ActBuild ActBuilds[] { { 0x3EE4CD, 0x3FBD10, 0x16C, 2 }, { 0x3EE4BF, 0x3FCBE0, 0, 3 }, { 0x3EE4B1, 0x3FDC00, 0x31F, 4 }, { 0x3EE4A3, 0x3FE2E0, 0, 5 } };
+using BorderSideFn = std::uint64_t (*)(std::uint8_t mode, void* level, int side, int preset) noexcept;
+template <int N>
+std::uint64_t HookActBuild(std::uint8_t mode, void* level) noexcept {
+	const ActBuild& a = ActBuilds[N];
+	if (BuildingKind < 0) return At<MazeBuildFn>(a.target)(mode, level);
+	const bool small = BuildingKind == KindEntry || BuildingKind == KindExit;
+	Log(false, "zones: act %d outdoor build of a zone %s (as level %d, mode %d, drlg +0x864 %d) start", a.act, small ? "entry/exit area" : "outdoor area",
+	    Field<std::int32_t>(level, 0x1F8), mode, KurastLow.load() ? 1 : 0);
+	std::uint64_t result = 0;
+	if (a.border && small) {
+		At<MazeBuildFn>(0x3EFA20)(mode, level);
+		result = At<MazeBuildFn>(0x3EFAF0)(mode, level);
+		for (int side = 0; side < 4; ++side) At<BorderSideFn>(0x3EE010)(mode, level, side, a.border);
+	} else {
+		result = At<MazeBuildFn>(a.target)(mode, level);
+		if (a.border) At<BorderSideFn>(0x3EE010)(mode, level, 0, a.border);
+	}
+	Log(false, "zones: act %d outdoor build done", a.act);
+	return result;
+}
+template <int... N>
+void InstallActBuilds(std::integer_sequence<int, N...>) noexcept {
+	const void* hooks[] { reinterpret_cast<const void*>(&HookActBuild<N>)... };
+	for (int i = 0; i < static_cast<int>(sizeof...(N)); ++i)
+		if (!PatchCall(ActBuilds[i].site, ActBuilds[i].target, hooks[i]))
+			Log(true, "zones: act %d zones can't be built, could not patch D2R+0x%llX", ActBuilds[i].act, static_cast<unsigned long long>(ActBuilds[i].site));
+}
 
 // Diagnosis (0.0.50): each step of the outdoor build logged while one of our outdoor levels builds, to find the one that crashes.
 struct TraceSite {
@@ -5656,6 +5726,7 @@ void StartZones(const D2RL::PluginContext* context) noexcept {
 		Log(true, "zones: could not patch D2R+0x%llX (border pieces)", static_cast<unsigned long long>(BorderPlaceCall));
 	if (!PatchCall(OutdoorBuildCall, OutdoorBuildRva, reinterpret_cast<const void*>(&HookOutdoorBuild)))
 		Log(true, "zones: outdoor zones can't be built, could not patch D2R+0x%llX", static_cast<unsigned long long>(OutdoorBuildCall));
+	InstallActBuilds(std::make_integer_sequence<int, 4>());
 	for (const std::uint64_t site : PresetSpawnCalls)
 		if (!PatchCall(site, PresetSpawnRva, reinterpret_cast<const void*>(&HookPresetSpawn)))
 			Log(true, "zones: could not patch D2R+0x%llX (preset monsters)", static_cast<unsigned long long>(site));
